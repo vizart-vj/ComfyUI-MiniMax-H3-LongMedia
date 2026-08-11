@@ -7,7 +7,7 @@ dependencies = []
 
 [project.urls]
 Repository = "https://github.com/vizart-vj/ComfyUI-MiniMax-H3-LongMedia"
-Documentation = "https://github.com/vizart-vj/ComfyUI-MiniMax-H3-LongMedia#readme"
+Documentation = "https://github.com/vizart-vj/ComfyUI-MiniMax-H3-LongMedia/#readme"
 "Bug Tracker" = "https://github.com/vizart-vj/ComfyUI-MiniMax-H3-LongMedia/issues"
 
 [tool.comfy]
