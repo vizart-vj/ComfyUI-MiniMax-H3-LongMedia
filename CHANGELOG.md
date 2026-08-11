@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.2.45
+
+- Fixed Long Media Setup on current ComfyUI builds where `CLIP.encode()` no longer accepts the legacy `control` keyword.
+- Prompt encoding now uses ComfyUI's canonical `encode_from_tokens_scheduled()` API with legacy fallbacks.
+- Clarified video/audio reference inputs: `video_N` carries frames only; extracted source audio should be connected separately to the corresponding `audio_N`.
+
 ## Project rename
 
 - Public repository/package name: `ComfyUI-MiniMax-H3-LongMedia`.

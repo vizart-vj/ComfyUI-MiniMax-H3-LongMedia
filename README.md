@@ -146,3 +146,7 @@ The embedded code is adapted for this MiniMax H3 integration and does not requir
 ## Status
 
 `0.2.44` is intentionally treated as the **SAFE baseline**. Future performance-oriented changes should preserve this memory-safe path rather than replacing it.
+
+## Video reference audio
+
+`video_1` / `video_2` / `video_3` are **IMAGE frame batches only**; ComfyUI does not carry an audio stream inside an `IMAGE` connection. If a reference video has audio that you want LongMedia to use, extract/load that audio separately and connect it to the matching `audio_1` / `audio_2` / `audio_3` input. For the primary video-to-video path, `video_1` and `audio_1` are treated as the matching source pair.

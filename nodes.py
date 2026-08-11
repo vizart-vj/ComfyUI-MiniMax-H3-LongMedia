@@ -2613,9 +2613,27 @@ def _clone_guider_with_segment_audio(guider, plan, segment_index):
 
 
 def _encode_prompt(clip, prompt):
-    """Encode a text prompt into CONDITIONING."""
+    """Encode a text prompt into CONDITIONING across supported ComfyUI CLIP APIs."""
     tokens = clip.tokenize(prompt)
-    return clip.encode(tokens, control=None)
+
+    # Current ComfyUI's canonical CONDITIONING path.  This keeps hook/LoRA
+    # schedules attached to the conditioning and avoids relying on the old
+    # MiniMax-era CLIP.encode(..., control=None) signature, which was removed.
+    scheduled = getattr(clip, "encode_from_tokens_scheduled", None)
+    if callable(scheduled):
+        return scheduled(tokens)
+
+    # Compatibility fallback for older ComfyUI builds that exposed the
+    # MiniMax-specific control keyword on CLIP.encode().
+    try:
+        return clip.encode(tokens, control=None)
+    except TypeError as exc:
+        if "control" not in str(exc):
+            raise
+
+    # Last-resort compatibility for CLIP implementations where encode() takes
+    # raw text rather than pre-tokenized input.
+    return clip.encode(prompt)
 
 
 class MiniMaxH3LatentLabVideoEncode:
@@ -3242,12 +3260,12 @@ class MiniMaxH3LatentLabLongMediaSetup:
                 'image_7': ('IMAGE', {'lazy': True}),
                 'image_8': ('IMAGE', {'lazy': True}),
                 'image_9': ('IMAGE', {'lazy': True}),
-                'video_1': ('IMAGE', {'lazy': True}),
-                'video_2': ('IMAGE', {'lazy': True}),
-                'video_3': ('IMAGE', {'lazy': True}),
-                'audio_1': ('AUDIO', {'lazy': True}),
-                'audio_2': ('AUDIO', {'lazy': True}),
-                'audio_3': ('AUDIO', {'lazy': True}),
+                'video_1': ('IMAGE', {'lazy': True, 'tooltip': 'Video frames only (IMAGE batch). If the source video has audio, connect its extracted audio separately to audio_1.'}),
+                'video_2': ('IMAGE', {'lazy': True, 'tooltip': 'Video frames only (IMAGE batch). Connect matching extracted audio to audio_2 when needed.'}),
+                'video_3': ('IMAGE', {'lazy': True, 'tooltip': 'Video frames only (IMAGE batch). Connect matching extracted audio to audio_3 when needed.'}),
+                'audio_1': ('AUDIO', {'lazy': True, 'tooltip': 'Audio reference / source audio. For V2V with video_1, connect the audio extracted from that same video here.'}),
+                'audio_2': ('AUDIO', {'lazy': True, 'tooltip': 'Optional second audio reference; pair with video_2 by convention when they come from the same source.'}),
+                'audio_3': ('AUDIO', {'lazy': True, 'tooltip': 'Optional third audio reference; pair with video_3 by convention when they come from the same source.'}),
             },
         }
 
