@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.2.46
+
+### Fixed
+- Fixed video-reference setup crash: `Boolean value of Tensor with more than one value is ambiguous`.
+- Optional video/audio Tensor inputs are now tested explicitly with `is not None` instead of Python truth-value coercion.
+- Covers both `source_video` and `source_audio` assignments in the video-to-video plan path.
+
 ## v0.2.45
 
 - Fixed Long Media Setup on current ComfyUI builds where `CLIP.encode()` no longer accepts the legacy `control` keyword.

@@ -3485,8 +3485,8 @@ class MiniMaxH3LatentLabLongMediaSetup:
             mixed_audio = _mix_audio_tracks(audios) if audios else None
             plan = _dc_replace(
                 plan,
-                source_audio=audio_1 if audio_1 else None,
-                source_video=video_1 if video_1 else None,
+                source_audio=audio_1 if audio_1 is not None else None,
+                source_video=video_1 if video_1 is not None else None,
                 final_audio_override=(mixed_audio if audio_mode in ('auto', 'preserve') else None),
                 final_audio_track_count=len(audios),
                 audio_vae=audio_vae,
