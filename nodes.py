@@ -3322,6 +3322,13 @@ class MiniMaxH3LatentLabLongMediaSetup:
         )
 
         mode = plan.mode
+
+        # PATCH_AUDIO_IMAGE_REFS:
+        # When image references are connected together with audio, keep the
+        # NativeReferenceToVideo path instead of audio_to_video.
+        # audio_to_video ignores image refs and creates a 1x1 spatial video latent.
+        if mode == 'audio_to_video' and len(images) > 0 and len(videos) == 0:
+            mode = 't2v'
         target_av = None
 
         if NativeReferenceToVideo is None:
@@ -3422,8 +3429,13 @@ class MiniMaxH3LatentLabLongMediaSetup:
             audio_t = audio_latent_t(length_frames)
             audio_lat = frozen_audio_latent
             if audio_lat.shape[-1] != audio_t:
-                audio_lat = torch.zeros((1, 32, 2, audio_t), dtype=frozen_audio_latent.dtype)
-                audio_lat[..., :frozen_audio_latent.shape[-1]] = frozen_audio_latent
+                audio_lat = torch.zeros(
+                    (1, 32, 2, audio_t),
+                    dtype=frozen_audio_latent.dtype,
+                    device=frozen_audio_latent.device,
+                )
+                copy_len = min(audio_t, frozen_audio_latent.shape[-1])
+                audio_lat[..., :copy_len] = frozen_audio_latent[..., :copy_len]
             video_lat = torch.zeros((1, 24, video_t, 1, 1), dtype=frozen_audio_latent.dtype)
             av_samples = NestedTensor((video_lat, audio_lat))
             video_mask = torch.ones((1, 1, video_t, 1, 1), dtype=torch.float32)
@@ -4216,3 +4228,4 @@ NODE_DISPLAY_NAME_MAPPINGS = {
 }
 
 replace = _dc_replace
+
