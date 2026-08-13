@@ -41,6 +41,7 @@ class LongMediaPlan:
     audio_vae: Any = None
     final_audio_override: Any = None
     final_audio_track_count: int = 0
+    audio_output_mode: str = "auto"
     first_frame_override: Any = None
     first_frame_mode: str = "latent_inject"
     first_frame_denoise: float = 0.25

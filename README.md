@@ -10,14 +10,14 @@ Custom ComfyUI nodes and low-VRAM execution patches for **MiniMax H3**, focused 
 - UI fix: workflow_mode now updates dynamic socket labels (first_frame/last_frame/source_video/etc.) in the Setup node.
 - UI fix: Sampler `manual` mode now forces expert widgets to reappear reliably after mode changes and workflow reloads.
 
-The release UI keeps the complete backend schema stable for workflow compatibility while hiding low-level controls in normal use. `workflow_mode` selects `hybrid_auto`, `ref2va_full`, `loop`, `video_ref_edit`, or `manual`. `sampler_mode=auto` uses the validated production policy; `manual` restores every tuning control. Decode obtains both VAEs from `LONG_MEDIA_PLAN`, so it has no public VAE sockets.
+The release UI keeps the complete backend schema stable for workflow compatibility while hiding low-level controls in normal use. `workflow_mode` selects `hybrid_auto`, `ref2va_full`, `loop`, or `manual`. `sampler_mode=auto` uses the validated production policy; `manual` restores every tuning control. Decode obtains both VAEs from `LONG_MEDIA_PLAN`, so it has no public VAE sockets.
 
 
 ## Current release
 
-**v0.3.0 — Hybrid / Ref2VA / Loop / Video Reference release**
+**v0.3.1 — Audio passthrough & reference-routing hotfix**
 
-0.3.0 returns the public workflow to a compact single-pass H3 surface built around the features already validated in production: Hybrid first/last-frame conditioning, full Ref2VA references, native video/audio references, and the low-VRAM LongMedia execution engine. Experimental segmentation/continuation remains available only through Manual mode.
+v0.3.1 is a hotfix release on top of the v0.3.0 workflow redesign. It fixes audio passthrough/reference routing so attached source audio in `auto`, `preserve`, and `preserve_reference` is carried through the media plan and bypasses AudioVAE reconstruction at decode. The Hybrid / Ref2VA / Loop / video-reference / lip-sync workflow surface introduced in v0.3.0 remains unchanged.
 
 
 ## Workflow modes (0.3.0)
@@ -25,20 +25,9 @@ The release UI keeps the complete backend schema stable for workflow compatibili
 - **hybrid_auto** — recommended. `image_1` is the first frame. If `image_2` is connected it becomes the last frame; remaining images are `<Picture N>` references.
 - **ref2va_full** — every connected `image_1..9` is a normal `<Picture N>` reference; no first/last-frame anchors are added.
 - **loop** — `image_1` is internally sent to both the first and last frame anchors, matching the proven `hybrid_auto` setup with the same image wired to i1+i2. `image_2` is reserved/ignored and Picture refs begin at `image_3`.
-- **video_ref_edit** — `video_1` is the primary `<Video 1>` motion/camera/composition reference; `image_1..9` remain ordinary Picture identity/style references.
 - **manual** — exposes the legacy conditioning, segmentation, attention and VRAM controls for development and A/B tests.
 
 The sampler has matching **auto/manual** presentation. Auto uses the validated production policy; Manual exposes the full tuning surface.
-
-
-## Generation and audio modes
-
-- `generation_mode=auto` — normal H3 generation according to the selected workflow mode.
-- `generation_mode=lip_sync` — uses `image_1` as the identity anchor and `audio_1` as the driving audio reference; use with the Ref2VA-style path rather than hybrid first/last conditioning.
-- `audio_mode=generate` — use H3-generated audio as final output.
-- `audio_mode=reference_only` — use input audio as H3 conditioning, but keep H3-generated audio as final output.
-- `audio_mode=preserve` — restore the original input track at output without intentionally using it as a generation reference where the route permits.
-- `audio_mode=preserve_reference` — use the original input audio to drive timing/rhythm/lip-sync, discard H3-generated audio, and restore the untouched source track at output.
 
 ## Main nodes
 

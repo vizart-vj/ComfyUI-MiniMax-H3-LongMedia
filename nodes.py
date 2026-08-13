@@ -7276,7 +7276,7 @@ class MiniMaxH3LatentLabLongMediaSetup:
                     },
                 ),
                 'image_1': ('IMAGE', {'lazy': True, 'tooltip': 'hybrid_auto: first frame. video_ref_edit/ref2va_full: regular <Picture 1> identity/style ref. loop: reused as both first and last frame. manual: role follows conditioning_mode.'}),
-                'image_2': ('IMAGE', {'lazy': True, 'tooltip': 'hybrid_auto: last frame when connected. video_ref_edit/ref2va_full: regular <Picture 2> identity/style ref. loop: reserved/ignored because image_1 is copied internally into the last-frame anchor.'}),
+                'image_2': ('IMAGE', {'lazy': True, 'tooltip': 'hybrid_auto: last frame when connected. video_ref_edit/ref2va_full: regular <Picture 2> identity/style ref. loop: first Picture ref.'}),
                 'image_3': ('IMAGE', {'lazy': True, 'tooltip': 'Picture reference in hybrid_auto/video_ref_edit/loop/ref2va_full; manual role follows conditioning_mode.'}),
                 'image_4': ('IMAGE', {'lazy': True, 'tooltip': 'Image reference. Continues the <Picture N> sequence in hybrid modes.'}),
                 'image_5': ('IMAGE', {'lazy': True, 'tooltip': 'Image reference. Continues the <Picture N> sequence in hybrid modes.'}),
@@ -7736,6 +7736,26 @@ class MiniMaxH3LatentLabLongMediaSetup:
             setup_memory_events.append(_setup_memory_isolation('after_native_reference_release', unload_models=True))
             if preserve_audio_output and audios:
                 plan = _dc_replace(plan, final_audio_override=_mix_audio_tracks(audios), final_audio_track_count=len(audios))
+
+        # Normalize passthrough semantics across *all* workflow branches. Historically
+        # auto preserved an attached source soundtrack in lip-sync / A2V / V2V paths,
+        # but native Ref2VA/T2V branches forgot to populate final_audio_override. That
+        # allowed Turbo-distilled model audio with incompatible latent geometry to reach
+        # AudioVAE.decode(). If an input soundtrack exists, auto/preserve/preserve_reference
+        # always retain the untouched waveform for final output. generate/reference_only
+        # are the only modes that intentionally decode model-generated audio.
+        passthrough_audio_mode = audio_mode in ('auto', 'preserve', 'preserve_reference')
+        if passthrough_audio_mode and audios and getattr(plan, 'final_audio_override', None) is None:
+            plan = _dc_replace(
+                plan,
+                final_audio_override=_mix_audio_tracks(audios),
+                final_audio_track_count=len(audios),
+            )
+
+        # Persist the requested audio output policy in the plan. Decode must not infer
+        # preserve semantics from the shape/content of the sampled audio stream: Turbo
+        # LoRAs may leave a stream that is invalid for the stock Audio VAE decoder.
+        plan = _dc_replace(plan, audio_output_mode=audio_mode)
 
         # V57: build every per-pass TEXT conditioning now, while TE is intentionally available.
         # The plan receives only ready CONDITIONING tensors; never CLIP/TE/model-patcher objects.
@@ -8476,6 +8496,21 @@ class MiniMaxH3LatentLabLongMediaDecode:
             'trimmed_video_frames': trimmed,
             'storyboard_duplicate_boundary_frame_removed': storyboard_duplicate_removed,
         }
+        audio_output_mode = str(getattr(plan, 'audio_output_mode', 'auto') or 'auto')
+        passthrough_audio_mode = audio_output_mode in ('auto', 'preserve', 'preserve_reference')
+        preserve_audio_bypass = audio_output_mode in ('preserve', 'preserve_reference')
+
+        # Preserve means literal bypass: never send the sampled/model audio stream back
+        # through the H3 Audio VAE. This is intentionally checked before every generated
+        # audio decode path, because distilled/Turbo LoRAs can alter the sampled audio
+        # stream geometry and make it invalid for the VAE normalizer.
+        if preserve_audio_bypass and plan.final_audio_override is None:
+            raise RuntimeError(
+                f"audio_mode={audio_output_mode!r} requires a connected source audio track, "
+                "but LongMediaPlan has no final_audio_override. Connect audio_1 (or another "
+                "audio input) or switch audio_mode to generate/reference_only."
+            )
+
         if plan.mode == 'automatic_lip_sync':
             first_frame_mode = getattr(plan, 'first_frame_mode', 'pixel_override')
             if plan.first_frame_override is not None and first_frame_mode in ('pixel_override', 'blend'):
@@ -8500,11 +8535,20 @@ class MiniMaxH3LatentLabLongMediaDecode:
                 # latent_inject already baked the reference into the sampled
                 # latent before this decode ran — nothing left to do here.
                 report_data['first_frame_mode'] = first_frame_mode
-            if plan.final_audio_override is not None:
+            if (passthrough_audio_mode and plan.final_audio_override is not None) or preserve_audio_bypass:
                 audio = plan.final_audio_override
                 report_data['original_audio_restored'] = True
                 report_data['generated_audio_decoded'] = False
+                report_data['audio_output_mode'] = audio_output_mode
+                report_data['audio_vae_bypassed'] = True
             elif audio_vae is not None:
+                if not hasattr(audio, 'shape') or audio.ndim != 4 or int(audio.shape[1]) != 32 or int(audio.shape[2]) != 2:
+                    shape = tuple(audio.shape) if hasattr(audio, 'shape') else type(audio).__name__
+                    raise RuntimeError(
+                        'LongMedia received an invalid generated H3 audio latent for AudioVAE decode: '
+                        f'shape={shape}, audio_mode={audio_output_mode!r}. '
+                        'Use preserve_reference/preserve (or auto with attached audio) to bypass AudioVAE.'
+                    )
                 sr = int(getattr(audio_vae, 'audio_sample_rate', 32000))
                 decoded_audio = audio_vae.decode(audio)
                 audio = _normalize_decoded_audio(
@@ -8515,10 +8559,24 @@ class MiniMaxH3LatentLabLongMediaDecode:
             report_data['first_frame_restored'] = plan.first_frame_override is not None
         else:
             # Restore original audio only when requested; otherwise decode model audio.
-            if plan.final_audio_override is not None:
+            if (passthrough_audio_mode and plan.final_audio_override is not None) or preserve_audio_bypass:
                 audio = plan.final_audio_override
                 report_data['generated_audio_decoded'] = False
+                report_data['audio_output_mode'] = audio_output_mode
+                report_data['audio_vae_bypassed'] = True
             elif audio_vae is not None and hasattr(audio, 'shape') and audio.ndim == 4:
+                # MiniMax H3 AudioVAE expects latent layout [B, 32, 2, T]. A Turbo LoRA
+                # or wrong routing can leave a packed/non-audio tensor here. Never hand
+                # such a tensor to the VAE normalizer, which otherwise fails with an
+                # opaque 19296-vs-128 broadcast error.
+                if int(audio.shape[1]) != 32 or int(audio.shape[2]) != 2:
+                    raise RuntimeError(
+                        'LongMedia received an invalid generated H3 audio latent for AudioVAE decode: '
+                        f'shape={tuple(audio.shape)}, audio_mode={audio_output_mode!r}. '
+                        'For an attached source soundtrack use audio_mode=preserve_reference/preserve '
+                        '(or auto, which now preserves attached audio). Use generate/reference_only only '
+                        'when model-generated audio is intended.'
+                    )
                 sr = int(getattr(audio_vae, 'audio_sample_rate', 32000))
                 decoded_audio = audio_vae.decode(audio)
                 audio = _normalize_decoded_audio(
@@ -8535,7 +8593,7 @@ class MiniMaxH3LatentLabLongMediaDecode:
                         audio = {'waveform': wave, 'sample_rate': sr}
                         report_data['storyboard_duplicate_audio_frame_removed'] = True
                 report_data['generated_audio_decoded'] = True
-            report_data['original_audio_restored'] = plan.final_audio_override is not None
+            report_data['original_audio_restored'] = bool((passthrough_audio_mode and plan.final_audio_override is not None) or preserve_audio_bypass)
             report_data['first_frame_restored'] = False
         if color_match_strength > 0.0:
             images = _match_frames_color_to_reference(images, 0, color_match_strength)

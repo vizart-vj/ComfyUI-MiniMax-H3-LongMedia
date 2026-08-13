@@ -1,16 +1,22 @@
-# v0.3.0 — 2026-08-13
+# v0.3.1 — Audio Passthrough & Reference Routing Hotfix
 
-First public 0.3.x release centered on the validated single-pass MiniMax H3 workflow surface.
+- Fixed `audio_mode=auto` passthrough in native Ref2VA/T2V/reference branches: attached source audio is now preserved consistently instead of falling back to model-audio decode.
+- `preserve` and `preserve_reference` now hard-bypass AudioVAE reconstruction at final decode and return the source waveform.
+- Prevents AudioVAE normalizer crashes such as `19296 vs 128` when Turbo LoRA/model audio latent geometry does not match the decoder expectation.
+- Keeps source audio available as H3 reference/driver for rhythm, timing and lip-sync while allowing the untouched source soundtrack to be restored at output.
+- Retains the v0.3.0 Hybrid / Ref2VA / Loop / video reference edit / lip-sync UI and quality-safe AUTO Sol policy.
 
-Highlights:
-- `hybrid_auto`, `ref2va_full`, `loop`, `video_ref_edit`, and `manual` workflow modes.
-- Loop parity mode duplicates `image_1` internally into both first/last anchors while keeping prompt-driven motion.
-- `generation_mode=lip_sync` is visible in the normal UI and supports audio-driven lip synchronization.
-- `audio_mode=preserve_reference` lets H3 react to rhythm/timing/lip-sync while restoring the untouched source soundtrack at output.
-- Conservative AUTO SOL tau policy (`1.30 -> 1.85`, capped near `2.0`) for improved motion/temporal fidelity.
-- Live Sampler `auto/manual` switching without page reload.
-- Dynamic mode-aware image/video/audio socket labels.
-- Release schema audit tooling and compatibility migration for older serialized workflows.
+# 0.3.0 audio passthrough branch fix
+- Fixed `audio_mode=auto` inconsistency: attached audio is now preserved in every workflow branch, including native Ref2VA/T2V.
+- Setup guarantees `final_audio_override` for attached audio in `auto`, `preserve`, and `preserve_reference`.
+- Decode hard-bypasses AudioVAE whenever a passthrough soundtrack is available.
+- Added explicit H3 audio-latent geometry validation before generated-audio decode to replace opaque AudioVAE broadcast failures with a useful error.
+
+# 0.3.0 preserve-audio decode hotfix
+- `preserve` and `preserve_reference` now carry an explicit `audio_output_mode` in `LONG_MEDIA_PLAN`.
+- Decode treats preserve modes as a hard audio-VAE bypass; sampled/model audio is never reconstructed.
+- If preserve is requested without a connected source audio track, Decode raises a clear configuration error instead of attempting to decode an invalid audio latent.
+- Fixes `19296 vs 128` Audio VAE normalizer shape crashes seen with Turbo LoRAs.
 
 # 0.3.0 generation-mode UI hotfix
 - `generation_mode` is now always visible in Setup instead of being hidden outside Manual mode.
