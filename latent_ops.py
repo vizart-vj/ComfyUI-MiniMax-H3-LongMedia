@@ -699,8 +699,9 @@ def stitch_continuation(
 
     previous_frames = frame_count_from_video_t(previous_video.shape[2])
     next_frames = frame_count_from_video_t(next_video.shape[2])
-    overlap_frames = _aligned_overlap_frames(
-        overlap_frames, min(previous_frames, next_frames)
+    requested_overlap = max(0, int(overlap_frames))
+    overlap_frames = 0 if requested_overlap == 0 else _aligned_overlap_frames(
+        requested_overlap, min(previous_frames, next_frames)
     )
     overlap_video_t = video_latent_t(overlap_frames) if overlap_frames else 0
     overlap_audio_t = (

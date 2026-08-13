@@ -238,7 +238,10 @@ def sol_attn_sm120(q, k, v, *, tau=1.3, scale=None, sink_blocks=(0, 0), sink_q=(
         q.stride(0), q.stride(1), q.stride(2), H, NB, D, BLOCK_SIZE,
         num_warps=4,
     )
-    out = torch.empty_like(q)
+    # Kernels below store out_ptr with contiguous [B,T,H,D] indexing.
+    # Q may be a strided view into fused QKV, so make the output contract
+    # explicit instead of relying on empty_like(preserve_format) heuristics.
+    out = torch.empty((B, T, H, D), device=q.device, dtype=q.dtype)
     sinks = tuple(int(value) for value in (*sink_blocks, *sink_q))
     _forward_ptr[(NB, B * H)](
         q, k, v, kc, vc, threshold, out, scale, *sinks, T,
@@ -285,6 +288,11 @@ def _forward_ptr_rect(
     tail_len = TK - (NBK - 1) * BLOCK
     group_offsets = tl.max_contiguous(tl.arange(0, GROUP), GROUP)
     token_offsets = tl.max_contiguous(tl.arange(0, BLOCK), BLOCK)
+    exact_total = tl.zeros((), dtype=tl.int32)
+    approx_total = tl.zeros((), dtype=tl.int32)
+    score_route_total = tl.zeros((), dtype=tl.int32)
+    local_force_total = tl.zeros((), dtype=tl.int32)
+    sink_force_total = tl.zeros((), dtype=tl.int32)
 
     for group_start in range(0, NBK, GROUP):
         block_indices = group_start + group_offsets
@@ -400,7 +408,7 @@ def sol_attn_query_sm120(q, k, v, prepared, *, q_offset=0, tau=1.3, scale=None,
         q.stride(0), q.stride(1), q.stride(2), H, NBQ, D, BLOCK_SIZE,
         num_warps=4,
     )
-    out = torch.empty_like(q)
+    out = torch.empty((B, TQ, H, D), device=q.device, dtype=q.dtype)
     sinks = tuple(int(value) for value in (*sink_blocks, *sink_q))
     _forward_ptr_rect[(NBQ, B * H)](
         q, k, v, kc, vc, threshold, out, scale, *sinks,
@@ -473,16 +481,17 @@ def _compress_kv_chunk_kernel(
     tl.store(vs_ptr + scale_dst, vscale, mask=valid)
 
 
+
 @triton.jit
 def _forward_ptr_rect_compressed(
     q_ptr, kc_ptr, vc_ptr,
     k8_ptr, ks_ptr, v8_ptr, vs_ptr,
-    threshold, out_ptr,
+    threshold, out_ptr, telemetry_ptr,
     scale, sink_start, sink_end, sink_q_start, sink_q_end,
     TQ, TK, q_block_offset,
     sq_b, sq_t, sq_h,
     H: tl.constexpr, D: tl.constexpr, NBQ: tl.constexpr, NBK: tl.constexpr,
-    BLOCK: tl.constexpr, GROUP: tl.constexpr,
+    BLOCK: tl.constexpr, GROUP: tl.constexpr, COLLECT_TELEMETRY: tl.constexpr,
 ):
     q_block, batch_head = tl.program_id(0), tl.program_id(1)
     batch, head = batch_head // H, batch_head % H
@@ -505,6 +514,11 @@ def _forward_ptr_rect_compressed(
     tail_len = TK - (NBK - 1) * BLOCK
     group_offsets = tl.max_contiguous(tl.arange(0, GROUP), GROUP)
     token_offsets = tl.max_contiguous(tl.arange(0, BLOCK), BLOCK)
+    exact_total = tl.zeros((), dtype=tl.int32)
+    approx_total = tl.zeros((), dtype=tl.int32)
+    score_route_total = tl.zeros((), dtype=tl.int32)
+    local_force_total = tl.zeros((), dtype=tl.int32)
+    sink_force_total = tl.zeros((), dtype=tl.int32)
 
     for group_start in range(0, NBK, GROUP):
         block_indices = group_start + group_offsets
@@ -519,14 +533,19 @@ def _forward_ptr_rect_compressed(
         )
         scores = tl.dot(q, kc.T).to(tl.float32) * scale_log2
         sink_kv = (block_indices >= sink_start) & (block_indices < sink_end)
-        routed = (
-            (tl.sum(scores, axis=0) / q_len > route_threshold)
-            | (tl.abs(global_q_block - block_indices) <= 1)
-            | sink_kv
-        ) & valid_blocks
+        score_routed = (tl.sum(scores, axis=0) / q_len > route_threshold) & valid_blocks
+        local_forced = (tl.abs(global_q_block - block_indices) <= 1) & valid_blocks
+        sink_forced = sink_kv & valid_blocks
+        routed = (score_routed | local_forced | sink_forced) & valid_blocks
         exact = tl.where(q_in_sink, valid_blocks, routed)
 
         approximate = valid_blocks & ~exact
+        if COLLECT_TELEMETRY:
+            exact_total += tl.sum(exact.to(tl.int32))
+            approx_total += tl.sum(approximate.to(tl.int32))
+            score_route_total += tl.sum(score_routed.to(tl.int32))
+            local_force_total += tl.sum(local_forced.to(tl.int32))
+            sink_force_total += tl.sum(sink_forced.to(tl.int32))
         approx_scores = tl.where(approximate[None, :], scores, -float('inf'))
         new_max = tl.maximum(row_max, tl.max(approx_scores, axis=1))
         alpha = tl.math.exp2(tl.where(row_max == new_max, 0.0, row_max - new_max))
@@ -560,6 +579,14 @@ def _forward_ptr_rect_compressed(
             output = output * alpha[:, None] + tl.dot(probability.to(tl.bfloat16), vv)
             row_max = new_max
 
+    if COLLECT_TELEMETRY:
+        tbase = ((batch * NBQ + q_block) * H + head) * 6
+        tl.store(telemetry_ptr + tbase + 0, exact_total)
+        tl.store(telemetry_ptr + tbase + 1, approx_total)
+        tl.store(telemetry_ptr + tbase + 2, score_route_total)
+        tl.store(telemetry_ptr + tbase + 3, local_force_total)
+        tl.store(telemetry_ptr + tbase + 4, sink_force_total)
+        tl.store(telemetry_ptr + tbase + 5, q_in_sink.to(tl.int32))
     tl.store(
         out_ptr + ((batch * TQ + q_rows[:, None]) * H + head) * D + d[None, :],
         (output / row_sum[:, None]).to(tl.bfloat16),
@@ -607,16 +634,31 @@ def append_compressed_kv_sm120(storage, k, v, start):
 def finalize_compressed_kv_sm120(storage):
     kc = storage['kc']
     B, NB, H, D = kc.shape
-    kc_mean = torch.empty((B, H, D), device=kc.device, dtype=torch.float32)
-    kc_var = torch.empty_like(kc_mean)
+    kc_mean = storage.get('kc_mean')
+    kc_var = storage.get('kc_var')
+    expected = (B, H, D)
+    if (
+        kc_mean is None
+        or tuple(kc_mean.shape) != expected
+        or kc_mean.device != kc.device
+        or kc_mean.dtype != torch.float32
+    ):
+        kc_mean = torch.empty(expected, device=kc.device, dtype=torch.float32)
+        storage['kc_mean'] = kc_mean
+    if (
+        kc_var is None
+        or tuple(kc_var.shape) != expected
+        or kc_var.device != kc.device
+        or kc_var.dtype != torch.float32
+    ):
+        kc_var = torch.empty(expected, device=kc.device, dtype=torch.float32)
+        storage['kc_var'] = kc_var
     _kc_stats_kernel[(B * H,)](kc, kc_mean, kc_var, H, NB, D, num_warps=4)
-    storage['kc_mean'] = kc_mean
-    storage['kc_var'] = kc_var
     return storage
 
 
 def sol_attn_query_compressed_sm120(q, storage, *, q_offset=0, tau=1.3, scale=None,
-                                      sink_blocks=(0, 0), sink_q=(0, 0)):
+                                      sink_blocks=(0, 0), sink_q=(0, 0), telemetry=False):
     if q.ndim != 4 or q.shape[-1] != HEAD_DIM or q.dtype != torch.bfloat16 or q.device.type != 'cuda':
         raise ValueError('compressed streamed Sol Q requires CUDA BF16 [B,Tq,H,128]')
     if int(q_offset) % BLOCK_SIZE:
@@ -627,18 +669,60 @@ def sol_attn_query_compressed_sm120(q, storage, *, q_offset=0, tau=1.3, scale=No
     NBK = int(storage['blocks'])
     scale = float(D ** -0.5 if scale is None else scale)
     threshold = torch.empty((B, NBQ, H), device=q.device, dtype=torch.float32)
+    telemetry_buf = torch.empty((B, NBQ, H, 6), device=q.device, dtype=torch.int32) if telemetry else torch.empty((1,), device=q.device, dtype=torch.int32)
+    profile = bool(telemetry)
+    if profile:
+        import time as _time
+        torch.cuda.synchronize()
+        _t0 = _time.perf_counter()
     _threshold_kernel[(NBQ, B * H)](
         q, storage['kc_mean'], storage['kc_var'], threshold, scale, float(tau), TQ,
         q.stride(0), q.stride(1), q.stride(2), H, NBQ, D, BLOCK_SIZE,
         num_warps=4,
     )
-    out = torch.empty_like(q)
+    if profile:
+        torch.cuda.synchronize()
+        threshold_s = _time.perf_counter() - _t0
+        _t0 = _time.perf_counter()
+    else:
+        threshold_s = 0.0
+    out = torch.empty((B, TQ, H, D), device=q.device, dtype=q.dtype)
     sinks = tuple(int(value) for value in (*sink_blocks, *sink_q))
     _forward_ptr_rect_compressed[(NBQ, B * H)](
         q, storage['kc'], storage['vc'], storage['k8'], storage['ks'], storage['v8'], storage['vs'],
-        threshold, out, scale, *sinks, TQ, TK, int(q_offset) // BLOCK_SIZE,
+        threshold, out, telemetry_buf, scale, *sinks, TQ, TK, int(q_offset) // BLOCK_SIZE,
         q.stride(0), q.stride(1), q.stride(2),
-        H, D, NBQ, NBK, BLOCK_SIZE, GROUP_SIZE,
+        H, D, NBQ, NBK, BLOCK_SIZE, GROUP_SIZE, COLLECT_TELEMETRY=bool(telemetry),
         num_warps=8, num_stages=2,
     )
-    return out
+    if not profile:
+        return out
+    torch.cuda.synchronize()
+    forward_s = _time.perf_counter() - _t0
+    # Tiny telemetry copy: [query blocks, heads, six counters].
+    t = telemetry_buf.detach().cpu()
+    thr = threshold.detach()
+    stats = {
+        'threshold_s': float(threshold_s),
+        'forward_s': float(forward_s),
+        'threshold_min': float(thr.min().item()),
+        'threshold_mean': float(thr.mean().item()),
+        'threshold_max': float(thr.max().item()),
+        'exact': int(t[..., 0].sum().item()),
+        'approx': int(t[..., 1].sum().item()),
+        'score_routed': int(t[..., 2].sum().item()),
+        'local_forced': int(t[..., 3].sum().item()),
+        'sink_forced': int(t[..., 4].sum().item()),
+        'q_sink_programs': int(t[..., 5].sum().item()),
+        'programs': int(B * NBQ * H),
+        'nbq': int(NBQ),
+        'nbk': int(NBK),
+    }
+    denom = max(1, stats['exact'] + stats['approx'])
+    stats['exact_ratio'] = float(stats['exact']) / float(denom)
+    # Distribution of per-(query-block,head) exact fractions.
+    ratios = t[..., 0].float() / max(1, NBK)
+    stats['exact_ratio_min'] = float(ratios.min().item())
+    stats['exact_ratio_mean'] = float(ratios.mean().item())
+    stats['exact_ratio_max'] = float(ratios.max().item())
+    return out, stats

@@ -130,14 +130,53 @@ function widget(node, name) {
     return (node.widgets ?? []).find((item) => item?.name === name);
 }
 
+function setInputDisplay(input, label) {
+    if (!input) return;
+    if (input.__lmOrigName === undefined) input.__lmOrigName = input.name;
+    if (input.__lmOrigLabel === undefined) input.__lmOrigLabel = input.label ?? input.name;
+    const display = label ?? input.__lmOrigLabel ?? input.__lmOrigName ?? input.name;
+    input.label = display;
+    input.localized_name = display;
+}
+
+function refreshSocketLabels(node) {
+    const mode = widget(node, 'workflow_mode')?.value ?? 'hybrid_auto';
+    const get = (name) => (node.inputs ?? []).find((input) => input?.name === name);
+    const pictures = Array.from({ length: 9 }, (_, i) => get(`image_${i + 1}`));
+    const videos = Array.from({ length: 3 }, (_, i) => get(`video_${i + 1}`));
+    const audios = Array.from({ length: 3 }, (_, i) => get(`audio_${i + 1}`));
+    pictures.forEach((input, idx) => setInputDisplay(input, `image_${idx + 1}`));
+    videos.forEach((input, idx) => setInputDisplay(input, `video_${idx + 1}`));
+    audios.forEach((input, idx) => setInputDisplay(input, `audio_${idx + 1}`));
+    if (mode === 'hybrid_auto') {
+        setInputDisplay(pictures[0], 'image_1 • first_frame');
+        setInputDisplay(pictures[1], 'image_2 • last_frame');
+        for (let i = 2; i < pictures.length; i += 1) setInputDisplay(pictures[i], `image_${i + 1} • picture_${i - 1}`);
+    } else if (mode === 'video_ref_edit') {
+        setInputDisplay(videos[0], 'video_1 • source_video');
+        setInputDisplay(audios[0], 'audio_1 • source_audio');
+        for (let i = 0; i < pictures.length; i += 1) setInputDisplay(pictures[i], `image_${i + 1} • picture_${i + 1}`);
+        for (let i = 1; i < videos.length; i += 1) setInputDisplay(videos[i], `video_${i + 1} • extra_video_${i + 1}`);
+        for (let i = 1; i < audios.length; i += 1) setInputDisplay(audios[i], `audio_${i + 1} • extra_audio_${i + 1}`);
+    } else if (mode === 'ref2va_full') {
+        for (let i = 0; i < pictures.length; i += 1) setInputDisplay(pictures[i], `image_${i + 1} • picture_${i + 1}`);
+    } else if (mode === 'loop') {
+        setInputDisplay(pictures[0], 'image_1 • first+last_frame');
+        setInputDisplay(pictures[1], 'image_2 • reserved/ignored');
+        for (let i = 2; i < pictures.length; i += 1) setInputDisplay(pictures[i], `image_${i + 1} • picture_${i - 1}`);
+    }
+}
+
 const COMBOS = {
     duration_source: { values: ["auto", "manual", "audio", "video", "longest_input"], fallback: "auto" },
     resolution_mode: { values: ["match", "max"], fallback: "match" },
     reference_budget: { values: ["low", "medium", "high", "max"], fallback: "low" },
     video_mode: { values: ["auto", "preserve", "transform"], fallback: "auto" },
-    audio_mode: { values: ["auto", "preserve", "generate", "reference_only"], fallback: "auto" },
+    audio_mode: { values: ["auto", "preserve", "generate", "reference_only", "preserve_reference"], fallback: "auto" },
     generation_mode: { values: ["auto", "lip_sync"], fallback: "auto" },
     first_frame_mode: { values: ["latent_inject", "pixel_override", "blend"], fallback: "latent_inject" },
+    conditioning_mode: { values: ["auto_refs", "hybrid_first_frame", "hybrid_first_last"], fallback: "auto_refs" },
+    workflow_mode: { values: ["hybrid_auto", "ref2va_full", "loop", "manual", "video_ref_edit"], fallback: "hybrid_auto" },
 };
 
 const NUMBERS = {
@@ -159,7 +198,12 @@ function repairCorruptWidgetValues(node) {
     for (const [name, spec] of Object.entries(COMBOS)) {
         const w = widget(node, name);
         if (!w) continue;
-        if (!spec.values.includes(w.value)) w.value = spec.fallback;
+        if (spec.values.includes(w.value)) continue;
+        if (Number.isInteger(w.value) && w.value >= 0 && w.value < spec.values.length) {
+            w.value = spec.values[w.value];
+        } else {
+            w.value = spec.fallback;
+        }
     }
     for (const [name, fallback] of Object.entries(NUMBERS)) {
         const w = widget(node, name);
@@ -185,6 +229,7 @@ function syncNode(node, { repairWidgets = false, fit = true } = {}) {
 
     let changed = false;
     for (const family of FAMILIES) changed = normalizeFamily(node, family) || changed;
+    refreshSocketLabels(node);
     if (fit || changed) fitNode(node);
     app.graph?.setDirtyCanvas?.(true, true);
 }
@@ -229,5 +274,15 @@ app.registerExtension({
         // New node only. Workflow-loaded nodes are normalized in afterConfigureGraph,
         // after saved links and widget values have been restored.
         scheduleSync(node);
+        const workflow = widget(node, 'workflow_mode');
+        if (workflow && !workflow.__lmSocketLabelWrapped) {
+            workflow.__lmSocketLabelWrapped = true;
+            const cb = workflow.callback;
+            workflow.callback = function (...args) {
+                const r = cb?.apply(this, args);
+                setTimeout(() => syncNode(node, { repairWidgets: false, fit: true }), 0);
+                return r;
+            };
+        }
     },
 });

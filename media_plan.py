@@ -45,6 +45,13 @@ class LongMediaPlan:
     first_frame_mode: str = "latent_inject"
     first_frame_denoise: float = 0.25
     first_frame_blend_frames: int = 3
+    # Per-pass text conditionings are pre-encoded inside Setup while the TE is
+    # intentionally resident.  Never store CLIP/TE/model-patcher objects here.
+    segment_positive_conditionings: Any = None
+    segment_prompt_summaries: Any = None
+    # V63 storyboard bridge: ready per-pass AV latents and decoded boundary index.
+    storyboard_segment_avs: Any = None
+    storyboard_bridge_frame: int = -1
 
 
 def _align_up_frames(frame_count: int) -> int:
@@ -126,22 +133,42 @@ def _longest_media(items: Sequence[Any], duration_fn):
     return max(measured, key=lambda entry: entry[0]) if measured else (0.0, None)
 
 
-def _plan_segments(output_frames: int, max_segment_frames: int, overlap_frames: int):
-    first = _align_up_frames(min(output_frames, max_segment_frames))
+def _plan_segments(output_frames: int, nominal_new_frames: int, overlap_frames: int):
+    """Plan H3 passes where segment duration means NEW output timeline.
+
+    ``nominal_new_frames`` is the user-facing segment duration converted to
+    frames.  Overlap is additional continuation context and must not consume
+    that duration.  This keeps e.g. 15 s / 5 s at exactly three passes instead
+    of producing a fourth tail pass just because overlap reduced each pass's
+    useful coverage.
+
+    H3 pass lengths still have to satisfy the 5 + 17*n temporal geometry, so
+    individual passes may be a few frames longer than the nominal timeline
+    chunk.  The final stitched result is trimmed back to ``output_frames``.
+    """
+    nominal_new_frames = max(1, int(nominal_new_frames))
+    pass_count = max(1, math.ceil(output_frames / nominal_new_frames))
+
+    first_target = min(output_frames, nominal_new_frames)
+    first = _align_up_frames(first_target)
     lengths = [first]
     starts = [0]
     covered = first
-    while covered < output_frames:
-        remaining = output_frames - covered
-        requested = min(max_segment_frames, overlap_frames + remaining)
+
+    for pass_index in range(1, pass_count):
+        remaining = max(0, output_frames - covered)
+        remaining_passes = pass_count - pass_index
+        # Share the still-uncovered output across the remaining passes.  The
+        # overlap is prepended as context and is not counted as new coverage.
+        desired_new = max(1, math.ceil(remaining / remaining_passes))
+        requested = overlap_frames + desired_new
         length = _align_up_frames(requested)
-        if length > max_segment_frames:
-            length = max_segment_frames
         if length <= overlap_frames:
-            raise ValueError("Continuation segment must be longer than its overlap.")
-        starts.append(covered - overlap_frames)
+            length = _align_up_frames(overlap_frames + 1)
+        starts.append(max(0, covered - overlap_frames))
         lengths.append(length)
         covered += length - overlap_frames
+
     return tuple(lengths), tuple(starts), covered
 
 
@@ -216,16 +243,19 @@ def build_media_plan(
         raise ValueError(f"Unknown duration source: {duration_source}")
 
     output_frames = max(1, math.floor(total_duration * FPS))
-    max_segment_frames = _align_up_frames(math.floor(segment_seconds * FPS))
+    nominal_new_frames = max(1, math.floor(segment_seconds * FPS))
+    # H3 overlap itself must also land on the 5 + 17*n temporal grid.  Keep it
+    # shorter than the nominal user-visible timeline chunk; continuation pass
+    # length may exceed segment_seconds because overlap is extra context.
     actual_overlap = _align_down_frames(overlap_frames)
-    if actual_overlap >= max_segment_frames:
-        actual_overlap = _align_down_frames(max_segment_frames - FRAME_STRIDE)
-    if actual_overlap >= max_segment_frames:
-        raise ValueError("overlap_frames must be shorter than a segment.")
+    if actual_overlap >= nominal_new_frames:
+        actual_overlap = _align_down_frames(max(MIN_FRAMES, nominal_new_frames - FRAME_STRIDE))
+    if actual_overlap >= nominal_new_frames:
+        raise ValueError("overlap_frames must be shorter than the new timeline span of a segment.")
 
     segment_lengths, segment_starts, generated_frames = _plan_segments(
         output_frames,
-        max_segment_frames,
+        nominal_new_frames,
         actual_overlap,
     )
     return LongMediaPlan(
@@ -237,7 +267,7 @@ def build_media_plan(
         segment_lengths=segment_lengths,
         segment_starts=segment_starts,
         overlap_frames=actual_overlap,
-        step_frames=segment_lengths[0] - actual_overlap,
+        step_frames=nominal_new_frames,
         passes=len(segment_lengths),
         generated_frames=generated_frames,
         trim_frames=generated_frames - output_frames,
