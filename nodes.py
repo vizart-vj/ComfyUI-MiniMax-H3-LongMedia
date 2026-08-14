@@ -7985,9 +7985,9 @@ class MiniMaxH3LatentLabLongMediaSampler:
                 'mlp_chunk_tokens': (
                     'INT',
                     {
-                        'default': 8192, 'min': 0, 'max': 131072, 'step': 8192,
+                        'default': 8192, 'min': 0, 'max': 131072, 'step': 512,
                         'tooltip': (
-                            'Token chunk size for the low-VRAM H3 MLP path. '
+                            'Token chunk size for the low-VRAM H3 MLP path. Manual mode uses 512-token increments so low-VRAM users can select 4096/3072/2048/1536/1024/512. '
                             '8192 is the current safe default. Larger values are faster '
                             'but use more VRAM. Set 0 to effectively disable MLP '
                             'chunking for A/B testing.'
@@ -8007,22 +8007,22 @@ class MiniMaxH3LatentLabLongMediaSampler:
                 'sol_qkv_chunk_tokens': (
                     'INT',
                     {
-                        'default': 8192, 'min': 0, 'max': 131072, 'step': 8192,
+                        'default': 8192, 'min': 0, 'max': 131072, 'step': 512,
                         'tooltip': (
                             'Stream H3 QKV projection in token chunks. In streamed mode token-level '
                             'K/V are retained as INT8+scale while Sol block summaries stay BF16; Q is '
                             'reprojected and consumed chunk-by-chunk. This targets very long single-pass '
-                            'clips on limited VRAM. 0 restores the full fused-QKV path.'
+                            'clips on limited VRAM. Manual mode uses 512-token increments so 4096/3072/2048/1536/1024/512 are selectable. 0 restores the full fused-QKV path.'
                         ),
                     },
                 ),
                 'sol_out_proj_chunk_tokens': (
                     'INT',
                     {
-                        'default': 24576, 'min': 0, 'max': 131072, 'step': 8192,
+                        'default': 24576, 'min': 0, 'max': 131072, 'step': 512,
                         'tooltip': (
                             'Token chunk size for the embedded Sol output projection. '
-                            'Smaller values reduce peak VRAM; larger values are faster. '
+                            'Smaller values reduce peak VRAM; larger values are faster. Manual mode uses 512-token increments for fine low-VRAM tuning. '
                             '0 disables out_proj chunking.'
                         ),
                     },
@@ -8030,7 +8030,7 @@ class MiniMaxH3LatentLabLongMediaSampler:
                 'vram_activation_reserve_mb': (
                     'INT',
                     {
-                        'default': 4096, 'min': 0, 'max': 12288, 'step': 512,
+                        'default': 4096, 'min': 0, 'max': 12288, 'step': 256,
                         'tooltip': (
                             'Extra VRAM headroom requested from ComfyUI before model loading. '
                             'ComfyUI will keep fewer H3 weights resident and offload more to RAM, '
@@ -8041,7 +8041,7 @@ class MiniMaxH3LatentLabLongMediaSampler:
                 'inter_block_vram_guard_mb': (
                     'INT',
                     {
-                        'default': 2048, 'min': 0, 'max': 8192, 'step': 256,
+                        'default': 2048, 'min': 0, 'max': 8192, 'step': 128,
                         'tooltip': (
                             'Minimum driver-free VRAM target between H3 transformer blocks. '
                             'When free VRAM falls below this value and PyTorch is holding >=256 MB '
@@ -8063,7 +8063,7 @@ class MiniMaxH3LatentLabLongMediaSampler:
                 'inter_block_guard_emergency_mb': (
                     'INT',
                     {
-                        'default': 512, 'min': 0, 'max': 4096, 'step': 256,
+                        'default': 512, 'min': 0, 'max': 4096, 'step': 128,
                         'tooltip': (
                             'Emergency driver-free VRAM threshold. Below this value the emergency guard '
                             'may trim even while the normal guard is cooling down. 0 disables emergency mode.'
@@ -8098,14 +8098,14 @@ class MiniMaxH3LatentLabLongMediaSampler:
                 'late_block_guard_min_cached_mb': (
                     'INT',
                     {
-                        'default': 512, 'min': 0, 'max': 4096, 'step': 256,
+                        'default': 512, 'min': 0, 'max': 4096, 'step': 128,
                         'tooltip': 'Minimum reclaimable PyTorch CUDA cache required before a late-block hard trim is attempted.',
                     },
                 ),
                 'step_boundary_cleanup_mb': (
                     'INT',
                     {
-                        'default': 2048, 'min': 0, 'max': 8192, 'step': 256,
+                        'default': 2048, 'min': 0, 'max': 8192, 'step': 128,
                         'tooltip': 'Minimum driver-free VRAM target after each completed denoise step. Dead allocator cache is returned before the next H3 forward. 0 disables.',
                     },
                 ),

@@ -1,5 +1,16 @@
+# v0.3.11 — Low-VRAM Manual Tuning & Audio Stability Baseline
+
+- New development baseline for subsequent LongMedia builds.
+- Manual Sampler token/chunk controls now use 512-token increments for practical tuning on 8–12 GB GPUs.
+- VRAM reserve/late-target controls use 256 MB increments; smaller guard/cleanup thresholds use 128 MB increments.
+- Existing defaults and serialized widget order are unchanged, preserving workflow compatibility.
+- Includes the current audio passthrough/reference fixes: `auto`, `preserve`, and `preserve_reference` consistently preserve source audio where intended and bypass invalid AudioVAE reconstruction paths.
+- Includes Hybrid Auto, Ref2VA Full, Loop, Video Reference Edit, Lip Sync, dynamic UI, live Manual sampler controls, and the quality-safe AUTO Sol policy.
+- Future releases should be developed on top of this baseline.
+
 # v0.3.1 — Audio Passthrough & Reference Routing Hotfix
 
+- Manual Sampler low-VRAM tuning now uses fine-grained steps: 512 tokens for MLP/QKV/out-proj chunks, 256 MB for activation reserve/late target, and 128 MB for smaller VRAM guards/cleanup thresholds. Defaults and serialized widget order are unchanged.
 - Fixed `audio_mode=auto` passthrough in native Ref2VA/T2V/reference branches: attached source audio is now preserved consistently instead of falling back to model-audio decode.
 - `preserve` and `preserve_reference` now hard-bypass AudioVAE reconstruction at final decode and return the source waveform.
 - Prevents AudioVAE normalizer crashes such as `19296 vs 128` when Turbo LoRA/model audio latent geometry does not match the decoder expectation.

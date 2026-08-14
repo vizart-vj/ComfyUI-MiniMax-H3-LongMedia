@@ -6,7 +6,7 @@ Custom ComfyUI nodes and low-VRAM execution patches for **MiniMax H3**, focused 
 
 `audio_mode=preserve_reference` uses connected audio as native H3 audio conditioning (including rhythm/timing and `lip_sync` driving), but discards the model-generated audio after sampling and restores the original input track directly at decode/output. This avoids Turbo-LoRA audio reconstruction artifacts while retaining audiovisual interaction. `preserve` restores the original track without intentionally using it as a reference; `reference_only` keeps reference conditioning but uses generated H3 audio.
 
-## 0.3.0 interface modes
+## Public interface modes
 - UI fix: workflow_mode now updates dynamic socket labels (first_frame/last_frame/source_video/etc.) in the Setup node.
 - UI fix: Sampler `manual` mode now forces expert widgets to reappear reliably after mode changes and workflow reloads.
 
@@ -15,12 +15,12 @@ The release UI keeps the complete backend schema stable for workflow compatibili
 
 ## Current release
 
-**v0.3.1 — Audio passthrough & reference-routing hotfix**
+**v0.3.11 — Low-VRAM Manual Tuning & Audio Stability Baseline**
 
-v0.3.1 is a hotfix release on top of the v0.3.0 workflow redesign. It fixes audio passthrough/reference routing so attached source audio in `auto`, `preserve`, and `preserve_reference` is carried through the media plan and bypasses AudioVAE reconstruction at decode. The Hybrid / Ref2VA / Loop / video-reference / lip-sync workflow surface introduced in v0.3.0 remains unchanged.
+v0.3.11 is the new LongMedia development baseline. It consolidates the current Hybrid / Ref2VA / Loop / video-reference / lip-sync workflow surface, the latest audio passthrough fixes, the quality-safe AUTO Sol policy, and finer Manual controls for low-VRAM systems. Manual token/chunk controls can now be tuned in 512-token steps, while VRAM guard/reserve controls use smaller 128–256 MB increments without changing existing defaults or serialized widget order.
 
 
-## Workflow modes (0.3.0)
+## Workflow modes
 
 - **hybrid_auto** — recommended. `image_1` is the first frame. If `image_2` is connected it becomes the last frame; remaining images are `<Picture N>` references.
 - **ref2va_full** — every connected `image_1..9` is a normal `<Picture N>` reference; no first/last-frame anchors are added.
@@ -28,6 +28,22 @@ v0.3.1 is a hotfix release on top of the v0.3.0 workflow redesign. It fixes audi
 - **manual** — exposes the legacy conditioning, segmentation, attention and VRAM controls for development and A/B tests.
 
 The sampler has matching **auto/manual** presentation. Auto uses the validated production policy; Manual exposes the full tuning surface.
+
+## Low-VRAM Manual tuning (v0.3.11)
+
+Manual mode now exposes finer adjustment steps so users on 8–12 GB GPUs can reduce memory pressure without being forced into very large jumps:
+
+- `mlp_chunk_tokens` — 512-token steps
+- `sol_qkv_chunk_tokens` — 512-token steps
+- `sol_out_proj_chunk_tokens` — 512-token steps
+- `vram_activation_reserve_mb` — 256 MB steps
+- `late_block_guard_target_mb` — 256 MB steps
+- `inter_block_vram_guard_mb` — 128 MB steps
+- `inter_block_guard_emergency_mb` — 128 MB steps
+- `late_block_guard_min_cached_mb` — 128 MB steps
+- `step_boundary_cleanup_mb` — 128 MB steps
+
+The defaults are intentionally unchanged. This release only makes Manual tuning more granular and practical for constrained VRAM/RAM configurations.
 
 ## Main nodes
 
