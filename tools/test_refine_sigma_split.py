@@ -9,19 +9,19 @@ spec.loader.exec_module(mod)
 
 
 def check(total, refine):
-    # Values themselves are irrelevant; indices make boundary/interval accounting explicit.
-    sigmas = torch.arange(total + 1, 0, -1, dtype=torch.float32)
-    main, low, total_steps, switch, effective, requested = mod.split_refine_sigmas(sigmas, refine)
-    assert total_steps == total
-    assert switch + effective == total
-    assert len(main) - 1 == switch
-    assert len(low) - 1 == effective
-    assert main[-1].item() == low[0].item()  # shared boundary sigma only
-    assert (len(main)-1) + (len(low)-1) == total
-    return switch, effective
+    sigmas = torch.arange(total, -1, -1, dtype=torch.float32)
+    main, low, base_steps, tail_start, effective, requested = mod.split_refine_sigmas(sigmas, refine)
+    assert base_steps == total
+    assert requested == max(1, refine)
+    assert effective == min(max(1, refine), total)
+    assert torch.equal(main, sigmas), (main, sigmas)
+    assert torch.equal(low, sigmas[-(effective + 1):])
+    assert tail_start == total - effective
+    assert main.numel() - 1 == total
+    assert low.numel() - 1 == effective
+    assert total + effective == (main.numel() - 1) + (low.numel() - 1)
 
-assert check(12, 3) == (9, 3)
-assert check(8, 2) == (6, 2)
-assert check(20, 5) == (15, 5)
-assert check(12, 99) == (1, 11)  # retain one valid noisy main interval
+check(12, 3)
+check(8, 2)
+check(4, 99)
 print('REFINE_SIGMA_SPLIT_REGRESSION: PASS')

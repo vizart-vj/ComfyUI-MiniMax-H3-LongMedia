@@ -10473,7 +10473,7 @@ class MiniMaxH3LatentLabLongMediaNextSegment:
 
 
 class MiniMaxH3LatentLabRefineSigmas:
-    """Split one external SIGMAS schedule into main + low-noise refine stages."""
+    """Split the connected schedule into a true KSampler Advanced two-stage trajectory."""
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -10495,7 +10495,7 @@ class MiniMaxH3LatentLabRefineSigmas:
         )
         report = json.dumps({
             'total_steps': total_steps,
-            'main_steps': switch_step,
+            'main_steps': int(max(0, switch_step)),
             'refine_steps_requested': requested,
             'refine_steps_effective': effective,
             'switch_step': switch_step,
@@ -10505,14 +10505,134 @@ class MiniMaxH3LatentLabRefineSigmas:
             'main_sigma_end': float(main[-1].detach().float().cpu()),
             'refine_sigma_start': float(refine[0].detach().float().cpu()),
             'refine_sigma_end': float(refine[-1].detach().float().cpu()),
-            'scheduler_source': 'connected_sigmas_exact_split',
-            'main_return_with_leftover_noise': bool(effective > 0),
+            'scheduler_source': 'connected_sigmas_true_advanced_split',
+            'main_return_with_leftover_noise': True,
             'refine_add_noise': False,
             'intervals_total': total_steps,
-            'intervals_main': switch_step,
+            'intervals_main': int(max(0, switch_step)),
             'intervals_refine': effective,
+            'intervals_total_model_evaluations': total_steps,
         })
         return (main, refine, total_steps, switch_step, effective, report)
+
+
+
+
+
+class MiniMaxH3LatentLabStockAdvancedRefiner:
+    """Run refiner through the stock ComfyUI KSampler Advanced path.
+
+    This node intentionally returns the stock solver state from
+    ``comfy.sample.sample()``. It does not substitute preview x0, does not freeze
+    streams, and does not reconstruct NestedTensor outputs. The caller is
+    expected to pass an in-progress latent from stage 1 and a full connected
+    sigma schedule together with ``start_at_step``.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            'required': {
+                'guider': ('GUIDER',),
+                'final_av': ('LATENT',),
+                'sigmas': ('SIGMAS',),
+                'start_at_step': ('INT', {'default': 0, 'min': 0, 'max': 100000, 'step': 1}),
+                'seed': ('INT', {'default': 0, 'min': 0, 'max': 0xffffffffffffffff}),
+            }
+        }
+
+    RETURN_TYPES = ('LATENT', 'STRING')
+    RETURN_NAMES = ('refined_av', 'report')
+    FUNCTION = 'refine'
+    CATEGORY = 'MiniMax H3/LongMedia/Internal'
+
+    @staticmethod
+    def _restore_raw_conditioning(converted):
+        raw = []
+        for item in list(converted or []):
+            if not isinstance(item, dict):
+                raise RuntimeError('Stock refiner expected CFGGuider converted conditioning dictionaries.')
+            meta = item.copy()
+            cross_attn = meta.pop('cross_attn', None)
+            meta.pop('uuid', None)
+            raw.append([cross_attn, meta])
+        return raw
+
+    def refine(self, guider, final_av, sigmas, start_at_step=0, seed=0):
+        import comfy.sample
+
+        if final_av is None or not isinstance(final_av, dict) or 'samples' not in final_av:
+            raise RuntimeError('Stock Advanced refiner requires the stage-1 H3 AV LATENT.')
+        model = getattr(guider, 'model_patcher', None)
+        if model is None:
+            raise RuntimeError('Stock Advanced refiner could not resolve model_patcher from GUIDER.')
+        original_conds = getattr(guider, 'original_conds', None) or {}
+        positive = self._restore_raw_conditioning(original_conds.get('positive', []))
+        negative = self._restore_raw_conditioning(original_conds.get('negative', []))
+        cfg = float(getattr(guider, 'cfg', 1.0))
+
+        latent_image = final_av['samples']
+        latent_image = comfy.sample.fix_empty_latent_channels(
+            model,
+            latent_image,
+            final_av.get('downscale_ratio_spacial', None),
+            final_av.get('downscale_ratio_temporal', None),
+        )
+        noise = comfy.sample.prepare_empty_noise(latent_image)
+        noise_mask = final_av.get('noise_mask', None)
+        total_steps = max(0, int(sigmas.numel()) - 1) if torch.is_tensor(sigmas) else max(0, len(sigmas) - 1)
+        start_at_step = max(0, min(int(start_at_step), total_steps))
+
+        _lm_print(
+            '[MiniMaxH3 LongMedia][0.4.1 STOCK ADVANCED REFINER] '
+            f'sampler=euler; scheduler=simple; total_steps={int(total_steps)}; '
+            f'add_noise=disable; start_at_step={int(start_at_step)}; end_at_step=10000; '
+            'return_with_leftover_noise=disable; output=stock_solver_state',
+            flush=True,
+        )
+
+        samples = comfy.sample.sample(
+            model,
+            noise,
+            int(total_steps),
+            cfg,
+            'euler',
+            'simple',
+            positive,
+            negative,
+            latent_image,
+            denoise=1.0,
+            disable_noise=True,
+            start_step=int(start_at_step),
+            last_step=10000,
+            force_full_denoise=True,
+            noise_mask=noise_mask,
+            sigmas=sigmas,
+            callback=None,
+            disable_pbar=False,
+            seed=int(seed),
+        )
+
+        out = final_av.copy()
+        out.pop('downscale_ratio_spacial', None)
+        out.pop('downscale_ratio_temporal', None)
+        out['samples'] = samples
+        report = json.dumps({
+            'mode': 'stock_ksampler_advanced_true_split',
+            'sampler': 'euler',
+            'scheduler': 'simple',
+            'steps': int(total_steps),
+            'start_at_step': int(start_at_step),
+            'end_at_step': 10000,
+            'add_noise': False,
+            'return_with_leftover_noise': False,
+            'force_full_denoise': True,
+            'sigma_source': 'connected_full_schedule',
+            'output': 'stock_solver_state',
+            'x0_substitution': False,
+            'stream_freeze': False,
+        })
+        return (out, report)
 
 
 class MiniMaxH3LatentLabProtectRefineAV:
@@ -10867,7 +10987,7 @@ class MiniMaxH3LatentLabLongMediaSampler:
                 ),
                 'refine_enabled': (
                     'BOOLEAN',
-                    {'default': False, 'tooltip': 'Split the connected SIGMAS schedule into a main high-noise stage and a low-noise refine stage. Total model steps do not increase.'},
+                    {'default': False, 'tooltip': 'Run the full connected SIGMAS schedule, then add extra low-noise refine steps using the exact tail sigmas from the base schedule.'},
                 ),
                 'refine_add_noise': (
                     'BOOLEAN',
@@ -10882,8 +11002,8 @@ class MiniMaxH3LatentLabLongMediaSampler:
                     {
                         'default': 2, 'min': 1, 'max': 1000, 'step': 1,
                         'tooltip': (
-                            'How many final intervals of the connected SIGMAS schedule belong to the refine stage. '
-                            'Example: steps=12, refine_steps=3 -> main=9 intervals + refine=3 intervals; total remains 12.'
+                            'How many extra low-noise steps to run after the complete base sampler. '
+                            'Example: steps=12, refine_steps=3 -> stage1 runs 9 steps, stage2 runs the final 3 steps of the same 12-step schedule.'
                         ),
                     },
                 ),
@@ -11053,23 +11173,27 @@ class MiniMaxH3LatentLabLongMediaSampler:
         # 0.2.16 diagnostic build deliberately disables intra-step cache flushing:
         # we want an undistorted first-step allocator trace, including OOM events.
         guard_state = None
-        # v0.3.58: H3 refine stays inside one SamplerCustomAdvanced lifecycle.
-        # MiniMax H3 uses the same model/guider/sampler for the high- and low-noise
-        # portions, so splitting the connected sigma schedule into two independent
-        # SamplerCustomAdvanced nodes adds no refiner model transition and can break
-        # nested AV latent continuity at the handoff.  Feed the exact connected
-        # schedule once; refine_steps remains the low-noise phase marker/reporting
-        # value and frozen continuation overlap is restored after the full pass.
+        # 0.4.1 refine policy: when enabled, one connected SIGMAS trajectory is
+        # split into two KSampler-Advanced-style stages. Stage 1 stops before the
+        # final R intervals and returns the in-progress latent; stage 2 continues
+        # the same schedule with add_noise disabled and performs the final denoise.
         main_sigmas = sigmas
+        refine_sigmas = None
+        refine_steps_effective = 0
+        refine_tail_start = 0
+        base_steps = max(0, int(sigmas.numel()) - 1) if torch.is_tensor(sigmas) else max(0, len(sigmas) - 1)
         if bool(refine_enabled):
+            main_sigmas, refine_sigmas, base_steps, refine_tail_start, refine_steps_effective, _ = split_refine_sigmas(
+                sigmas, int(refine_steps)
+            )
             _lm_print(
-                '[MiniMaxH3 LongMedia][0.3.58 SINGLE-LIFECYCLE REFINE] '
-                f'refine_steps={int(refine_steps)}; one connected SIGMAS schedule is executed in a '
-                'single SamplerCustomAdvanced call; no intermediate noisy latent handoff, no second '
-                'sampler initialization, no fresh refine noise; pass>0 frozen AV overlap is restored '
-                'after the complete trajectory',
+                '[MiniMaxH3 LongMedia][0.4.2 ADDITIVE FINAL-LATENT REFINE] '
+                f'base_steps={int(base_steps)} + refine_steps={int(refine_steps_effective)}; '
+                f'refine_tail_start={int(refine_tail_start)}; main sampler keeps full SIGMAS; '
+                'refiner calls stock comfy.sample.sample KSampler Advanced path; H3 audio is frozen with denoise=0; refiner AV output is passed through directly without post-refine repack',
                 flush=True,
             )
+
         first_effective_seed = _v85_segment_seed(plan, seed, 0) if getattr(plan, 'mode', None) == 'multiclip' else int(seed)
         first_noise = graph.node("RandomNoise", noise_seed=int(first_effective_seed))
         _lm_print(
@@ -11087,8 +11211,23 @@ class MiniMaxH3LatentLabLongMediaSampler:
             latent_image=initial_av,
         )
         first_main_output = first_sample.out(0)
-        # Pass 0 has no frozen continuation head, so the continuous full-schedule
-        # sample is already the final AV latent.
+        if bool(refine_enabled) and int(refine_steps_effective) > 0:
+            first_refine = graph.node(
+                "MiniMaxH3LatentLabStockAdvancedRefiner",
+                guider=traced_guider,
+                final_av=first_main_output,
+                sigmas=refine_sigmas,
+                start_at_step=int(refine_tail_start),
+                seed=int(first_effective_seed),
+            )
+            first_main_output = first_refine.out(0)
+            _lm_print(
+                '[MiniMaxH3 LongMedia][0.4.1 TRUE ADVANCED REFINER] '
+                'stage2_output=stock_solver_state; x0_substitution=False; stream_freeze=False',
+                flush=True,
+            )
+        # Pass 0 has no frozen continuation head. The optional second-stage refine
+        # has completed before this latent becomes continuation state.
         previous_segment = first_main_output
         stitched = previous_segment
 
@@ -11176,9 +11315,24 @@ class MiniMaxH3LatentLabLongMediaSampler:
                 latent_image=prepared_av,
             )
             sampled_output = sampled.out(0)
+            if bool(refine_enabled) and int(refine_steps_effective) > 0:
+                refined = graph.node(
+                    "MiniMaxH3LatentLabStockAdvancedRefiner",
+                    guider=segment_mlp_chunker.out(0),
+                    final_av=sampled_output,
+                    sigmas=refine_sigmas,
+                    start_at_step=int(refine_tail_start),
+                    seed=int(segment_effective_seed),
+                )
+                sampled_output = refined.out(0)
+                _lm_print(
+                    f'[MiniMaxH3 LongMedia][0.4.1 TRUE ADVANCED REFINER] clip={int(segment_index)+1}; '
+                    'stage2_output=stock_solver_state; x0_substitution=False; stream_freeze=False',
+                    flush=True,
+                )
             if bool(refine_enabled) and getattr(plan, 'mode', None) != 'storyboard_bridge' and int(plan.overlap_frames) > 0:
-                # The entire sigma trajectory is now one sampler call.  Restore only
-                # the exact frozen AV continuation head after that complete pass.
+                # Preserve the exact frozen AV continuation head after both the
+                # both stages of the continuous refine trajectory.
                 protected = graph.node(
                     "MiniMaxH3LatentLabProtectRefineAV",
                     base_av=prepared_av,
@@ -11224,10 +11378,18 @@ class MiniMaxH3LatentLabLongMediaSampler:
             "advanced_refine_legacy_add_noise_input_ignored": bool(refine_add_noise),
             "advanced_refine_seed": None,
             "advanced_refine_legacy_seed_input_ignored": int(refine_seed) & 0xFFFFFFFFFFFFFFFF,
-            "advanced_refine_steps": int(refine_steps),
-            "advanced_refine_interval_policy": "single_lifecycle_connected_schedule; refine_steps marks final low-noise phase",
-            "advanced_refine_scheduler_source": "connected_sigmas_single_sampler_lifecycle",
-            "advanced_refine_audio_policy": "single_connected_av_trajectory_and_restore_only_frozen_overlap",
+            "advanced_refine_steps_requested": int(refine_steps),
+            "advanced_refine_steps_effective": int(refine_steps_effective),
+            "advanced_refine_base_steps": int(base_steps),
+            "advanced_refine_total_model_steps": int(base_steps),
+            "advanced_refine_tail_start": int(refine_tail_start),
+            "advanced_refine_interval_policy": "single_connected_schedule_split_between_main_and_refiner",
+            "advanced_refine_latent_source": "stage1_in_progress_solver_state",
+            "advanced_refine_latent_clone": False,
+            "advanced_refine_latent_rebuild": False,
+            "advanced_refine_renoise": False,
+            "advanced_refine_scheduler_source": "true_connected_two_stage_schedule",
+            "advanced_refine_audio_policy": "joint_AV_continues_through_both_sampling_stages",
             "advanced_refine_overlap_policy": "restore_exact_pre_sampling_frozen_av_head",
             "hybrid_keyframe_scope": (
                 "first_only_pass0_last_only_final"
@@ -11578,6 +11740,7 @@ NODE_CLASS_MAPPINGS = {
     'MiniMaxH3LatentLabLongMediaNextSegment': MiniMaxH3LatentLabLongMediaNextSegment,
     'MiniMaxH3LatentLabRuntimeContinuationGuider': MiniMaxH3LatentLabRuntimeContinuationGuider,
     'MiniMaxH3LatentLabRefineSigmas': MiniMaxH3LatentLabRefineSigmas,
+    'MiniMaxH3LatentLabStockAdvancedRefiner': MiniMaxH3LatentLabStockAdvancedRefiner,
     'MiniMaxH3LatentLabProtectRefineAV': MiniMaxH3LatentLabProtectRefineAV,
     'MiniMaxH3LatentLabLongMediaSampler': MiniMaxH3LatentLabLongMediaSampler,
     'MiniMaxH3LatentLabLongMediaDecode': MiniMaxH3LatentLabLongMediaDecode,

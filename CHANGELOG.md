@@ -1,3 +1,12 @@
+# 0.4.1
+
+- Fixed the LongMedia refiner to use a true two-stage KSampler Advanced sampling trajectory instead of replaying low-sigma steps on an already completed latent.
+- With refinement enabled, the connected SIGMAS schedule is split at `total_steps - refine_steps`: stage 1 stops with leftover noise, and stage 2 continues the same trajectory with `add_noise=disable` to the final denoise.
+- Refiner uses the same effective seed as the corresponding main sampler pass; no new starting noise is generated for stage 2.
+- Removed abandoned experimental refiner paths (identity carrier, direct-Euler replay, x0 substitution and manual tail-start wrappers) from the release runtime.
+- `release_guard` remains permanently enabled internally and is no longer exposed as a Long Media Setup switch.
+- No changes to the Unified Clip Engine, MultiClip/segmentation timeline ownership, continuity policy, lip-sync pipeline, OOM Governor V4 or streamed Sol execution.
+
 # 0.4.0
 
 - Promoted the validated 0.3.115 baseline to the first stable 0.4 release.
@@ -439,6 +448,14 @@
 - Keeps the established V40 SOL / INT8 / W4A8 execution path unchanged.
 
 # Changelog
+
+## 0.4.0 refiner correction
+- Corrected additive refiner math: the base sampler now always executes its complete SIGMAS schedule.
+- `refine_steps` are extra model steps, not steps removed from the base sampler.
+- Refiner SIGMAS are copied from the exact final `refine_steps` intervals of the base schedule.
+- Example: `steps=12`, `refine_steps=3` executes 12 base + 3 refine = 15 model evaluations; the refiner uses `sigmas[-4:]`.
+- Refiner uses `DisableNoise`; continuation overlap is restored after the additive refine pass.
+
 
 ## v0.2.46
 

@@ -1,10 +1,18 @@
-"""Pure sigma-schedule policy for LongMedia's two-stage refiner.
+"""Sigma policy for LongMedia refiner using true KSampler Advanced split semantics.
 
-The refiner is a continuation of one diffusion trajectory, not an extra pass
-appended after a complete denoise.  `total_steps` comes from the connected
-SIGMAS tensor (N+1 sigma points for N denoise intervals).  The schedule is
-split at `total_steps - refine_steps` and the boundary sigma is shared by the
-two slices without duplicating a denoise interval.
+The connected SIGMAS schedule is treated as the FULL schedule. When refinement
+is enabled, the primary sampler stops early and returns the in-progress latent
+with leftover noise. The refiner then continues the SAME schedule without adding
+new noise, exactly like chaining two KSampler (Advanced) nodes.
+
+For T total steps and R refine steps::
+
+    main_sigmas   = sigmas[:T-R+1]   # first T-R intervals
+    refine_start  = T-R              # continue from this global step
+    full_sigmas   = sigmas           # refiner sees the full schedule
+
+This means the refiner is not a tail replay on a finished x0. It is the second
+stage of one continuous denoising trajectory.
 """
 from __future__ import annotations
 
@@ -19,20 +27,12 @@ def split_refine_sigmas(sigmas, refine_steps: int):
 
     total_steps = int(src.numel()) - 1
     requested = max(1, int(refine_steps))
+    effective = min(requested, total_steps)
+    switch_step = max(0, total_steps - effective)
 
-    # Keep at least one interval in the high-noise/main stage.  A zero-step
-    # main stage would never inject the requested initial noise before a
-    # DisableNoise refiner, which is not a valid two-stage trajectory.
-    effective = min(requested, max(1, total_steps - 1)) if total_steps > 1 else 0
-    if effective <= 0:
-        # Degenerate 1-step scheduler: keep the full schedule in main and make
-        # refine a zero-interval boundary slice.  Normal H3 schedules are >1.
-        switch_step = total_steps
-        main = src.clone()
-        refine = src[-1:].clone()
-    else:
-        switch_step = total_steps - effective
-        main = src[: switch_step + 1].clone()
-        refine = src[switch_step:].clone()
+    # First sampler stops early and returns the partially denoised state.
+    main = src[:switch_step + 1].clone()
+    # Refiner continues the full connected schedule from switch_step onward.
+    refine = src.clone()
 
     return main, refine, total_steps, switch_step, effective, requested
