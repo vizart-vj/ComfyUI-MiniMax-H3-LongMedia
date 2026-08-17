@@ -224,6 +224,38 @@ def _stream_from_latent(latent: dict, kind: str) -> torch.Tensor:
     return samples
 
 
+def _leading_video_step_from_latent(latent: dict) -> torch.Tensor:
+    """Extract one video latent step without requiring standalone H3 timing.
+
+    A MiniMax video VAE keyframe is encoded as ``[B, 24, 1, H, W]``.  ``T=1``
+    is intentionally valid as a conditioning/injection payload even though a
+    complete H3 video stream must use ``T=5*k+2``. Nested AV latents remain
+    accepted and are reduced to their first step after normal AV validation.
+    """
+    try:
+        samples = latent["samples"]
+    except (KeyError, TypeError) as exc:
+        raise ValueError("Expected a LATENT dictionary with a 'samples' entry.") from exc
+
+    if getattr(samples, "is_nested", False):
+        video, _audio = unpack_av_samples(latent)
+        return video[:, :, :1]
+
+    shape = getattr(samples, "shape", None)
+    if (
+        getattr(samples, "ndim", None) != 5
+        or shape is None
+        or shape[1] != 24
+        or shape[2] < 1
+    ):
+        got = tuple(shape) if shape is not None else type(samples).__name__
+        raise ValueError(
+            "MiniMax H3 leading video step must be [B, 24, T>=1, H, W], "
+            f"got {got}."
+        )
+    return samples[:, :, :1]
+
+
 def _aligned_slice(source_size: int, target_size: int, alignment: str):
     count = min(source_size, target_size)
     if alignment == "start":
@@ -338,9 +370,10 @@ def inject_leading_video_frame(
         raise ValueError("Denoise must be in the [0, 1] range.")
 
     video, audio = unpack_av_samples(av_latent)
-    frame = _stream_from_latent(frame_latent, "video")
-    if frame.shape[2] != 1:
-        frame = frame[:, :, :1]
+    # A VAE-encoded keyframe has T=1. It is not a standalone H3 video stream,
+    # so it must bypass frame_count_from_video_t while retaining strict B/C/H/W
+    # compatibility checks below.
+    frame = _leading_video_step_from_latent(frame_latent)
     if frame.shape[:2] != video.shape[:2] or frame.shape[3:] != video.shape[3:]:
         raise ValueError(
             f"Leading frame shape {tuple(frame.shape)} does not match the "
@@ -664,6 +697,7 @@ def stitch_continuation(
     nested_factory,
     blend_video_overlap: bool = False,
     offload_to_cpu: bool = False,
+    visible_seam_blend_latent_t: int = 0,
 ):
     """Join continuation on the existing AV overlap without shifting time.
 
@@ -710,32 +744,82 @@ def stitch_continuation(
     if next_audio.shape[-1] < overlap_audio_t:
         raise ValueError("Continuation audio is shorter than the requested overlap.")
 
+    visible_next = next_video[:, :, overlap_video_t:].to(previous_video)
     if blend_video_overlap:
-        t = torch.linspace(
-            0.0,
-            1.0,
-            overlap_video_t,
-            dtype=previous_video.dtype,
-            device=previous_video.device,
-        )
-        # Smoothstep: S(t) = 3t² − 2t³ — zero slope at both endpoints
-        # eliminates the visible seam that linear lerp creates.
-        blend = (t * t * (3.0 - 2.0 * t)).view(1, 1, overlap_video_t, 1, 1)
-        blended_overlap = torch.lerp(
-            previous_video[:, :, -overlap_video_t:],
-            next_video[:, :, :overlap_video_t].to(previous_video),
-            blend,
-        )
-        video = torch.cat(
-            (
-                previous_video[:, :, :-overlap_video_t],
-                blended_overlap,
-                next_video[:, :, overlap_video_t:].to(previous_video),
-            ),
-            dim=2,
-        )
+        if overlap_video_t <= 1:
+            stitched_base = torch.cat((previous_video, visible_next), dim=2)
+        else:
+            t = torch.linspace(
+                0.0,
+                1.0,
+                overlap_video_t,
+                dtype=previous_video.dtype,
+                device=previous_video.device,
+            )
+            # Blend only the central body of the overlap. Keep a short prefix/suffix
+            # fully owned by their originating segment so motion stays crisp at the
+            # visible boundaries while still smoothing the hidden overlap.
+            edge = max(1, overlap_video_t // 4)
+            if overlap_video_t >= 4:
+                denom = max(1.0, float(overlap_video_t - (2 * edge)))
+                ramp = ((torch.arange(overlap_video_t, device=previous_video.device, dtype=previous_video.dtype) - float(edge)) / denom).clamp(0.0, 1.0)
+                t = ramp
+            # Smoothstep: S(t) = 3t² − 2t³ — zero slope at both endpoints.
+            blend = (t * t * (3.0 - 2.0 * t)).view(1, 1, overlap_video_t, 1, 1)
+            blended_overlap = torch.lerp(
+                previous_video[:, :, -overlap_video_t:],
+                next_video[:, :, :overlap_video_t].to(previous_video),
+                blend,
+            )
+            stitched_base = torch.cat(
+                (
+                    previous_video[:, :, :-overlap_video_t],
+                    blended_overlap,
+                    visible_next,
+                ),
+                dim=2,
+            )
+
+        # V327 phase-safe seam policy: never interpolate the final previous latent
+        # step with the first *new* continuation step. Those tensors represent
+        # different global times; a 50/50 mix decodes as several ghosted/stalled
+        # pixel frames followed by a jump. The aligned hidden overlap above already
+        # hands ownership to the continuation (its final blend weight is 1.0).
+        # Keep the old parameter as an internal compatibility hook, but production
+        # calls use zero and therefore preserve the first visible continuation step.
+        seam_t = int(max(0, visible_seam_blend_latent_t))
+        seam_t = min(seam_t, int(previous_video.shape[2]), int(visible_next.shape[2]))
+        if seam_t > 0:
+            t2 = torch.linspace(
+                0.0,
+                1.0,
+                seam_t,
+                dtype=previous_video.dtype,
+                device=previous_video.device,
+            )
+            seam_blend = (t2 * t2 * (3.0 - 2.0 * t2)).view(1, 1, seam_t, 1, 1)
+            prev_visible = stitched_base[:, :, : previous_video.shape[2]]
+            prev_tail = prev_visible[:, :, -seam_t:]
+            next_head = visible_next[:, :, :seam_t]
+            # Keep length unchanged: soften BOTH sides of the visible boundary
+            # instead of replacing N+N latent steps with only N steps.
+            left_weights = 0.5 * seam_blend
+            right_weights = 0.5 + (0.5 * seam_blend)
+            left_block = torch.lerp(prev_tail, next_head, left_weights)
+            right_block = torch.lerp(prev_tail, next_head, right_weights)
+            video = torch.cat(
+                (
+                    prev_visible[:, :, :-seam_t],
+                    left_block,
+                    right_block,
+                    visible_next[:, :, seam_t:],
+                ),
+                dim=2,
+            )
+        else:
+            video = stitched_base
     else:
-        video = torch.cat((previous_video, next_video[:, :, overlap_video_t:]), dim=2)
+        video = torch.cat((previous_video, visible_next), dim=2)
     raw_audio = torch.cat((previous_audio, next_audio[..., overlap_audio_t:]), dim=-1)
     total_frames = previous_frames + next_frames - overlap_frames
     expected_audio_t = round(total_frames / FPS * AUDIO_LATENT_FPS)
@@ -748,6 +832,22 @@ def stitch_continuation(
         audio = _crop_pad_stream(raw_audio, audio_target, "audio", "start")
     else:
         audio = raw_audio
+
+    # V318 boundary invariant: latent concatenation must preserve the exact H3 frame
+    # arithmetic, and the stitched audio grid must remain synchronized with it.
+    actual_video_frames = frame_count_from_video_t(video.shape[2])
+    if actual_video_frames != total_frames:
+        raise RuntimeError(
+            '[V318 BOUNDARY AUDIT] latent concat frame mismatch: '
+            f'actual={actual_video_frames}, expected={total_frames}, '
+            f'previous={previous_frames}, next={next_frames}, overlap={overlap_frames}'
+        )
+    if int(audio.shape[-1]) != int(expected_audio_t):
+        raise RuntimeError(
+            '[V318 BOUNDARY AUDIT] audio/video timeline mismatch after stitch: '
+            f'audio_t={int(audio.shape[-1])}, expected_audio_t={int(expected_audio_t)}, '
+            f'frames={actual_video_frames}'
+        )
 
     output = {
         key: value

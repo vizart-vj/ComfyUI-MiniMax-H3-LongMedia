@@ -6,6 +6,7 @@ H3 Motion Context / Contex Loop family so a compatible installed owner can be
 reused instead of stacking a second process-global patch.
 """
 import logging
+import inspect
 import comfy.ldm.minimax.model as mm
 
 MC_KEY = "motion_context_index"
@@ -24,12 +25,36 @@ def _target_origin(layout):
     return float(layout.position_ids[a, 0])
 
 
+def _orig_accepts_frame_count():
+    try:
+        sig = inspect.signature(_orig_init)
+    except Exception:
+        return False
+    params = sig.parameters
+    return (
+        "frame_count" in params
+        or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+    )
+
+
+def _call_orig(self, text_len, latent_t, latent_h, latent_w, audio_t,
+               *, keyframes=None, refs=None, frame_count=None):
+    kwargs = {"keyframes": keyframes, "refs": refs}
+    if frame_count is not None and _orig_accepts_frame_count():
+        kwargs["frame_count"] = frame_count
+    return _orig_init(
+        self, text_len, latent_t, latent_h, latent_w, audio_t, **kwargs
+    )
+
+
 def _patched_init(self, text_len, latent_t, latent_h, latent_w, audio_t,
                   keyframes=None, refs=None, frame_count=None):
     marked = bool(keyframes) and any(kf.get(MC_KEY) is not None for kf in keyframes)
     if not marked:
-        return _orig_init(self, text_len, latent_t, latent_h, latent_w, audio_t,
-                          keyframes=keyframes, refs=refs, frame_count=frame_count)
+        return _call_orig(
+            self, text_len, latent_t, latent_h, latent_w, audio_t,
+            keyframes=keyframes, refs=refs, frame_count=frame_count,
+        )
 
     # Stock H3 only accepts first/last guide positions.  Build our marked guide
     # rows legally at frame 0, then translate only those rows after construction.
@@ -40,8 +65,10 @@ def _patched_init(self, text_len, latent_t, latent_h, latent_w, audio_t,
             item["resolved_frame_index"] = 0
         safe.append(item)
 
-    _orig_init(self, text_len, latent_t, latent_h, latent_w, audio_t,
-               keyframes=safe, refs=refs, frame_count=frame_count)
+    _call_orig(
+        self, text_len, latent_t, latent_h, latent_w, audio_t,
+        keyframes=safe, refs=refs, frame_count=frame_count,
+    )
 
     cond_spans = [(a, b) for a, b, kind in self.segments if kind == "cond"]
     if len(cond_spans) != len(keyframes):

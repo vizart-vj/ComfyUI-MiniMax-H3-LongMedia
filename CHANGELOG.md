@@ -1,3 +1,307 @@
+# 0.4.0
+
+- Promoted the validated 0.3.115 baseline to the first stable 0.4 release.
+- Unified fixed segmentation and planned MultiClip under one clip executor; only timeline-boundary math differs.
+- Fixed Planner workflow ownership and bidirectional vertical resize behavior.
+- Removed obsolete public `video_strength` / `audio_strength` controls and their backend plumbing.
+- Hardened lip-sync/source-audio handling around the authoritative `audio_1` timeline.
+- Added geometry-aware OOM Governor V4 and preventive attention preflight for very long sequences on constrained GPUs.
+- Added bounded streamed Sol QKV routing for sequences that cannot safely allocate full Sage attention workspaces.
+- Removed development hot-reload/runtime helpers and accumulated per-dev-build notes from the release package.
+- Added release documentation for MultiClip prompting, fixed segmentation prompting, architecture, sampler/VRAM optimization, and release audit.
+- Set package, project and VERSION metadata to `0.4.0`.
+
+## 0.3.115-dev
+
+- Fixed LongMedia Planner vertical resize becoming non-shrinkable after expansion by decoupling runtime viewport height from LiteGraph minimum-size computation.
+
+# v0.3.108-dev
+
+- Fix lip-sync regression: preserve authoritative local-0 source-audio guides across continuation Motion Context; restore pass-0 guide; suppress competing sampled audio tail in lip-sync mode.
+
+## v0.3.105-dev
+- lip_sync: remove extra per-clip Audio Guide; restore full Extender-style AV Motion Context audio tail from the same sampled AV latent while preserving full native Audio1 Ref2VA conditioning.
+
+## v0.3.103-dev
+- Diagnostic lip-sync build based directly on v0.3.96.
+- `audio_mode=lip_sync` now outputs H3-generated target audio instead of restoring `audio_1`.
+- Conditioning / MultiClip / Motion Context are unchanged from the v0.3.96 baseline.
+
+## v0.3.90-dev
+- Fix LongMediaPlan schema mismatch for `release_guard`; Setup no longer crashes in `dataclasses.replace()`.
+- No generation or memory-policy changes.
+
+## v0.3.89-dev
+- Fixed Planner connection UI lifecycle: connecting `clip_plan` now immediately hides Setup's duplicate MultiClip editor and redundant workflow selector.
+- Dynamic input labels now follow external Planner MultiClip state.
+
+## 0.3.88-dev
+
+- Added standalone **MiniMax H3 LongMedia Planner** node for per-clip prompt/duration/seed planning.
+- Long Media Setup now accepts an optional `clip_plan` and automatically switches to MultiClip execution when connected.
+- The embedded MultiClip editor remains as a fallback when no Planner is connected.
+
+## 0.3.87-dev
+- MultiClip card editor UI with per-clip prompt/seed/duration; hides irrelevant global duration controls in MultiClip mode.
+
+## 0.3.84-dev
+- Two-pass identity-only latent re-anchor without Picture tokenizer re-entry.
+
+## 0.3.83-dev
+- Native H3 motion-context backend for the first handoff of exactly two segmented passes.
+- Fresh continuation head + exact temporal keyframes/audio timeline; no copied frozen head in this path.
+- 3+ pass behavior unchanged.
+
+## 0.3.82-dev
+- AIMDO Setup/TE lifecycle hardening for native DynamicVRAM fastpath.
+- Setup boundaries now synchronize CUDA, cleanup Comfy prefetch queues, reset cast buffers and reset AIMDO VBAR watermark limits.
+- One lifecycle-only retry for transient `Fault failed` / `device not ready` TE faults.
+- H3 native AIMDO fastpath, two-pass continuity, SIGMAS/refine/audio math unchanged.
+
+## 0.3.80-dev
+
+- First-handoff bridge for `segmented_continuation`: only segment 0 -> 1 receives up to 56 frames of generated raw paired AV history as conditioning-only context.
+- Frozen overlap/stitch remains exactly user-selected (22f in the standard case).
+- Original still-image refs remain decoupled after pass 0; later continuation->continuation boundaries retain the proven 0.3.77 behavior.
+- Native AIMDO fastpath and H3 sampling math are unchanged.
+
+## 0.3.77-dev
+- Native AIMDO fastpath A/B for oversized INT8 on comfy-aimdo >=0.4.6; legacy hard-gate bypassed, H3 math unchanged.
+
+## 0.3.75-dev
+- conservative 0.3.65-based RAM/file-cache prewarm for oversized AIMDO-backed H3 checkpoints; no H3 math, VBAR, or runtime-governor changes
+
+## 0.3.65-dev
+- Fix DEV HOT RELOAD baseline capture: fingerprint is recorded at package import instead of first queue, so replacing package files after ComfyUI startup reliably reloads the new runtime on the very first execution; preserves 0.3.64 bound VBAR governor and 0.3.61 quality-safe math.
+
+## 0.3.64-dev
+- bind VBAR residency governor directly to the active H3 ModelPatcher/state via the DIFFUSION_MODEL wrapper; removes reliance on transformer_options object-reference propagation and adds first-forward wiring diagnostics
+
+## 0.3.63-dev
+- moves AIMDO/VBAR residency promotion from sampler callback to the authoritative H3 diffusion-forward boundary; first forward remains safe, subsequent forwards reopen the model watermark only above mode-specific real driver-free VRAM floors
+
+## 0.3.62-dev
+- adaptive AIMDO/VBAR residency governor: safely reopens the VBAR offload watermark at completed denoise-step boundaries when driver-free VRAM is above a per-memory-mode promotion floor; preserves v0.3.61 H3 math exactly
+
+## 0.3.61-dev
+- replace dangerous tiny-probe cached INT8 MLP shortcut with real-chunk parity gating, explicit SwiGLU, QuantizedTensor/F.linear dispatch, and correct fc2 preparation on post-SwiGLU input shape; keeps Governor V3 memory policy
+
+## 0.3.60-dev
+- restores block-resident native INT8 fc1/fc2 reuse to eliminate v0.3.59 per-chunk weight re-streaming; block-0 stock-vs-cached numerical parity gate disables the fast path automatically on divergence
+- Adaptive Residency Governor V3 lowers artificial planning reserves and uses more available VRAM in normal/low/ultra while preserving hard runtime floors and out-of-core pinned/prefetch protections
+
+## 0.3.59-dev
+- Stock-math H3 execution: disable custom prepared/cached INT8 MLP fast-path in every memory mode; token chunking is activation-only and calls stock Comfy block.mlp()
+- Adaptive Residency Governor v2 is active for normal, low_vram, ultra_low_vram and AUTO-selected profiles; modes now define different safety envelopes instead of fixed memory behavior
+- reduce ultra fixed activation reserve from the old 8GB-class policy to a 3-4GB planning envelope so safe VRAM can remain resident instead of idling
+- out-of-core models disable pinned-memory AIMDO and whole-block dynamic VBAR prefetch regardless of manually selected memory mode
+- governor uses model/VRAM ratio, observed packed token count and real CUDA driver-free memory; RAM availability is sampled during planning
+
+## 0.3.58-dev
+- H3 single-lifecycle refine: execute the full connected SIGMAS schedule in one SamplerCustomAdvanced call, eliminating the intermediate noisy-latent handoff and second sampler initialization; preserve exact frozen AV overlap after continuation passes
+
+## 0.3.57-dev
+- MiniMax H3 native LoRA compatibility layer: adds Diffusers/PEFT-style transformer_blocks.* aliases for ff, attn out_proj, and fused qkv slice mapping; includes transformer/base_model/lycoris-style prefixes without changing sampler or memory logic
+
+## 0.3.56-dev
+- adaptive driver-free VRAM governor for AUTO out-of-core H3; fixed ultra_low_vram remains safe fallback
+
+## 0.3.55-dev
+- ultra_low_vram sampler-local pinned-memory gate for AIMDO HostBuffer OOMs; no CLI flags required
+
+## 0.3.54-dev
+- ultra_low_vram sequential MLP weight streaming: disable simultaneous cached fc1+fc2 residency; 128-token FFN chunks.
+
+## 0.3.53-dev
+- ultra-low-VRAM attention-to-FFN stage residency barrier for 32+ GB staged H3 models.
+
+## 0.3.52-dev
+- hard-gate Comfy dynamic VBAR prefetch after BaseModel override for low/ultra memory modes; works with existing/Sage attention too.
+
+## 0.3.51-dev
+- sampler-local auto/normal/low_vram/ultra_low_vram out-of-core residency profiles; no CLI flags required.
+
+## 0.3.50-dev
+- replaces the old additive refine pass with a true two-stage split of one connected SIGMAS schedule
+- `steps=12, refine_steps=3` now executes 9 main intervals + 3 refine intervals = 12 total model steps, not 15
+- refine always uses DisableNoise and continues from the partially denoised main latent
+- audio now follows the same complete diffusion trajectory; only exact frozen continuation AV overlap is restored after refine
+- legacy refine_add_noise/refine_seed inputs remain in the schema only for saved-workflow compatibility and are ignored
+- keeps v0.3.49 resolution safety and all v0.3.45 segmented-continuation/reference-decoupling behavior intact
+
+## 0.3.49-dev
+- decouple still-image Ref2VA conditioning resolution from output resolution; cap refs to stable ~0.60 MP and enforce 32px patch-safe geometry
+- normalize connected target width/height values to the H3 32px grid
+- based on v0.3.45; segmented continuation semantics unchanged
+
+## 0.3.45-dev
+- Advanced refine now derives its interval automatically from connected SIGMAS; only refine_steps is user-controlled
+
+## 0.3.44-dev
+- optional Advanced-style per-segment refine with protected audio and continuation overlap
+
+## 0.3.43-dev
+- segmented_continuation decouples original still-image refs after pass 0 to prevent literal source-image reinsertion
+
+## 0.3.41-dev
+- stronger 2-frame visible startup-anchor suppression after decode
+
+## 0.3.40-dev
+- segmented_continuation now supports dedicated opening_frame while preserving the 0.3.39 regression-safe continuation path
+
+## 0.3.39-dev
+- regression-safe segmented mode restores v0.3.32 hybrid_first_frame sampling and suppresses only decoded frame-0 anchor flash
+
+## v0.3.31-dev — Stateful multi-pass continuity
+
+- Carry completed timeline events forward as established scene state rather than replay commands.
+- Add strict motion/composition continuation contract for every continuation pass.
+- Bound state history and validate 4-pass operation.
+- Sort merged motion keyframes chronologically.
+- Disable hidden-overlap latent crossfade; overlap is frozen context preroll and is trimmed at stitch.
+- Preserve v0.3.28 workflow-mode UI lifecycle and v0.3.30 single-step latent injection.
+
+## v0.3.30 — Single-Step Hybrid Latent Injection
+
+- fixes the v0.3.29 Hybrid startup crash `MiniMax H3 video latent time must be 5*k+2, got 1`;
+- recognizes a VAE-encoded keyframe `[B, 24, 1, H, W]` as a valid **single-step injection payload**, without treating it as a complete standalone H3 video;
+- preserves strict `5*k+2` validation for every complete video/AV stream and retains exact batch/channel/spatial compatibility checks before copying the keyframe into the target latent;
+- keeps the v0.3.29 segment-local prompt, stable native-reference topology, Picture-tag repair and Manual UI fixes unchanged;
+- adds a torch-free regression that reproduces the exact `T=1` contract and rejects malformed channel layouts.
+
+## v0.3.29 — Stable Native References + Segment Timeline
+
+- scopes timestamped prompt events for **every** pass, including pass 0; a future `07 sec` event can no longer leak into a 5-second opening pass and then replay after the join;
+- preserves the exact native H3 reference count, order, tokenizer presentation and latent geometry across segmented Hybrid passes; distinct character refs are never collapsed into one continuation-only identity sheet;
+- repairs unambiguous input-socket-style `<Picture N>` tags in Hybrid prompts, where first/last-frame anchors do not consume native Picture ordinals, and reports the applied mapping;
+- makes `first_frame_mode=latent_inject` effective in Hybrid mode by pinning the already-encoded opening keyframe into the first target latent step before sampling;
+- applies `pixel_override` and `blend` to Hybrid output as well as lip-sync, and relocates final-frame anchors to the final pass's local last frame;
+- relabels Manual image sockets from `conditioning_mode`, refreshes those labels immediately when the mode changes, and keeps connection-triggered labels consistent;
+- adds a pure timeline/reference policy module plus regressions built from the embedded workflow in `MiniMax_H3_00002-audio.mp4`.
+
+## v0.3.28 — LongMediaSetup Manual UI Lifecycle
+
+- fixes Manual controls remaining collapsed after repeated public-mode refreshes: widget presentation state is now captured exactly once, including the valid case where `computeSize`/`draw` are inherited or undefined;
+- preserves valid expert values across `manual -> public -> manual` instead of destructively replacing first-frame and conditioning settings with public defaults;
+- makes workflow loading atomic for the frontend: callbacks are installed during graph restoration, while visibility, labels and node size are reconciled once after configuration completes;
+- assigns workflow-mode visibility and resizing to one frontend owner, removing the competing asynchronous callback previously installed by the dynamic-socket extension;
+- keeps lip-sync socket labels stable after connections add or remove dynamic inputs, and adds a standalone Node regression suite for visibility, sizing, value persistence, callback ownership and socket lifecycle;
+- keeps the v0.3.27 segment-continuity pipeline and serialized backend schema unchanged.
+
+## v0.3.27 — Segment Continuity Integrity
+
+- removes the v0.3.26 pass-0 startup echoes at frames 5/22/39; segmented Hybrid now uses only the native frame-0 anchor, preventing the hard anchor-release identity/pose flip observed at frames 53–55 (2.208–2.292 s at 24 fps);
+- disables the v0.3.23 cross-time visible-seam latent interpolation; the aligned hidden overlap still smoothstep-blends, but the first new continuation latent step is no longer replaced by a 50/50 mix with the preceding time step;
+- restores the v0.3.25 continuation identity rule: `image_1` remains an opening timeline anchor and is never promoted into the pass-2 Picture sheet; zero/one explicit Picture refs keep native semantics, while only 2+ non-terminal Picture refs may be combined;
+- locks segmented `attention_mode=auto` to `existing` for every pass, preventing an H3-alignment/token-threshold change from silently switching one movie from existing/Sage to approximate Sol mid-run; explicitly forced `sol` and `scheduled_sol` remain unchanged;
+- keeps the 22-frame frozen overlap, runtime motion guides, same-seed policy, source/reference timeline alignment, low-VRAM INT8 demand residency, audio, and tiled VAE decode unchanged.
+
+## v0.3.26 — Startup Stabilizer + Continuation Identity Gate
+
+- adds a conservative **pass-0 startup stabilizer** for segmented hybrid runs: the opening keyframe (`image_1`) is echoed as short-range internal anchors at early frames (5 / 22 / 39 when available) to reduce the head-flip / identity wobble seen at the start of some clips.
+- those startup anchors are **explicitly stripped from continuation passes**, so the stabilizer only affects the opening beat and does not freeze later motion.
+- changes continuation hybrid-image handling so pass 2+ use **one continuation-only identity sheet** built from `image_1` plus non-terminal image refs. In `hybrid_first_last`, `image_2` remains the terminal destination anchor and is **not promoted as a continuation reference**.
+- keeps the existing segmentation pipeline, overlap stitching, seed reuse, runtime motion handoff, and the v0.3.25 low-VRAM INT8 residency behavior unchanged.
+
+## v0.3.25 — Low-VRAM INT8 Demand-Loaded Residency
+
+- fixes a native INT8/ConvRot startup OOM where Comfy/AIMDO `prefetch_queue_pop()` attempted a speculative 64 MB device copy before the first denoise step;
+- on GPUs with <=18.5 GB VRAM, native INT8 now disables dynamic-VBAR prefetch and uses demand-loaded quantized-weight residency;
+- W4A8 keeps its existing prefetch-off policy; >18.5 GB native INT8 keeps the previous Comfy prefetch behavior;
+- preserves the v0.3.24 INT8 AUTO-SOL quality-safe tau profile and does not change segmentation, runtime motion handoff, seed/sigmas, audio, or decode.
+
+## v0.3.23
+
+- keeps the v0.3.22 segmented runtime intact but softens the *visible* inter-segment handoff in addition to the hidden overlap blend;
+- stitches now smooth one tiny latent step on **both sides** of the visible seam, reducing the 4–6 second “double jump” / cadence break many segmented 10s renders showed around the 5s boundary;
+- length, FPS, and H3 `5*k+2` latent-grid invariants are preserved exactly; the existing boundary auditor still validates stitched frame/audio synchronization;
+- does not change seeds, sigma policy, SOL tau, source prompt timing, or the established runtime motion-context handoff.
+
+## v0.3.22
+
+- keeps all sampler tuning widgets visible in `sampler_mode=auto`;
+- AUTO starts from the same production defaults but now honors explicit widget overrides, enabling clean AUTO+existing vs AUTO+SOL A/B tests;
+- stops frontend refresh/mode changes from resetting AUTO tuning widgets;
+- preserves v0.3.21 INT8 residency hysteresis and the frozen segmentation/continuation implementation.
+
+## v0.3.21 — AUTO INT8 Residency Hysteresis Fix
+
+- made native INT8 AUTO residency policy safe for oversubscribed models (for example a ~20 GB H3 checkpoint on a 16 GB GPU);
+- emergency cleanup now uses effective reclaimable headroom (`driver_free + allocator cache`) instead of treating low driver-free VRAM alone as an OOM condition;
+- added an 8-block cooldown after a genuine emergency trim to prevent block-by-block `soft_empty_cache()` thrashing;
+- reduced the cache-reclaim floor and made cleanup a strict dual-threshold emergency path;
+- does not change SOL tau, chunk sizing, seed/sigma policy, segmentation, runtime motion handoff, audio, or VAE decode behavior.
+
+## v0.3.20
+
+- moved continuation motion-context guider construction from GraphBuilder expansion to a runtime node that depends on the completed previous sampler output;
+- V60 motion guides can now inspect the actual previous AV latent tail instead of receiving a graph-output proxy;
+- added `[V320 RUNTIME MOTION HANDOFF]` diagnostics with previous-frame, overlap and guide-span information;
+- kept the v0.3.19 PackedLayout compatibility fix, v0.3.18 timeline/boundary audit, and existing frozen-overlap/stitch behavior unchanged so this build tests one continuation hypothesis only.
+
+## v0.3.19
+
+- fixed `PackedLayout.__init__()` compatibility with current ComfyUI builds that do not expose the optional `frame_count` keyword; the motion-context layout wrapper now forwards it only when the wrapped constructor actually accepts it;
+- stopped V60 auxiliary motion-guide setup from treating GraphBuilder output proxies as runtime LATENT dictionaries; the real frozen latent overlap remains active via `LongMediaNextSegment`;
+- preserved the v0.3.18 unified timeline/boundary auditor and all v0.3.17/v0.3.16 continuation/decode fixes.
+
+## v0.3.18 — Unified Segment Timeline + Boundary Auditor
+
+- formalized one canonical timeline contract per pass: `context_start`, `visible_start`, `local_visible_offset`, visible length/end;
+- fixed continuation audio-reference alignment: full H3 reference windows now begin at `context_start`, keeping hidden overlap at local t=0..overlap and the music's visible boundary aligned with the target at local t=overlap;
+- source video/audio continuation windows remain context-aligned while only their post-overlap latent region populates new visible media;
+- added `[V318 TIMELINE]` diagnostics for context/visible/source/reference origins on segment 2+;
+- added a strict `[V318 BOUNDARY AUDIT]` after every stitch to verify `previous + next - overlap == stitched` and exact H3 audio/video latent synchronization;
+- preserves v0.3.17 seam blending and all v0.3.16 decode-memory, v0.3.15 layout, v0.3.14 UI, and v0.3.13 segment-duration fixes.
+
+## v0.3.17
+
+- improved segmented stitching by enabling smooth latent overlap blending for automatic multi-pass continuation, reducing visible seams at segment joins;
+- corrected continuation audio/music reference timing so segment audio refs start at the user-visible boundary after overlap, improving sync on segment 2+;
+- added `[V317 AUDIO TIMELINE SYNC]` logging when audio reference slicing is shifted from context origin to visible origin;
+- preserved all v0.3.16 decode-memory, v0.3.15 tag/layout guard, v0.3.14 manual UI, and v0.3.13 segment-duration baseline fixes.
+
+## 0.3.16 — 2026-08-14
+
+- Fixed fatal long-video VAE decode OOM/abort seen after successful segmented sampling.
+- `enable_tiling=True` now bypasses regular full decode and goes directly through ComfyUI `VAE.decode_tiled()`.
+- Added hard pre-decode model unload/cache barrier and VRAM diagnostics.
+- Added direct spatial + temporal tile parameter conversion matching ComfyUI VAEDecodeTiled semantics.
+- Preserved v0.3.15 segmented tag/layout guard and all v0.3.11+ audio/AUTO/low-VRAM behavior.
+
+## v0.3.15 — Segmented H3 tag/layout guard
+
+- Fixed an intermittent segmented Hybrid/Loop crash in stock MiniMax H3: `IndexError: list index out of range` while walking `text_token_tags`.
+- At the DIFFUSION_MODEL boundary, LongMedia now aligns presentation-tag length to the actual encoded context length without mutating cached conditioning. Missing tail rows are ordinary text modality (`tag=1`); unreachable surplus rows are truncated.
+- Added a cheap PackedLayout integrity check (contiguous segments, `seq_len`, `position_ids`, and text-span/context agreement) so a real layout corruption reports explicit dimensions instead of an opaque H3 index error.
+- Keeps v0.3.14 live Manual UI, v0.3.13 segment-duration semantics, v0.3.12 anchor timeline correction, and the v0.3.11 audio/low-VRAM baseline unchanged.
+
+## v0.3.14 — Live Manual UI fix
+
+- Fixed Sampler `sampler_mode=manual` controls not appearing until a page reload on current ComfyUI frontends.
+- Dynamic widget visibility now uses `options.hidden` and keeps the original widget type stable.
+- Added legacy LiteGraph size/draw fallback without converting widgets to `converted-widget`.
+- Preserves v0.3.13 segment-duration semantics and v0.3.12 hybrid anchor timeline fix.
+
+## v0.3.13 — Segment Duration + Anchor Timeline baseline
+
+
+- Restored public multi-pass segmentation for `hybrid_auto`, `ref2va_full`, `loop`, and `video_ref_edit`.
+- `segment_seconds` remains the serialized backend field for workflow compatibility, but is displayed as `segment_duration` in the Setup UI.
+- `segment_duration` means **new visible output timeline per pass**. `overlap_frames` is extra hidden continuation context and no longer reduces the requested segment duration.
+- Removed the old public-mode override that forced `segment_seconds=600` and `overlap_frames=0`, which effectively disabled segmentation outside Manual.
+- Public modes now honor the planned overlap; the overlap control itself remains visible only in Manual to keep the normal UI compact.
+- Includes the v0.3.12 ref-aware first/last anchor timeline placement fix.
+- Keeps the v0.3.11 audio, lip-sync, AUTO Sol, schema, and low-VRAM Manual baseline unchanged.
+
+# v0.3.12 — Hybrid Anchor Timeline Fix
+
+- Fixed first/last H3 keyframe anchors being displaced into the past when Hybrid or Loop conditioning is combined with packed image/video/audio references.
+- Hybrid keyframes now carry the shared `motion_context_index` target-frame marker.
+- The marker-gated `PackedLayout` adjustment is activated only when keyframes and refs coexist, translating anchor rows onto the true target-video origin after the packed reference span.
+- No-ref workflows retain stock H3 keyframe placement.
+- Built directly on the v0.3.11 baseline: audio passthrough/preserve fixes, lip-sync, quality-safe AUTO Sol, live Manual UI, schema compatibility, and low-VRAM fine-step controls are unchanged.
+
 # v0.3.11 — Low-VRAM Manual Tuning & Audio Stability Baseline
 
 - New development baseline for subsequent LongMedia builds.

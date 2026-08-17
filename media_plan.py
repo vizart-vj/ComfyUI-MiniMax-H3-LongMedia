@@ -29,8 +29,6 @@ class LongMediaPlan:
     generated_frames: int
     trim_frames: int
     resolution_mode: str
-    video_strength: float
-    audio_strength: float
     video_fps: float
     source_video: Any = None
     source_audio: Any = None
@@ -42,17 +40,42 @@ class LongMediaPlan:
     final_audio_override: Any = None
     final_audio_track_count: int = 0
     audio_output_mode: str = "auto"
+    # v0.3.104 lip-sync: native Ref2VA Audio1 + local native H3 Audio Guide.
+    lip_sync_native_audio_guide: bool = False
+    # v0.3.113: authoritative source audio is injected into the target AV latent
+    # and frozen (noise mask 0) so the joint H3 transformer predicts video
+    # against the exact speech timeline instead of treating Audio1 only as a ref.
+    lip_sync_target_audio_locked: bool = False
     first_frame_override: Any = None
     first_frame_mode: str = "latent_inject"
     first_frame_denoise: float = 0.25
     first_frame_blend_frames: int = 3
+    # True when image_1 was written into the target video latent before pass 0.
+    # Kept separate from first_frame_override so latent mode does not retain a
+    # full-resolution pixel tensor throughout long-media sampling.
+    first_frame_latent_injected: bool = False
     # Per-pass text conditionings are pre-encoded inside Setup while the TE is
     # intentionally resident.  Never store CLIP/TE/model-patcher objects here.
     segment_positive_conditionings: Any = None
     segment_prompt_summaries: Any = None
+    # v0.3.85 MultiClip: optional per-pass seeds; None = sampler base seed + clip index.
+    segment_seeds: Any = None
     # V63 storyboard bridge: ready per-pass AV latents and decoded boundary index.
     storyboard_segment_avs: Any = None
     storyboard_bridge_frame: int = -1
+    # v0.3.39 segmented mode: preserve the known-good hybrid sampling anchor
+    # but hide only its literal decoded frame-0 from final output.
+    suppress_visible_opening_anchor: bool = False
+    regression_safe_segmented_conditioning: bool = False
+    # v0.3.43: original still-image refs are used only on pass 0. Later passes
+    # continue from generated AV state and must not carry full spatial image ref latents.
+    decouple_original_image_refs_after_pass0: bool = False
+    # v0.3.86+: console release guard is persisted with the plan so downstream
+    # nodes can preserve the workflow-selected logging policy. This flag affects
+    # diagnostics only; it must never alter sampling/memory/OOM behavior.
+    release_guard: bool = True
+    # v0.3.111 unified clip executor: legacy/single, fixed segmentation, or planned MultiClip.
+    timeline_policy: str = "legacy"
 
 
 def _align_up_frames(frame_count: int) -> int:
@@ -183,8 +206,6 @@ def build_media_plan(
     overlap_frames: int,
     video_fps: float,
     resolution_mode: str,
-    video_strength: float,
-    audio_strength: float,
 ) -> LongMediaPlan:
     if resolution_mode not in {"match", "max"}:
         raise ValueError("resolution_mode must be 'match' or 'max'.")
@@ -273,8 +294,6 @@ def build_media_plan(
         generated_frames=generated_frames,
         trim_frames=generated_frames - output_frames,
         resolution_mode=resolution_mode,
-        video_strength=float(video_strength),
-        audio_strength=float(audio_strength),
         video_fps=float(video_fps),
         source_video=source_video,
         source_audio=source_audio,

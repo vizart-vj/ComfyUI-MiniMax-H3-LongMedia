@@ -140,30 +140,20 @@ function setInputDisplay(input, label) {
 }
 
 function refreshSocketLabels(node) {
-    const mode = widget(node, 'workflow_mode')?.value ?? 'hybrid_auto';
     const get = (name) => (node.inputs ?? []).find((input) => input?.name === name);
     const pictures = Array.from({ length: 9 }, (_, i) => get(`image_${i + 1}`));
     const videos = Array.from({ length: 3 }, (_, i) => get(`video_${i + 1}`));
     const audios = Array.from({ length: 3 }, (_, i) => get(`audio_${i + 1}`));
-    pictures.forEach((input, idx) => setInputDisplay(input, `image_${idx + 1}`));
+
+    // v0.3.96: sockets keep native H3 reference semantics in every workflow.
+    // Modes may annotate a native input, but never repurpose image/audio slots.
+    pictures.forEach((input, idx) => setInputDisplay(input, `image_${idx + 1} • picture_${idx + 1}`));
     videos.forEach((input, idx) => setInputDisplay(input, `video_${idx + 1}`));
     audios.forEach((input, idx) => setInputDisplay(input, `audio_${idx + 1}`));
-    if (mode === 'hybrid_auto') {
-        setInputDisplay(pictures[0], 'image_1 • first_frame');
-        setInputDisplay(pictures[1], 'image_2 • last_frame');
-        for (let i = 2; i < pictures.length; i += 1) setInputDisplay(pictures[i], `image_${i + 1} • picture_${i - 1}`);
-    } else if (mode === 'video_ref_edit') {
-        setInputDisplay(videos[0], 'video_1 • source_video');
-        setInputDisplay(audios[0], 'audio_1 • source_audio');
-        for (let i = 0; i < pictures.length; i += 1) setInputDisplay(pictures[i], `image_${i + 1} • picture_${i + 1}`);
-        for (let i = 1; i < videos.length; i += 1) setInputDisplay(videos[i], `video_${i + 1} • extra_video_${i + 1}`);
-        for (let i = 1; i < audios.length; i += 1) setInputDisplay(audios[i], `audio_${i + 1} • extra_audio_${i + 1}`);
-    } else if (mode === 'ref2va_full') {
-        for (let i = 0; i < pictures.length; i += 1) setInputDisplay(pictures[i], `image_${i + 1} • picture_${i + 1}`);
-    } else if (mode === 'loop') {
-        setInputDisplay(pictures[0], 'image_1 • first+last_frame');
-        setInputDisplay(pictures[1], 'image_2 • reserved/ignored');
-        for (let i = 2; i < pictures.length; i += 1) setInputDisplay(pictures[i], `image_${i + 1} • picture_${i - 1}`);
+
+    const audioMode = widget(node, 'audio_mode')?.value ?? 'auto';
+    if (audioMode === 'lip_sync') {
+        setInputDisplay(audios[0], 'audio_1 • lip_sync');
     }
 }
 
@@ -172,11 +162,11 @@ const COMBOS = {
     resolution_mode: { values: ["match", "max"], fallback: "match" },
     reference_budget: { values: ["low", "medium", "high", "max"], fallback: "low" },
     video_mode: { values: ["auto", "preserve", "transform"], fallback: "auto" },
-    audio_mode: { values: ["auto", "preserve", "generate", "reference_only", "preserve_reference"], fallback: "auto" },
+    audio_mode: { values: ["auto", "preserve", "generate", "reference_only", "preserve_reference", "lip_sync"], fallback: "auto" },
     generation_mode: { values: ["auto", "lip_sync"], fallback: "auto" },
     first_frame_mode: { values: ["latent_inject", "pixel_override", "blend"], fallback: "latent_inject" },
     conditioning_mode: { values: ["auto_refs", "hybrid_first_frame", "hybrid_first_last"], fallback: "auto_refs" },
-    workflow_mode: { values: ["hybrid_auto", "ref2va_full", "loop", "manual", "video_ref_edit"], fallback: "hybrid_auto" },
+    workflow_mode: { values: ["hybrid_auto", "segmented_continuation", "multiclip", "ref2va_full", "loop", "manual", "video_ref_edit"], fallback: "hybrid_auto" },
 };
 
 const NUMBERS = {
@@ -186,8 +176,6 @@ const NUMBERS = {
     segment_seconds: 8.0,
     overlap_frames: 22,
     video_fps: 24.0,
-    video_strength: 0.5,
-    audio_strength: 0.0,
     first_frame_denoise: 0.25,
     first_frame_blend_frames: 3,
 };
@@ -244,7 +232,7 @@ function scheduleSync(node) {
 }
 
 app.registerExtension({
-    name: "MiniMaxH3LatentLab.LongMediaDynamicInputs.v3",
+    name: "MiniMaxH3LatentLab.LongMediaDynamicInputs.v4",
 
     async beforeConfigureGraph() {
         configuringGraph = true;
@@ -274,15 +262,8 @@ app.registerExtension({
         // New node only. Workflow-loaded nodes are normalized in afterConfigureGraph,
         // after saved links and widget values have been restored.
         scheduleSync(node);
-        const workflow = widget(node, 'workflow_mode');
-        if (workflow && !workflow.__lmSocketLabelWrapped) {
-            workflow.__lmSocketLabelWrapped = true;
-            const cb = workflow.callback;
-            workflow.callback = function (...args) {
-                const r = cb?.apply(this, args);
-                setTimeout(() => syncNode(node, { repairWidgets: false, fit: true }), 0);
-                return r;
-            };
-        }
+        // node_facade.js owns workflow/generation/conditioning callbacks and resizing.
+        // Dynamic inputs react only to connection changes, preventing two async
+        // callback chains from racing over the same Setup node size/labels.
     },
 });

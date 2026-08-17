@@ -2,6 +2,7 @@ import { app } from "../../scripts/app.js";
 
 const PUBLIC = new Set([
     "MiniMaxH3LatentLabLongMediaSetup",
+    "MiniMaxH3LongMediaPlanner",
     "MiniMaxH3LatentLabLongMediaSampler",
     "MiniMaxH3LatentLabLongMediaDecode",
 ]);
@@ -32,19 +33,72 @@ app.registerExtension({
 // 0.3.0 release facade.
 // IMPORTANT: Python owns the complete backend schema and serialized widget order.
 // JS only hides/shows controls and repairs invalid values. Never reorder widgets.
-function lmSetWidgetVisible(widget, visible) {
-    if (!widget) return;
-    if (widget.__lmOrigType === undefined) widget.__lmOrigType = widget.type;
-    if (widget.__lmOrigComputeSize === undefined) widget.__lmOrigComputeSize = widget.computeSize;
-    widget.hidden = !visible;
-    if (visible) {
-        widget.type = widget.__lmOrigType;
-        widget.computeSize = widget.__lmOrigComputeSize;
-    } else {
-        widget.type = "converted-widget";
-        widget.computeSize = () => [0, -4];
+const LM_COLLAPSED_WIDGET_SIZE = () => [0, -4];
+const LM_HIDDEN_WIDGET_DRAW = () => {};
+
+function lmRestoreWidgetProperty(widget, name, hadOwnProperty, originalValue) {
+    if (hadOwnProperty) {
+        widget[name] = originalValue;
+        return;
     }
-    if (widget.linkedWidgets) for (const linked of widget.linkedWidgets) lmSetWidgetVisible(linked, visible);
+    // Deleting restores a renderer/prototype implementation when the widget did
+    // not originally own the property. Assigning undefined would shadow it.
+    try {
+        delete widget[name];
+    } catch (_) {
+        widget[name] = originalValue;
+    }
+}
+
+function lmSetWidgetVisible(widget, visible, visited = new WeakSet()) {
+    if (!widget || visited.has(widget)) return false;
+    visited.add(widget);
+
+    const nextVisible = Boolean(visible);
+    const nextHidden = !nextVisible;
+
+    // v0.3.28: use a dedicated capture sentinel. Testing the stored value for
+    // undefined is incorrect because ordinary Comfy widgets often have no custom
+    // computeSize. A second hide pass then captured our [0,-4] collapse function
+    // as the "original", making the control stay zero-height after Manual reveal.
+    if (!widget.__lmPresentationCapturedV328) {
+        widget.__lmPresentationCapturedV328 = true;
+        widget.__lmHadOwnComputeSizeV328 = Object.prototype.hasOwnProperty.call(widget, "computeSize");
+        widget.__lmHadOwnDrawV328 = Object.prototype.hasOwnProperty.call(widget, "draw");
+        widget.__lmOrigComputeSizeV328 = widget.computeSize;
+        widget.__lmOrigDrawV328 = widget.draw;
+    }
+
+    // Nodes 2.0 / Vue renderer tracks widget visibility through options.hidden.
+    // Do NOT change widget.type to "converted-widget": changing the widget type at
+    // runtime can leave the Vue widget registry/render key stale until a page reload.
+    // Replace the options object (rather than mutating it in place) so reactive
+    // frontends can observe the visibility change immediately.
+    if (widget.__lmVisibleV328 !== nextVisible || widget.options?.hidden !== nextHidden) {
+        widget.options = { ...(widget.options ?? {}), hidden: nextHidden };
+    }
+    widget.hidden = nextHidden; // compatibility marker used by some legacy extensions
+    widget.__lmVisibleV328 = nextVisible;
+
+    if (nextVisible) {
+        lmRestoreWidgetProperty(
+            widget, "computeSize", widget.__lmHadOwnComputeSizeV328,
+            widget.__lmOrigComputeSizeV328,
+        );
+        lmRestoreWidgetProperty(
+            widget, "draw", widget.__lmHadOwnDrawV328,
+            widget.__lmOrigDrawV328,
+        );
+    } else {
+        // Legacy LiteGraph fallback: collapse the widget without changing its type.
+        widget.computeSize = LM_COLLAPSED_WIDGET_SIZE;
+        widget.draw = LM_HIDDEN_WIDGET_DRAW;
+    }
+
+    if (widget.linkedWidgets) {
+        for (const linked of widget.linkedWidgets) lmSetWidgetVisible(linked, nextVisible, visited);
+    }
+    return true;
 }
 
 function lmWidget(node, name) {
@@ -65,8 +119,30 @@ function lmFindInput(node, name) {
     return node.inputs?.find((i) => i?.name === name);
 }
 
+function lmInputConnected(node, name) {
+    const input = lmFindInput(node, name);
+    if (!input) return false;
+    if (input.link != null) return true;
+    return Array.isArray(input.links) && input.links.some((id) => id != null);
+}
+
+function lmWireSetupConnectionRefresh(node) {
+    if (!node || node.__lmSetupConnectionRefreshV389) return;
+    node.__lmSetupConnectionRefreshV389 = true;
+    const original = node.onConnectionsChange;
+    node.onConnectionsChange = function (...args) {
+        const result = original?.apply(this, args);
+        // LiteGraph calls this before/after link bookkeeping depending on renderer.
+        // Defer refreshes so clip_plan.link/links reflects the final connection state.
+        queueMicrotask(() => lmRefreshSetup(node));
+        requestAnimationFrame(() => lmRefreshSetup(node));
+        setTimeout(() => lmRefreshSetup(node), 0);
+        setTimeout(() => lmRefreshSetup(node), 50);
+        return result;
+    };
+}
+
 function lmRefreshSetupInputLabels(node) {
-    const mode = lmWidget(node, 'workflow_mode')?.value ?? 'hybrid_auto';
     const pictures = [];
     for (let i = 1; i <= 9; i += 1) pictures.push(lmFindInput(node, `image_${i}`));
     const videos = [];
@@ -74,35 +150,14 @@ function lmRefreshSetupInputLabels(node) {
     const audios = [];
     for (let i = 1; i <= 3; i += 1) audios.push(lmFindInput(node, `audio_${i}`));
 
-    // Reset all dynamic sockets to their baseline labels first.
-    pictures.forEach((input, idx) => lmSetInputDisplay(input, `image_${idx + 1}`));
+    // v0.3.96: native refs keep stable meanings. Workflow/audio policies only annotate.
+    pictures.forEach((input, idx) => lmSetInputDisplay(input, `image_${idx + 1} • picture_${idx + 1}`));
     videos.forEach((input, idx) => lmSetInputDisplay(input, `video_${idx + 1}`));
     audios.forEach((input, idx) => lmSetInputDisplay(input, `audio_${idx + 1}`));
 
-    if (mode === 'hybrid_auto') {
-        lmSetInputDisplay(pictures[0], 'image_1 • first_frame');
-        lmSetInputDisplay(pictures[1], 'image_2 • last_frame');
-        for (let i = 2; i < pictures.length; i += 1) lmSetInputDisplay(pictures[i], `image_${i + 1} • picture_${i - 1}`);
-    } else if (mode === 'video_ref_edit') {
-        lmSetInputDisplay(videos[0], 'video_1 • source_video');
-        lmSetInputDisplay(audios[0], 'audio_1 • source_audio');
-        for (let i = 0; i < pictures.length; i += 1) lmSetInputDisplay(pictures[i], `image_${i + 1} • picture_${i + 1}`);
-        for (let i = 1; i < videos.length; i += 1) lmSetInputDisplay(videos[i], `video_${i + 1} • extra_video_${i + 1}`);
-        for (let i = 1; i < audios.length; i += 1) lmSetInputDisplay(audios[i], `audio_${i + 1} • extra_audio_${i + 1}`);
-    } else if (mode === 'ref2va_full') {
-        for (let i = 0; i < pictures.length; i += 1) lmSetInputDisplay(pictures[i], `image_${i + 1} • picture_${i + 1}`);
-    } else if (mode === 'loop') {
-        lmSetInputDisplay(pictures[0], 'image_1 • first+last_frame');
-        lmSetInputDisplay(pictures[1], 'image_2 • reserved/ignored');
-        for (let i = 2; i < pictures.length; i += 1) lmSetInputDisplay(pictures[i], `image_${i + 1} • picture_${i - 1}`);
-    } else if (mode === 'manual') {
-        // Manual stays closest to raw backend naming.
-    }
-
-    const generationMode = lmWidget(node, 'generation_mode')?.value ?? 'auto';
-    if (generationMode === 'lip_sync') {
-        lmSetInputDisplay(pictures[0], 'image_1 • lip_sync_identity');
-        lmSetInputDisplay(audios[0], 'audio_1 • lip_sync_driver');
+    const audioMode = lmWidget(node, 'audio_mode')?.value ?? 'auto';
+    if (audioMode === 'lip_sync') {
+        lmSetInputDisplay(audios[0], 'audio_1 • lip_sync');
     }
 }
 
@@ -142,18 +197,14 @@ function lmSanitizeSetup(node) {
     lmSetCombo(node, "resolution_mode", ["match", "max"], "match");
     lmSetCombo(node, "reference_budget", ["low", "medium", "high", "max"], "low");
     lmSetCombo(node, "video_mode", ["auto", "preserve", "transform"], "auto");
-    lmSetCombo(node, "audio_mode", ["auto", "preserve", "generate", "reference_only", "preserve_reference"], "auto");
+    lmSetCombo(node, "audio_mode", ["auto", "preserve", "generate", "reference_only", "preserve_reference", "lip_sync"], "auto");
     lmSetNumber(node, "width", 512, 32, 8192, true);
     lmSetNumber(node, "height", 512, 32, 8192, true);
     lmSetNumber(node, "manual_duration", 5.0, 0.1, 600.0, false);
     lmSetNumber(node, "video_fps", 24.0, 1.0, 120.0, false);
-    lmSetNumber(node, "video_strength", 0.5, 0.0, 1.0, false);
-    lmSetNumber(node, "audio_strength", 0.0, 0.0, 1.0, false);
 
-    const workflowValues = ["hybrid_auto", "ref2va_full", "loop", "manual", "video_ref_edit"];
+    const workflowValues = ["hybrid_auto", "segmented_continuation", "multiclip", "ref2va_full", "loop", "manual", "video_ref_edit"];
     lmSetCombo(node, "workflow_mode", workflowValues, "hybrid_auto");
-    const mode = lmWidget(node, "workflow_mode")?.value ?? "hybrid_auto";
-
     // These legacy widgets are always submitted by ComfyUI even while hidden,
     // so they MUST contain values accepted by the Python INPUT_TYPES validator.
     lmSetCombo(node, "generation_mode", ["auto", "lip_sync"], "auto");
@@ -164,20 +215,14 @@ function lmSanitizeSetup(node) {
     lmSetNumber(node, "segment_seconds", 8.0, 1.0, 60.0, false);
     lmSetNumber(node, "overlap_frames", 22, 5, 3600, true);
 
-    // Public modes infer all of these in Python. Force safe validator values so
-    // a stale workflow cannot fail before setup() gets a chance to normalize it.
-    if (mode !== "manual") {
-        const f = lmWidget(node, "first_frame_mode"); if (f) f.value = "latent_inject";
-        const d = lmWidget(node, "first_frame_denoise"); if (d) d.value = 0.25;
-        const b = lmWidget(node, "first_frame_blend_frames"); if (b) b.value = 3;
-        const c = lmWidget(node, "conditioning_mode"); if (c) c.value = "auto_refs";
-        const s = lmWidget(node, "segment_seconds"); if (s) s.value = 8.0;
-        const o = lmWidget(node, "overlap_frames"); if (o) o.value = 22;
-    }
+    // v0.3.28: valid Manual values are preserved while public modes hide them.
+    // Python already derives the effective public-mode policy. Rewriting these
+    // widgets on every refresh made Manual -> public -> Manual destructive.
 }
 
 function lmSanitizeSampler(node) {
     lmSetNumber(node, "seed", 0, 0, 18446744073709551615, true);
+    lmSetCombo(node, "memory_mode", ["auto", "normal", "low_vram", "ultra_low_vram"], "auto");
     lmSetCombo(node, "sampler_mode", ["auto", "manual"], "auto");
     const mode = lmWidget(node, "sampler_mode")?.value ?? "auto";
     const specs = [
@@ -206,73 +251,314 @@ function lmSanitizeSampler(node) {
     lmSetBoolean(node, "offload_completed_segments", true);
     for (const [name, fallback, min, max, integer] of specs) lmSetNumber(node, name, fallback, min, max, integer);
 
-    if (mode === "auto") {
-        const defaults = {
-            video_context_denoise: 0.0, audio_context_denoise: 0.0,
-            offload_completed_segments: true, mlp_chunk_tokens: 8192,
-            attention_mode: "auto", sol_tau_start: 1.3, sol_tau_end: 0.8,
-            sol_curve: "linear", sol_min_tokens: 4096, sol_dense_percent: 0.0,
-            sol_sink_conditioning: "exact_kv", sol_qkv_chunk_tokens: 8192,
-            sol_out_proj_chunk_tokens: 24576, vram_activation_reserve_mb: 4096,
-            inter_block_vram_guard_mb: 2048, inter_block_guard_cooldown_blocks: 4,
-            inter_block_guard_emergency_mb: 512,
-            inter_block_guard_emergency_cooldown_blocks: 3,
-            late_block_guard_start: 40, late_block_guard_target_mb: 6144,
-            late_block_guard_min_cached_mb: 512, step_boundary_cleanup_mb: 2048,
-        };
-        for (const [name, value] of Object.entries(defaults)) {
-            const w = lmWidget(node, name); if (w) w.value = value;
-        }
+    // v0.3.22: AUTO widgets stay user-editable. The schema defaults are the
+    // production AUTO defaults; changing a value acts as an explicit A/B override.
+    // Do not rewrite widget values on refresh/mode changes.
+
+}
+
+
+
+// 0.3.87 MultiClip card editor.
+// Python keeps one stable `multiclip_json` widget for schema/workflow compatibility.
+// This DOM editor is presentation-only and synchronizes into that widget.
+const LM_MULTICLIP_MIN = 2;
+const LM_MULTICLIP_MAX = 16;
+
+function lmMulticlipParse(node) {
+    const storage = lmWidget(node, "multiclip_json");
+    const fallback = [
+        { prompt: "", duration: 7.5, seed: null },
+        { prompt: "", duration: 7.5, seed: null },
+    ];
+    try {
+        const parsed = JSON.parse(String(storage?.value ?? "[]"));
+        if (!Array.isArray(parsed)) return fallback;
+        const out = parsed.slice(0, LM_MULTICLIP_MAX).map((raw) => {
+            const item = raw && typeof raw === "object" ? raw : {};
+            const durationRaw = Number(item.duration);
+            let duration = Number.isFinite(durationRaw) ? durationRaw : 7.5;
+            duration = Math.max(0.25, Math.min(150.0, duration));
+            let seed = item.seed;
+            if (seed === "" || seed === undefined) seed = null;
+            if (seed !== null) {
+                const n = Number(seed);
+                seed = Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : null;
+            }
+            return { prompt: String(item.prompt ?? ""), duration, seed };
+        });
+        while (out.length < LM_MULTICLIP_MIN) out.push({ ...fallback[out.length] });
+        return out;
+    } catch (_) {
+        return fallback;
     }
+}
+
+function lmMulticlipCommit(node, clips) {
+    const storage = lmWidget(node, "multiclip_json");
+    if (!storage) return;
+    const normalized = clips.slice(0, LM_MULTICLIP_MAX).map((clip) => ({
+        prompt: String(clip.prompt ?? ""),
+        duration: Math.max(0.25, Math.min(150.0, Number(clip.duration) || 7.5)),
+        seed: clip.seed == null || clip.seed === "" ? null : Math.max(0, Math.trunc(Number(clip.seed) || 0)),
+    }));
+    while (normalized.length < LM_MULTICLIP_MIN) normalized.push({ prompt: "", duration: 7.5, seed: null });
+    const value = JSON.stringify(normalized);
+    if (storage.value !== value) {
+        storage.value = value;
+        try { storage.callback?.(value); } catch (_) {}
+    }
+    node.__lmMulticlipClipsV387 = normalized;
+    node.graph?.setDirtyCanvas?.(true, true);
+    app.canvas?.setDirty?.(true, true);
+}
+
+function lmMulticlipStyleInput(el) {
+    Object.assign(el.style, {
+        boxSizing: "border-box",
+        width: "100%",
+        color: "var(--input-text, #eee)",
+        background: "var(--comfy-input-bg, #171717)",
+        border: "1px solid #555",
+        borderRadius: "6px",
+        padding: "6px 8px",
+        font: "12px sans-serif",
+        outline: "none",
+    });
+    return el;
+}
+
+function lmEnsureMulticlipEditor(node) {
+    if (node.__lmMulticlipDomWidgetV387) return node.__lmMulticlipDomWidgetV387;
+    if (typeof node.addDOMWidget !== "function") return null;
+
+    const root = document.createElement("div");
+    Object.assign(root.style, {
+        width: "100%",
+        boxSizing: "border-box",
+        padding: "4px 2px 8px",
+        fontFamily: "sans-serif",
+        color: "#ddd",
+    });
+
+    const toolbar = document.createElement("div");
+    Object.assign(toolbar.style, { display: "flex", gap: "6px", alignItems: "center", marginBottom: "8px" });
+    const add = document.createElement("button");
+    const remove = document.createElement("button");
+    const count = document.createElement("span");
+    add.textContent = "+ Add Clip";
+    remove.textContent = "− Remove Last";
+    count.style.fontSize = "11px";
+    count.style.opacity = "0.8";
+    for (const button of [add, remove]) {
+        Object.assign(button.style, {
+            color: "#eee", background: "#202020", border: "1px solid #777",
+            borderRadius: "4px", padding: "3px 7px", cursor: "pointer", fontSize: "11px",
+        });
+    }
+    toolbar.append(add, remove, count);
+
+    const cards = document.createElement("div");
+    Object.assign(cards.style, {
+        display: "grid",
+        gridTemplateColumns: "repeat(2, minmax(280px, 1fr))",
+        gap: "10px",
+        width: "100%",
+    });
+    root.append(toolbar, cards);
+
+    function render() {
+        const clips = node.__lmMulticlipClipsV387 ?? lmMulticlipParse(node);
+        node.__lmMulticlipClipsV387 = clips;
+        count.textContent = `${clips.length} clips`;
+        add.disabled = clips.length >= LM_MULTICLIP_MAX;
+        remove.disabled = clips.length <= LM_MULTICLIP_MIN;
+        cards.replaceChildren();
+
+        clips.forEach((clip, index) => {
+            const card = document.createElement("div");
+            Object.assign(card.style, {
+                border: `1px solid ${index === 0 ? "#d9a400" : "#397db0"}`,
+                borderRadius: "9px",
+                padding: "9px",
+                background: "rgba(10,10,10,0.45)",
+                minWidth: "0",
+            });
+            const title = document.createElement("div");
+            title.textContent = `CLIP ${index + 1}`;
+            Object.assign(title.style, { fontWeight: "700", fontSize: "14px", marginBottom: "7px" });
+
+            const promptLabel = document.createElement("div");
+            promptLabel.textContent = "Prompt";
+            Object.assign(promptLabel.style, { fontSize: "11px", marginBottom: "3px", opacity: "0.9" });
+            const prompt = lmMulticlipStyleInput(document.createElement("textarea"));
+            prompt.rows = 8;
+            prompt.value = clip.prompt ?? "";
+            prompt.style.resize = "vertical";
+            prompt.addEventListener("input", () => {
+                clip.prompt = prompt.value;
+                lmMulticlipCommit(node, clips);
+            });
+
+            const row = document.createElement("div");
+            Object.assign(row.style, { display: "grid", gridTemplateColumns: "1fr 96px", gap: "8px", marginTop: "7px" });
+
+            const seedWrap = document.createElement("div");
+            const seedLabel = document.createElement("div"); seedLabel.textContent = "Seed";
+            Object.assign(seedLabel.style, { fontSize: "11px", marginBottom: "3px", opacity: "0.9" });
+            const seed = lmMulticlipStyleInput(document.createElement("input"));
+            seed.type = "number"; seed.step = "1"; seed.min = "0";
+            seed.placeholder = "auto";
+            seed.value = clip.seed == null ? "" : String(clip.seed);
+            seed.addEventListener("change", () => {
+                clip.seed = seed.value.trim() === "" ? null : Math.max(0, Math.trunc(Number(seed.value) || 0));
+                lmMulticlipCommit(node, clips);
+            });
+            seedWrap.append(seedLabel, seed);
+
+            const durWrap = document.createElement("div");
+            const durLabel = document.createElement("div"); durLabel.textContent = "Duration s";
+            Object.assign(durLabel.style, { fontSize: "11px", marginBottom: "3px", opacity: "0.9" });
+            const duration = lmMulticlipStyleInput(document.createElement("input"));
+            duration.type = "number"; duration.step = "0.1"; duration.min = "0.25"; duration.max = "150";
+            duration.value = String(clip.duration ?? 7.5);
+            duration.addEventListener("change", () => {
+                clip.duration = Math.max(0.25, Math.min(150, Number(duration.value) || 7.5));
+                duration.value = String(clip.duration);
+                lmMulticlipCommit(node, clips);
+            });
+            durWrap.append(durLabel, duration);
+            row.append(seedWrap, durWrap);
+            card.append(title, promptLabel, prompt, row);
+            cards.append(card);
+        });
+
+        // DOM widgets are not always included perfectly in computeSize on every frontend.
+        requestAnimationFrame(() => {
+            const h = root.scrollHeight + 16;
+            if (Number.isFinite(h) && h > 0) root.style.minHeight = `${h}px`;
+            node.setDirtyCanvas?.(true, true);
+        });
+    }
+
+    add.addEventListener("click", (ev) => {
+        ev.preventDefault(); ev.stopPropagation();
+        const clips = node.__lmMulticlipClipsV387 ?? lmMulticlipParse(node);
+        if (clips.length >= LM_MULTICLIP_MAX) return;
+        const prev = clips[clips.length - 1] ?? { duration: 7.5 };
+        clips.push({ prompt: "", duration: Number(prev.duration) || 7.5, seed: null });
+        lmMulticlipCommit(node, clips);
+        render();
+        setTimeout(() => lmRefreshSetup(node), 0);
+    });
+    remove.addEventListener("click", (ev) => {
+        ev.preventDefault(); ev.stopPropagation();
+        const clips = node.__lmMulticlipClipsV387 ?? lmMulticlipParse(node);
+        if (clips.length <= LM_MULTICLIP_MIN) return;
+        clips.pop();
+        lmMulticlipCommit(node, clips);
+        render();
+        setTimeout(() => lmRefreshSetup(node), 0);
+    });
+
+    const domWidget = node.addDOMWidget("multiclip_editor", "multiclip_editor", root, {
+        serialize: false,
+        hideOnZoom: false,
+        getValue: () => null,
+        setValue: () => {},
+    });
+    domWidget.__lmMulticlipEditorV387 = true;
+    domWidget.computeSize = function (width) {
+        const w = Math.max(600, Number(width) || 650);
+        const h = Math.max(260, root.scrollHeight + 12);
+        return [w, h];
+    };
+    domWidget.__lmRenderV387 = render;
+    node.__lmMulticlipDomWidgetV387 = domWidget;
+    node.__lmMulticlipClipsV387 = lmMulticlipParse(node);
+    render();
+    return domWidget;
+}
+
+function lmSyncMulticlipEditorFromStorage(node) {
+    const editor = lmEnsureMulticlipEditor(node);
+    if (!editor) return;
+    const storage = lmWidget(node, "multiclip_json");
+    const raw = String(storage?.value ?? "");
+    if (raw === node.__lmMulticlipStorageRawV387) return;
+    node.__lmMulticlipStorageRawV387 = raw;
+    node.__lmMulticlipClipsV387 = lmMulticlipParse(node);
+    editor.__lmRenderV387?.();
 }
 
 function lmRefreshSetup(node) {
     lmSanitizeSetup(node);
     const mode = lmWidget(node, "workflow_mode")?.value ?? "hybrid_auto";
-    const generationMode = lmWidget(node, "generation_mode")?.value ?? "auto";
+    const audioMode = lmWidget(node, "audio_mode")?.value ?? "auto";
     const manual = mode === "manual";
-    const lipSync = generationMode === "lip_sync";
-    for (const name of [
-        "segment_seconds", "overlap_frames", "conditioning_mode"
-    ]) lmSetWidgetVisible(lmWidget(node, name), manual);
-    // generation_mode is a public production control, not a legacy/manual-only widget.
-    lmSetWidgetVisible(lmWidget(node, "generation_mode"), true);
+    const segmented = mode === "segmented_continuation";
+    const externalPlanner = lmInputConnected(node, "clip_plan");
+    const multiclip = mode === "multiclip";
+    const lipSync = audioMode === "lip_sync";
+    // Global duration controls are meaningless in MultiClip: each card owns its duration.
+    const segmentDuration = lmWidget(node, "segment_seconds");
+    if (segmentDuration) {
+        segmentDuration.label = "segment_duration";
+        segmentDuration.localized_name = "segment_duration";
+    }
+    lmSetWidgetVisible(lmWidget(node, "manual_duration"), !multiclip);
+    lmSetWidgetVisible(lmWidget(node, "duration_source"), !multiclip);
+    lmSetWidgetVisible(segmentDuration, !multiclip);
+    // Keep serialized JSON as backend storage only; users edit clip cards.
+    lmSetWidgetVisible(lmWidget(node, "multiclip_json"), false);
+    const multiclipEditor = lmEnsureMulticlipEditor(node);
+    if (multiclipEditor) {
+        // When an external LongMedia Planner is connected, it is the only clip editor.
+        lmSetWidgetVisible(multiclipEditor, multiclip && !externalPlanner);
+        if (multiclip && !externalPlanner) lmSyncMulticlipEditorFromStorage(node);
+    }
+    // overlap remains an expert control in Manual, but its value is honored in all modes.
+    lmSetWidgetVisible(lmWidget(node, "overlap_frames"), manual || segmented);
+    lmSetWidgetVisible(lmWidget(node, "conditioning_mode"), manual);
+    // v0.3.95: generation_mode is legacy compatibility storage; lip-sync lives in audio_mode.
+    lmSetWidgetVisible(lmWidget(node, "generation_mode"), false);
+    // Planner supplies clip data only; Setup always owns workflow selection.
+    lmSetWidgetVisible(lmWidget(node, "workflow_mode"), true);
     // Lip-sync-specific first-frame controls become visible immediately when selected.
     for (const name of ["first_frame_mode", "first_frame_denoise", "first_frame_blend_frames"])
-        lmSetWidgetVisible(lmWidget(node, name), manual || lipSync);
+        lmSetWidgetVisible(lmWidget(node, name), false);
     lmRefreshSetupInputLabels(node);
-    node.setSize?.([node.size[0], node.computeSize?.()[1] ?? node.size[1]]);
+    const computed = node.computeSize?.();
+    const width = Math.max(node.size?.[0] ?? 0, computed?.[0] ?? 0, multiclip ? 680 : 450);
+    const height = computed?.[1] ?? node.size?.[1];
+    if (Number.isFinite(width) && Number.isFinite(height) && height > 0) {
+        node.setSize?.([width, height]);
+    }
     node.setDirtyCanvas?.(true, true);
+    node.graph?.setDirtyCanvas?.(true, true);
+    app.canvas?.setDirty?.(true, true);
 }
 
 function lmRefreshSampler(node) {
     lmSanitizeSampler(node);
-    const mode = lmWidget(node, "sampler_mode")?.value ?? "auto";
-    const manual = mode === "manual";
-    const alwaysVisible = new Set(["sampler_mode", "seed"]);
-    const manualOnly = new Set([
-        "video_context_denoise", "audio_context_denoise", "offload_completed_segments", "mlp_chunk_tokens",
-        "attention_mode", "sol_tau_start", "sol_tau_end", "sol_curve", "sol_min_tokens",
-        "sol_dense_percent", "sol_sink_conditioning", "sol_qkv_chunk_tokens", "sol_out_proj_chunk_tokens",
-        "vram_activation_reserve_mb", "inter_block_vram_guard_mb", "inter_block_guard_cooldown_blocks",
-        "inter_block_guard_emergency_mb", "inter_block_guard_emergency_cooldown_blocks", "late_block_guard_start",
-        "late_block_guard_target_mb", "late_block_guard_min_cached_mb", "step_boundary_cleanup_mb",
-    ]);
-    for (const w of node.widgets ?? []) {
-        if (alwaysVisible.has(w.name)) {
-            lmSetWidgetVisible(w, true);
-            continue;
-        }
-        if (manualOnly.has(w.name)) {
-            lmSetWidgetVisible(w, manual);
-            continue;
-        }
-        // Fallback: keep unknown widgets visible in manual mode, hidden in auto.
-        lmSetWidgetVisible(w, manual);
-    }
+    // v0.3.22 A/B controls: sampler_mode=auto keeps every tuning widget visible.
+    // AUTO values begin at the production defaults, but user edits are explicit
+    // overrides and must survive refresh/mode changes.
+    for (const w of node.widgets ?? []) lmSetWidgetVisible(w, true);
+    // v0.3.50 true-refine split: these serialized legacy controls stay in the
+    // backend schema for old workflow compatibility but have no valid role in a
+    // continuous two-stage diffusion trajectory. Keep them hidden in the UI.
+    lmSetWidgetVisible(lmWidget(node, "refine_add_noise"), false);
+    lmSetWidgetVisible(lmWidget(node, "refine_seed"), false);
+    const refineEnabled = Boolean(lmWidget(node, "refine_enabled")?.value);
+    lmSetWidgetVisible(lmWidget(node, "refine_steps"), refineEnabled);
     node.setSize?.([Math.max(node.size?.[0] ?? 0, 420), node.computeSize?.()[1] ?? node.size[1]]);
     node.setDirtyCanvas?.(true, true);
+    node.graph?.setDirtyCanvas?.(true, true);
+    app.canvas?.setDirty?.(true, true);
 }
+
+let lmConfiguringGraph = false;
 
 function lmInstallModeWatcher(node, modeName, refresh) {
     if (!node) return;
@@ -291,14 +577,14 @@ function lmInstallModeWatcher(node, modeName, refresh) {
         const current = lmWidget(this, modeName)?.value;
         if (current !== this[lastKey]) {
             this[lastKey] = current;
-            refresh(this);
+            if (!lmConfiguringGraph) refresh(this);
         }
         return result;
     };
 
     const timerKey = `${key}_timer`;
     node[timerKey] = setInterval(() => {
-        if (!node.graph) return;
+        if (lmConfiguringGraph || !node.graph) return;
         const current = lmWidget(node, modeName)?.value;
         if (current !== node[lastKey]) {
             node[lastKey] = current;
@@ -317,20 +603,26 @@ function lmInstallModeWatcher(node, modeName, refresh) {
     };
 }
 
-function lmWireModeCallback(node, modeName, refresh) {
+function lmWireModeCallback(node, modeName, refresh, scheduleInitial = true) {
     const w = lmWidget(node, modeName);
     if (w && !w.__lmModeCallbackWrapped) {
         w.__lmModeCallbackWrapped = true;
         const cb = w.callback;
         w.callback = function (...args) {
             const r = cb?.apply(this, args);
-            requestAnimationFrame(() => refresh(node));
-            setTimeout(() => refresh(node), 0);
-            setTimeout(() => refresh(node), 50);
+            // Saved widget values may invoke callbacks while LiteGraph is still
+            // restoring the node. Defer all presentation work to afterConfigureGraph
+            // so half-restored values cannot produce a partial Manual expansion.
+            if (!lmConfiguringGraph) {
+                requestAnimationFrame(() => refresh(node));
+                setTimeout(() => refresh(node), 0);
+                setTimeout(() => refresh(node), 50);
+            }
             return r;
         };
     }
     lmInstallModeWatcher(node, modeName, refresh);
+    if (!scheduleInitial) return;
     requestAnimationFrame(() => refresh(node));
     setTimeout(() => refresh(node), 0);
     setTimeout(() => refresh(node), 50);
@@ -338,6 +630,9 @@ function lmWireModeCallback(node, modeName, refresh) {
 
 app.registerExtension({
     name: "MiniMaxH3LatentLab.ReleaseFacade030",
+    async beforeConfigureGraph() {
+        lmConfiguringGraph = true;
+    },
     async nodeCreated(node) {
         const cls = node?.comfyClass ?? node?.constructor?.comfyClass;
         if (cls === "MiniMaxH3LatentLabLongMediaSetup") {
@@ -345,27 +640,43 @@ app.registerExtension({
                 lmPruneLegacyPromptInput(node);
                 setTimeout(() => lmPruneLegacyPromptInput(node), 0);
             });
-            lmWireModeCallback(node, "workflow_mode", lmRefreshSetup);
-            lmWireModeCallback(node, "generation_mode", lmRefreshSetup);
-            setTimeout(() => lmRefreshSetup(node), 100);
+            lmWireSetupConnectionRefresh(node);
+            lmWireModeCallback(node, "workflow_mode", lmRefreshSetup, !lmConfiguringGraph);
+            lmWireModeCallback(node, "audio_mode", lmRefreshSetup, !lmConfiguringGraph);
+            lmWireModeCallback(node, "generation_mode", lmRefreshSetup, !lmConfiguringGraph);
+            lmWireModeCallback(node, "conditioning_mode", lmRefreshSetup, !lmConfiguringGraph);
+            if (!lmConfiguringGraph) setTimeout(() => lmRefreshSetup(node), 100);
         } else if (cls === "MiniMaxH3LatentLabLongMediaSampler") {
-            lmWireModeCallback(node, "sampler_mode", lmRefreshSampler);
+            lmWireModeCallback(node, "sampler_mode", lmRefreshSampler, !lmConfiguringGraph);
+            lmWireModeCallback(node, "refine_enabled", lmRefreshSampler, !lmConfiguringGraph);
             // Some frontend builds install/replace combo callbacks after nodeCreated.
             // The durable watcher above catches that; these immediate passes make the
             // initial state correct without requiring a page reload.
-            queueMicrotask(() => lmRefreshSampler(node));
-            requestAnimationFrame(() => lmRefreshSampler(node));
-            setTimeout(() => lmRefreshSampler(node), 100);
+            if (!lmConfiguringGraph) {
+                queueMicrotask(() => lmRefreshSampler(node));
+                requestAnimationFrame(() => lmRefreshSampler(node));
+                setTimeout(() => lmRefreshSampler(node), 100);
+            }
         }
     },
     async afterConfigureGraph() {
+        lmConfiguringGraph = false;
         for (const node of app.graph?._nodes ?? []) {
             const cls = node?.comfyClass ?? node?.constructor?.comfyClass;
             if (cls === "MiniMaxH3LatentLabLongMediaSetup") {
                 lmPruneLegacyPromptInput(node);
+                lmWireSetupConnectionRefresh(node);
+                lmWireModeCallback(node, "workflow_mode", lmRefreshSetup, false);
+                lmWireModeCallback(node, "audio_mode", lmRefreshSetup, false);
+                lmWireModeCallback(node, "generation_mode", lmRefreshSetup, false);
+                lmWireModeCallback(node, "conditioning_mode", lmRefreshSetup, false);
                 lmRefreshSetup(node);
             }
-            if (cls === "MiniMaxH3LatentLabLongMediaSampler") lmRefreshSampler(node);
+            if (cls === "MiniMaxH3LatentLabLongMediaSampler") {
+                lmWireModeCallback(node, "sampler_mode", lmRefreshSampler, false);
+                lmWireModeCallback(node, "refine_enabled", lmRefreshSampler, false);
+                lmRefreshSampler(node);
+            }
         }
     },
 });

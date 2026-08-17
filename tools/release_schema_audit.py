@@ -16,6 +16,7 @@ FACADE = ROOT / "web" / "node_facade.js"
 DYNAMIC = ROOT / "web" / "long_media_dynamic_inputs.js"
 
 PUBLIC = {
+    "MiniMaxH3LongMediaPlanner": "build",
     "MiniMaxH3LatentLabLongMediaSetup": "setup",
     "MiniMaxH3LatentLabLongMediaSampler": "sample",
     "MiniMaxH3LatentLabLongMediaDecode": "decode",
@@ -56,24 +57,39 @@ def main():
         method = func_node(cls, method_name)
         args = [a.arg for a in method.args.args if a.arg not in {"self", "cls"}]
         missing = [n for n in inputs if n not in args]
-        extra = [n for n in args if n not in inputs]
+        compat_only = set()
+        if cls_name == "MiniMaxH3LatentLabLongMediaSetup":
+            compat_only = {
+                "generation_mode",
+                "first_frame_mode",
+                "first_frame_denoise",
+                "first_frame_blend_frames",
+                "opening_frame",
+            }
+        extra = [n for n in args if n not in inputs and n not in compat_only]
         assert not missing, f"{cls_name}: schema inputs missing from {method_name}: {missing}"
         assert not extra, f"{cls_name}: {method_name} args absent from schema: {extra}"
         for group in ("required", "optional"):
             for name, spec in schema.get(group, {}).items():
                 check_combo(f"{cls_name}.{name}", spec)
 
+    planner = schemas["MiniMaxH3LongMediaPlanner"]
     setup = schemas["MiniMaxH3LatentLabLongMediaSetup"]
     sampler = schemas["MiniMaxH3LatentLabLongMediaSampler"]
     decode = schemas["MiniMaxH3LatentLabLongMediaDecode"]
 
+    planner_names = set(planner.get("required", {})) | set(planner.get("optional", {}))
     setup_names = set(setup.get("required", {})) | set(setup.get("optional", {}))
     sampler_names = set(sampler.get("required", {}))
     decode_names = set(decode.get("required", {}))
+    assert "clips_json" in planner_names
+    assert "clip_plan" in setup_names
     assert {"workflow_mode", "conditioning_mode"} <= setup_names
     assert "sampler_mode" in sampler_names
     assert "video_vae" not in decode_names and "audio_vae" not in decode_names
 
+    planner_js = (ROOT / "web" / "longmedia_planner.js").read_text(encoding="utf-8")
+    assert "MiniMaxH3LongMediaPlanner" in planner_js and "+ Add Clip" in planner_js
     facade = FACADE.read_text(encoding="utf-8")
     dynamic = DYNAMIC.read_text(encoding="utf-8")
     for token in ["workflow_mode", "conditioning_mode", "sampler_mode", "lmSanitizeSetup", "lmSanitizeSampler"]:

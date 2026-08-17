@@ -1,176 +1,263 @@
 # ComfyUI-MiniMax-H3-LongMedia
 
-Custom ComfyUI nodes and low-VRAM execution patches for **MiniMax H3**, focused on long single-pass video/audio generation and predictable memory behavior on consumer GPUs.
+Production-oriented ComfyUI nodes for **MiniMax H3** long-form video/audio generation, reference-driven editing, MultiClip planning, fixed segmentation, lip-sync and adaptive low-VRAM execution.
 
-### Audio output policy
+![screenshot](ex.png)
 
-`audio_mode=preserve_reference` uses connected audio as native H3 audio conditioning (including rhythm/timing and `lip_sync` driving), but discards the model-generated audio after sampling and restores the original input track directly at decode/output. This avoids Turbo-LoRA audio reconstruction artifacts while retaining audiovisual interaction. `preserve` restores the original track without intentionally using it as a reference; `reference_only` keeps reference conditioning but uses generated H3 audio.
+**Current stable release: 0.4.0**
 
-## Public interface modes
-- UI fix: workflow_mode now updates dynamic socket labels (first_frame/last_frame/source_video/etc.) in the Setup node.
-- UI fix: Sampler `manual` mode now forces expert widgets to reappear reliably after mode changes and workflow reloads.
+## What 0.4.0 provides
 
-The release UI keeps the complete backend schema stable for workflow compatibility while hiding low-level controls in normal use. `workflow_mode` selects `hybrid_auto`, `ref2va_full`, `loop`, or `manual`. `sampler_mode=auto` uses the validated production policy; `manual` restores every tuning control. Decode obtains both VAEs from `LONG_MEDIA_PLAN`, so it has no public VAE sockets.
-
-
-## Current release
-
-**v0.3.11 — Low-VRAM Manual Tuning & Audio Stability Baseline**
-
-v0.3.11 is the new LongMedia development baseline. It consolidates the current Hybrid / Ref2VA / Loop / video-reference / lip-sync workflow surface, the latest audio passthrough fixes, the quality-safe AUTO Sol policy, and finer Manual controls for low-VRAM systems. Manual token/chunk controls can now be tuned in 512-token steps, while VRAM guard/reserve controls use smaller 128–256 MB increments without changing existing defaults or serialized widget order.
-
-
-## Workflow modes
-
-- **hybrid_auto** — recommended. `image_1` is the first frame. If `image_2` is connected it becomes the last frame; remaining images are `<Picture N>` references.
-- **ref2va_full** — every connected `image_1..9` is a normal `<Picture N>` reference; no first/last-frame anchors are added.
-- **loop** — `image_1` is internally sent to both the first and last frame anchors, matching the proven `hybrid_auto` setup with the same image wired to i1+i2. `image_2` is reserved/ignored and Picture refs begin at `image_3`.
-- **manual** — exposes the legacy conditioning, segmentation, attention and VRAM controls for development and A/B tests.
-
-The sampler has matching **auto/manual** presentation. Auto uses the validated production policy; Manual exposes the full tuning surface.
-
-## Low-VRAM Manual tuning (v0.3.11)
-
-Manual mode now exposes finer adjustment steps so users on 8–12 GB GPUs can reduce memory pressure without being forced into very large jumps:
-
-- `mlp_chunk_tokens` — 512-token steps
-- `sol_qkv_chunk_tokens` — 512-token steps
-- `sol_out_proj_chunk_tokens` — 512-token steps
-- `vram_activation_reserve_mb` — 256 MB steps
-- `late_block_guard_target_mb` — 256 MB steps
-- `inter_block_vram_guard_mb` — 128 MB steps
-- `inter_block_guard_emergency_mb` — 128 MB steps
-- `late_block_guard_min_cached_mb` — 128 MB steps
-- `step_boundary_cleanup_mb` — 128 MB steps
-
-The defaults are intentionally unchanged. This release only makes Manual tuning more granular and practical for constrained VRAM/RAM configurations.
+- Unified clip executor for **MultiClip** and **fixed segmentation**.
+- Per-clip prompt/duration/seed Planner for MultiClip.
+- Fixed-duration long-form segmentation using the same continuation engine.
+- Native Picture / Video / Audio reference conditioning.
+- `video_ref_edit` for preserving source motion/camera/composition while transferring identity/style from Picture references.
+- Source-audio preservation, reference and lip-sync policies.
+- H3 Motion Context and AV handoff across clip boundaries.
+- Geometry-aware low-VRAM governor and attention preflight.
+- Embedded H3 Sol attention with streamed QKV / compressed K/V for long constrained sequences.
+- Dynamic VRAM-aware model residency and memory cleanup.
+- Tiled H3 video decode for long outputs.
+- Native INT8 / W4A8 / supported quantized ComfyUI execution paths without replacing stock quantized math.
 
 ## Main nodes
 
-The public workflow surface is intentionally small:
+The public workflow surface is intentionally compact:
 
-- **Long Media Setup**
-- **Long Media Sampler**
-- **Long Media Decode**
+- **MiniMax H3 • Long Media Setup**
+- **MiniMax H3 • Long Media Planner**
+- **MiniMax H3 • Long Media Sampler**
+- **MiniMax H3 • Long Media Decode**
 
-Internal helper nodes remain hidden from the normal Add Node/search UI.
-
-## Compatibility note
-
-The project was renamed from **ComfyUI-MiniMax-H3-LatentLab** to **ComfyUI-MiniMax-H3-LongMedia**.
-
-Existing internal ComfyUI node class identifiers still use the legacy `MiniMaxH3LatentLab...` names on purpose. This preserves compatibility with workflows created before the rename. The public node names remain **Long Media Setup**, **Long Media Sampler**, and **Long Media Decode**.
-
-## Highlights
-
-- Long-media planning with segment/context handling.
-- Video + audio latent support for MiniMax H3.
-- Temporal continuity support for multi-segment workflows.
-- Reference image/video/audio conditioning support.
-- Setup-stage VRAM isolation around Qwen/CLIP/reference encoding.
-- Post-sampling CUDA cache cleanup.
-- Token-axis MLP chunking.
-- Fused chunked `norm2 -> modulation -> MLP -> gate -> residual` path.
-- Embedded/adapted Sol-Attn path for H3.
-- Compressed streamed K/V storage and streamed Q processing for long sequences.
-- Chunked Sol output projection.
-- Adaptive inter-block VRAM guard with emergency cooldown.
-- Late-block hard guard for very long sequences.
-- Streamed final H3 output layer to avoid full-sequence FP32 hidden allocations.
-- Sol OOM adaptive retry ladder instead of falling into catastrophic full-attention/NVFP4 dequantization fallback.
+Internal helper nodes remain hidden from normal Add Node/search UI.
 
 ## Installation
 
-Clone or copy this repository into:
+Clone or copy the repository into:
 
 ```text
 ComfyUI/custom_nodes/ComfyUI-MiniMax-H3-LongMedia
 ```
 
-Then restart ComfyUI.
+Restart ComfyUI after installation or update.
 
-No upstream `ComfyUI-sol-attn` node installation is required for the embedded Sol path used here.
+LongMedia's embedded Sol path does not require a separate `ComfyUI-sol-attn` installation.
 
-## Recommended runtime behavior
+## Workflow modes
 
-For long / memory-constrained runs, **ComfyUI Dynamic VRAM should remain enabled**. In other words, do **not** launch ComfyUI with:
+### `hybrid_auto`
+
+`image_1` is the opening-frame anchor. When connected, `image_2` can act as the final-frame anchor; remaining images are Picture references.
+
+Use this when the opening image must strongly define the shot.
+
+### `segmented_continuation`
+
+Creates an automatic **fixed-duration timeline** from `segment_duration` and runs it through the same clip executor used by MultiClip.
+
+Use this for a continuous long prompt when equal segment sizes are desirable or when segmenting primarily to control VRAM.
+
+### `multiclip`
+
+Uses the **Long Media Planner**. Every clip can have its own prompt, duration and optional seed.
+
+Use this when the final movie has different actions, shots or durations per clip.
+
+### `ref2va_full`
+
+All connected images are normal `<Picture N>` references. No first/last image anchor is imposed.
+
+### `video_ref_edit`
+
+`video_1` is the main motion/camera/composition reference. `image_1..image_9` are Picture references used for identity/style replacement. If the source video soundtrack is needed, load/extract it separately and connect it to `audio_1`.
+
+### `loop`
+
+Reuses `image_1` as both first and last frame anchor for loop-oriented generation.
+
+### `manual`
+
+Exposes advanced conditioning/timeline controls for controlled diagnostics and A/B tests.
+
+## MultiClip vs fixed segmentation
+
+0.4.0 deliberately uses one continuation engine for both policies.
+
+```text
+LongMedia clip executor
+├── fixed timeline    -> segmented_continuation
+└── planned timeline  -> multiclip
+```
+
+The shared engine owns:
+
+- global/local timeline conversion;
+- per-clip conditioning;
+- reference handling;
+- Motion Context;
+- audio slicing and lip-sync timing;
+- AV handoff;
+- sampling;
+- stitching and final trim.
+
+Only **clip-boundary math and prompt ownership** differ.
+
+See:
+
+- [`docs/PROMPTING_MULTICLIP.md`](docs/PROMPTING_MULTICLIP.md)
+- [`docs/PROMPTING_SEGMENTATION.md`](docs/PROMPTING_SEGMENTATION.md)
+
+## Planner ownership
+
+The Planner is authoritative **only when**:
+
+```text
+workflow_mode = multiclip
+```
+
+If `clip_plan` remains connected while another workflow is selected, Setup ignores it. This prevents a connected Planner from silently overriding `workflow_mode`.
+
+## Duration and segmentation
+
+`segment_duration` is the amount of **new visible output timeline** generated per fixed segment. Continuation overlap is additional hidden context and does not subtract from this duration.
+
+Example:
+
+```text
+final duration    = 30 s
+segment_duration  = 8 s
+```
+
+LongMedia creates H3-aligned fixed clips internally and trims the final stitched result back to the requested duration.
+
+## Audio modes
+
+### `auto`
+Default compatibility behavior.
+
+### `preserve`
+Restores source audio at output without intentionally using it as an H3 audio reference when possible.
+
+### `generate`
+Uses H3-generated output audio.
+
+### `reference_only`
+Uses input audio as H3 reference conditioning while retaining generated output audio.
+
+### `preserve_reference`
+Uses input audio as H3 reference/timing context and restores the untouched source track in the final result.
+
+### `lip_sync`
+Uses `audio_1` as the authoritative performance source for audiovisual timing and restores the untouched source track at output. There is no public manual reference-strength control in 0.4.0; lip-sync behavior is fixed by the mode rather than a user weight.
+
+For performance prompts, describe the semantic action (`speaks`, `sings`) but let the source audio own phonetic timing.
+
+## Reference inputs
+
+- `image_1..image_9` → native H3 Picture references / workflow-specific image anchors.
+- `video_1..video_3` → IMAGE frame batches used as native Video references.
+- `audio_1..audio_3` → separately loaded AUDIO references.
+
+A ComfyUI `IMAGE` connection does not carry a video soundtrack. When a loaded video has audio, connect the extracted audio separately.
+
+## Resolution and reference budget
+
+`resolution_mode=match` follows the requested/source geometry according to the active workflow. References are normalized to patch-safe geometry internally.
+
+`reference_budget` controls how aggressively LongMedia limits reference payload. Large Picture/Video/Audio references increase packed sequence length and can dominate VRAM use.
+
+For long or constrained runs, start with:
+
+```text
+reference_budget = low
+```
+
+then increase only if the additional reference fidelity is needed.
+
+## Sampler: recommended production configuration
+
+For normal production work:
+
+```text
+sampler_mode   = auto
+memory_mode    = auto
+attention_mode = auto
+```
+
+The runtime chooses an effective memory profile from the active H3 checkpoint, quantization/backend, GPU VRAM and packed sequence geometry.
+
+See the full optimization guide:
+
+- [`docs/SAMPLER_OPTIMIZATION.md`](docs/SAMPLER_OPTIMIZATION.md)
+
+## Dynamic VRAM
+
+Keep ComfyUI Dynamic VRAM enabled. Do **not** start ComfyUI with:
 
 ```text
 --disable-dynamic-vram
 ```
 
-The SAFE long-run configuration used during development typically uses:
+LongMedia can run H3 checkpoints larger than physical VRAM by coordinating activation chunking with ComfyUI/AIMDO dynamic residency.
 
-```text
-attention_mode                       = sol
-mlp_chunk_tokens                     = 24576
-sol_qkv_chunk_tokens                 = 8192
-sol_out_proj_chunk_tokens            = 24576
-vram_activation_reserve_mb           = 4096
-inter_block_vram_guard_mb            = 2048
-inter_block_guard_cooldown_blocks    = 4
-inter_block_guard_emergency_mb       = 512
-inter_block_guard_emergency_cooldown_blocks = 3
-late_block_guard_start               = 40
-late_block_guard_target_mb           = 6144
-step_boundary_cleanup_mb             = 2048
-```
+## OOM prevention
 
-These values are a conservative baseline, not universal optimums. Shorter clips can usually run faster with larger chunks and/or the existing attention path.
+0.4.0 includes geometry-aware Governor V4 behavior. The runtime does not classify a huge sequence as safe solely because VRAM is free before transformer workspaces become resident.
 
-## Tested milestone
+For dangerous long sequences on constrained GPUs, LongMedia can reject a full-sequence Sage/existing attention path **before QKV allocation** and route into bounded streamed Sol attention.
 
-The current SAFE path has completed a **15-second, 1920×1088, 8-step MiniMax H3 single-pass generation on a 16 GB GPU** in the development setup with Dynamic VRAM enabled.
+The long-sequence path can use:
 
-This is not a guarantee for every model build, LoRA, reference payload, ComfyUI version, or GPU. Reference count and conditioning length directly affect packed sequence length and VRAM use.
+1. streamed QKV projection;
+2. INT8 + scale K/V storage;
+3. streamed Q processing;
+4. chunked output projection;
+5. chunked/fused transformer MLP execution where parity permits it;
+6. streamed final H3 output projection;
+7. inter-block and denoise-step VRAM guards.
 
-## Attention modes
+Optimized paths retain stock/fallback behavior when numerical parity or runtime safety checks fail.
 
-### `existing`
-Uses the attention implementation already installed/patched in ComfyUI. This is generally the fastest choice when the sequence comfortably fits in VRAM.
+## Suggested segment sizes
 
-### `sol`
-Uses the embedded H3-specific Sol path. For long sequences it can switch to compressed streamed K/V + streamed Q processing to reduce peak activation memory.
+These are starting points, not hard limits:
 
-### `scheduled_sol`
-Uses the same embedded Sol implementation with sigma-aware tau scheduling.
+- **16 GB:** 7–10 s balanced; 5–8 s for difficult reference editing/lip-sync.
+- **12 GB:** 5–8 s with low reference budget.
+- **8 GB:** 4–6 s, low reference budget, expect transfer-bound execution.
 
-## Low-VRAM strategy
+A single 30 s pass can be technically possible with the streamed memory path, but fixed segmentation is usually preferable when quality, identity stability and throughput matter more than proving single-pass capacity.
 
-The long-sequence path avoids several large full-sequence intermediate tensors:
+## Prompting documentation
 
-1. QKV projection is streamed in token chunks.
-2. K/V are stored as INT8 + per-token scales; Sol summaries remain BF16.
-3. Q is recomputed/consumed chunk-by-chunk.
-4. Attention output is projected immediately back to hidden width.
-5. The second transformer half is fused and chunked:
-   `norm2 -> modulation -> MLP -> gate -> residual`.
-6. The final H3 output layer is streamed so the full video hidden tensor is never converted to FP32 at once.
-7. If Sol itself hits OOM, v0.2.44 retries with smaller QKV chunks instead of falling through to a large NVFP4 dequantization fallback.
-
-## Notes on references
-
-`reference_budget` limits reference conditioning, but packed sequence length still depends on how many reference items are attached and how they are tokenized. For very long clips, reducing reference count can recover substantial VRAM headroom.
+- [MultiClip prompting rules](docs/PROMPTING_MULTICLIP.md)
+- [Fixed segmentation prompting rules](docs/PROMPTING_SEGMENTATION.md)
+- [Sampler / VRAM / performance rules](docs/SAMPLER_OPTIMIZATION.md)
+- [Architecture](docs/ARCHITECTURE.md)
+- [0.4.0 release audit](docs/RELEASE_AUDIT.md)
 
 ## Example workflow
 
-A clean public version of the validated SAFE workflow is included at:
+A public SAFE workflow is included at:
 
 ```text
 workflows/MiniMax-H3-LongMedia-SAFE-1080p-15s.json
 ```
 
-It preserves the tested LongMedia memory settings, uses placeholder input media, and contains the recommended acceleration path used during validation. See `workflows/README.md` for dependencies and bypass instructions.
+See [`workflows/README.md`](workflows/README.md) for dependencies and tuning notes.
 
-### Recommended acceleration nodes
+The example may contain optional acceleration nodes from other packages. Those are not required by LongMedia itself.
 
-The example workflow includes **ComfyUI-MiniMax-H3-Turbo** and the MiniMax H3 Sage Attention patches from **ComfyUI-KJNodes**. They are recommended for the validated setup, but they are not part of LongMedia itself.
+## Compatibility
 
-If you have these nodes installed but do not want to use them, simply **Bypass** the corresponding nodes in the model chain. LongMedia's embedded Sol path remains available independently.
+The project was previously named **ComfyUI-MiniMax-H3-LatentLab**. Internal ComfyUI class identifiers intentionally retain the legacy `MiniMaxH3LatentLab...` names so older workflows can continue to resolve their nodes.
+
+The public display names use **MiniMax H3 LongMedia**.
 
 ## Third-party code
 
-This repository includes an adapted subset of **Saganaki22/ComfyUI-sol-attn** under the Apache License 2.0.
+This repository contains an adapted subset of **Saganaki22/ComfyUI-sol-attn** under Apache License 2.0.
 
 See:
 
@@ -178,21 +265,12 @@ See:
 - `THIRD_PARTY_APACHE_2_0.txt`
 - `sol_kernel/`
 
-The embedded code is adapted for this MiniMax H3 integration and does not require the upstream custom node to be installed.
+## Release quality
 
-## Status
+The stable 0.4.0 release promotes the validated pre-release baseline and removes pre-release-only hot-reload/runtime artifacts from the distributable package.
 
-`0.2.44` is intentionally treated as the **SAFE baseline**. Future performance-oriented changes should preserve this memory-safe path rather than replacing it.
+Release audit and verification details are documented in [`docs/RELEASE_AUDIT.md`](docs/RELEASE_AUDIT.md).
 
-## Video reference audio
+## License
 
-`video_1` / `video_2` / `video_3` are **IMAGE frame batches only**; ComfyUI does not carry an audio stream inside an `IMAGE` connection. If a reference video has audio that you want LongMedia to use, extract/load that audio separately and connect it to the matching `audio_1` / `audio_2` / `audio_3` input. For the primary video-to-video path, `video_1` and `audio_1` are treated as the matching source pair.
-
-
-### 0.3.0 workflow modes
-
-- `hybrid_auto` — `image_1` becomes the first frame anchor; `image_2` becomes the last frame when connected; remaining images are normal Picture refs.
-- `video_ref_edit` — `video_1` is the main motion/camera/composition source, `image_1..9` are Picture refs for identity/style replacement, and `audio_1` can be the paired source soundtrack.
-- `ref2va_full` — all connected images are plain Picture refs; no first/last keyframe semantics.
-- `loop` — `image_1` is reused as both first and last frame for loop-friendly shots.
-- `manual` — legacy expert controls, segmentation, and explicit conditioning widgets.
+See [`LICENSE`](LICENSE).

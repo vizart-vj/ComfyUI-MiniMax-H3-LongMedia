@@ -2,57 +2,67 @@
 
 ## MiniMax-H3-LongMedia-SAFE-1080p-15s.json
 
-Clean public version of the workflow used to validate the SAFE long-sequence path.
+This workflow is a public example of the LongMedia safe long-sequence path.
 
-### Validated LongMedia settings
+## 0.4.0 recommendation
 
-- Duration: 15 seconds
-- Output target: 1920×1088 via the 2.0 MP / 16:9 sizing path
-- Sampler: Euler
-- Steps: 8
-- `mlp_chunk_tokens`: 24576
-- `attention_mode`: `sol`
-- `sol_tau_start`: 1.3
-- `sol_tau_end`: 0.8
-- `sol_qkv_chunk_tokens`: 8192
-- `sol_out_proj_chunk_tokens`: 24576
-- `vram_activation_reserve_mb`: 4096
-- `inter_block_vram_guard_mb`: 2048
-- `inter_block_guard_cooldown_blocks`: 4
-- `inter_block_guard_emergency_mb`: 512
-- `inter_block_guard_emergency_cooldown_blocks`: 3
-- `late_block_guard_start`: 40
-- `late_block_guard_target_mb`: 6144
-- `late_block_guard_min_cached_mb`: 512
-- `step_boundary_cleanup_mb`: 2048
+For new production workflows, start with the Sampler in:
 
-### Replace before running
+```text
+sampler_mode   = auto
+memory_mode    = auto
+attention_mode = auto
+```
 
-The workflow intentionally contains placeholder media names:
+The included workflow may preserve explicit conservative settings from the validation configuration. They are useful as a reproducible manual baseline, but are not required for normal 0.4.0 use.
 
-- `REPLACE_ME_reference_*.png`
-- `REPLACE_ME_audio.wav`
+## Conservative manual reference
 
-Select your own reference images/audio after loading the workflow. Model widgets keep the tested filenames; if your models live in subfolders, select them again in the corresponding loaders.
+```text
+mlp_chunk_tokens                     = 24576
+attention_mode                       = sol
+sol_tau_start                        = 1.3
+sol_tau_end                          = 0.8
+sol_qkv_chunk_tokens                 = 8192
+sol_out_proj_chunk_tokens            = 24576
+vram_activation_reserve_mb           = 4096
+inter_block_vram_guard_mb            = 2048
+inter_block_guard_cooldown_blocks    = 4
+inter_block_guard_emergency_mb       = 512
+inter_block_guard_emergency_cooldown_blocks = 3
+late_block_guard_start               = 40
+late_block_guard_target_mb           = 6144
+late_block_guard_min_cached_mb       = 512
+step_boundary_cleanup_mb             = 2048
+```
+
+These are conservative reference values, not universal optimums. See `docs/SAMPLER_OPTIMIZATION.md` for the release tuning rules.
+
+## Replace before running
+
+The workflow contains placeholder or environment-specific model/media selections. Choose your own H3 model, references and audio after loading it.
 
 ## Workflow dependencies
 
-### Required for this example
+### Required
 
-- **ComfyUI-MiniMax-H3-LongMedia** — Long Media Setup / Sampler / Decode
-- **ComfyUI-KJNodes** — Set/Get helpers plus the recommended MiniMax H3 Sage Attention patches used in the model chain
-- **WAS Node Suite** — `Text Multiline` prompt node
-- **ComfyUI-VideoHelperSuite** — ProRes video output
+- **ComfyUI-MiniMax-H3-LongMedia**
 
-### Recommended acceleration
+### Used by the example / optional acceleration
 
-- **ComfyUI-MiniMax-H3-Turbo** — the `MiniMaxH3TurboLoRA` node and Turbo LoRA path used in the validated workflow
-- **ComfyUI-KJNodes MiniMax H3 Sage patches** — the `PathchSageAttentionKJ` and `MiniMaxH3MemoryEfficientSageAttentionPatch` nodes
+Depending on the exact saved graph, the example can contain nodes from:
 
-The Turbo and KJ Sage nodes are **recommended, not mandatory for LongMedia itself**. If you have them installed but do not want to use them, select the node(s) and set them to **Bypass**. The model chain will pass through to the remaining LongMedia/Sol path.
+- **ComfyUI-KJNodes**
+- **ComfyUI-MiniMax-H3-Turbo**
+- **WAS Node Suite**
+- **ComfyUI-VideoHelperSuite**
 
-> Note: if a custom-node package is not installed at all, ComfyUI may show a missing-node warning when opening this exact workflow. Install the package first, then bypass the node if you do not want its effect.
+These packages are not all required by LongMedia itself. Optional acceleration nodes can be bypassed when installed but not desired.
 
-### Dynamic VRAM
+## Dynamic VRAM
 
-The validated SAFE run used ComfyUI Dynamic VRAM. Do not start ComfyUI with `--disable-dynamic-vram` for this preset.
+Keep ComfyUI Dynamic VRAM enabled. Do not launch ComfyUI with:
+
+```text
+--disable-dynamic-vram
+```
