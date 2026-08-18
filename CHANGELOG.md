@@ -1,3 +1,64 @@
+## v0.4.11
+
+- Consolidated all post-0.4.1 runtime fixes into one clean release baseline.
+- Preserved the unified LongMedia H3 lifecycle: one prepare/pre_run/cleanup per LongMedia execution while clips/segments are sampled sequentially.
+- Segmentation is strictly isolated to `manual` and `segmented_continuation`; MultiClip and every other workflow cannot inherit segmentation controls or hidden passes.
+- Restored real two-stage refinement inside the unified lifecycle: base sigma head followed by zero-noise low-sigma tail with the same seed, sampler and guider.
+- Restored the AIMDO/Text-Encoder pinned-memory gate before `NativeReferenceToVideo`, preventing the known HostBuffer weight-fault path on constrained Windows systems.
+- Hardened all remaining LongMedia `model_options` wrapper clones against Python `deepcopy()` of CUDA/AIMDO-backed storage.
+- Removed abandoned refiner regression tests and unreleased experimental release-note files; synchronized package version metadata.
+
+## v0.4.8
+
+- Restored the proven AIMDO pinned-memory gate for MiniMaxH3TEModel / NativeReferenceToVideo setup.
+- The gate now runs before reference/text-encoder weight faults, not only during ultra-low-VRAM sampling.
+- Existing CLIP/TE pins are released, pinned memory is temporarily disabled for native reference conditioning, and the original ComfyUI setting is restored immediately afterward.
+- No changes to refiner, segmentation isolation, or unified runtime behavior.
+
+## v0.4.7
+
+- Restored the real two-stage refiner execution.
+- Base and refine tail now run inside the same unified H3 model lifecycle.
+- Refiner uses zero added noise, the same effective seed, sampler and guider wrappers.
+- Segmentation isolation and all v0.4.6 workflow gating remain unchanged.
+
+## v0.4.6
+
+- Segmentation is now strictly owned by `manual` and `segmented_continuation` workflows only.
+- `segment_duration` and `overlap_frames` are ignored outside those two modes.
+- Ordinary workflows are hard-collapsed to a single H3 pass and can no longer accidentally enter continuation segmentation.
+- MultiClip remains multi-clip, but is explicitly not segmentation; segmentation overlap is forced off there.
+- Runtime reports no longer infer segmentation from `passes > 1`; they use the explicit plan flag.
+
+## v0.4.5
+
+- Fixed unified runtime crash caused by Python `deepcopy()` of CUDA/AIMDO-backed `model_options`.
+- Unified runtime and per-segment guider cloning now use ComfyUI `create_model_options_clone()` exclusively.
+- Preserves the single model lifecycle introduced in v0.4.4.
+
+## v0.4.4
+
+- Reworked LongMedia multi-segment sampling into one unified model lifecycle.
+- `prepare_sampling`, model `pre_run`, and cleanup now happen once per LongMedia generation instead of once per segment.
+- Segment continuation still runs sequentially, but through `guider.inner_sample()` while H3 stays prepared/resident.
+- Removed graph-level sampler nodes from the LongMedia segment loop, preventing repeated H3 model initialization between clips.
+- Refiner remains a logical low-noise tail inside the same single sampler schedule and does not create a second render cycle.
+
+## v0.4.3
+
+- Refiner now always runs inside a single SamplerCustomAdvanced execution.
+- Removed the second graph-level sampler pass that could restart the full render/execution lifecycle.
+- `refine_steps` now marks the logical low-noise tail within the same connected schedule for reporting and UI semantics.
+
+# 0.4.2
+
+- Fixed refiner VRAM/OOM regression by removing the separate `comfy.sample.sample()` / reconstructed CFGGuider execution path.
+- Stage 2 now runs through the same LongMedia `GUIDER`, `SAMPLER`, Sol/MLP wrappers and VRAM governor path as stage 1 using a second native `SamplerCustomAdvanced`.
+- Refiner SIGMAS are now the exact low-sigma tail `sigmas[switch_step:]`, sharing the boundary sigma with stage 1 like stock ComfyUI `SplitSigmas` chaining.
+- Added internal seeded zero-noise carrier: stage 2 injects no new noise while preserving the exact effective seed forwarded into `guider.sample()`.
+- Removed the obsolete stock-refiner runtime node that could bypass LongMedia execution wrappers and fall back into external MiniMax attention patches.
+- Sampling remains one continuous trajectory: `main_steps + refine_steps = total connected SIGMAS steps`.
+
 # 0.4.1
 
 - Fixed the LongMedia refiner to use a true two-stage KSampler Advanced sampling trajectory instead of replaying low-sigma steps on an already completed latent.

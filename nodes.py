@@ -118,6 +118,20 @@ NestedTensor = comfy.nested_tensor.NestedTensor
 NativeReferenceToVideo = None
 
 
+def _clone_model_options_safe(model_options):
+    """Clone ComfyUI model_options without deep-copying tensor/AIMDO storage."""
+    source = model_options or {}
+    try:
+        import comfy.model_patcher
+        return comfy.model_patcher.create_model_options_clone(source)
+    except Exception:
+        # Last-resort structural copy. Never deepcopy tensor-backed storage.
+        cloned = dict(source)
+        if isinstance(source.get("transformer_options"), dict):
+            cloned["transformer_options"] = dict(source["transformer_options"])
+        return cloned
+
+
 # Release console guard. True = quiet release console; False = full LongMedia diagnostics.
 # The Long Media Setup node owns this switch so the choice is serialized in the workflow.
 _LONGMEDIA_RELEASE_GUARD = True
@@ -961,10 +975,7 @@ class MiniMaxH3LatentLabAttentionChunking:
 
     def wrap(self, guider, chunk_tokens=8192):
         wrapped = copy.copy(guider)
-        try:
-            wrapped.model_options = copy.deepcopy(getattr(guider, 'model_options', {}) or {})
-        except Exception:
-            wrapped.model_options = dict(getattr(guider, 'model_options', {}) or {})
+        wrapped.model_options = _clone_model_options_safe(getattr(guider, 'model_options', {}) or {})
 
         transformer_options = wrapped.model_options.setdefault('transformer_options', {})
         state = {
@@ -1337,10 +1348,7 @@ class MiniMaxH3LatentLabBlockMemoryTracer:
 
     def wrap(self, guider, max_blocks=128):
         traced = copy.copy(guider)
-        try:
-            traced.model_options = copy.deepcopy(getattr(guider, 'model_options', {}) or {})
-        except Exception:
-            traced.model_options = dict(getattr(guider, 'model_options', {}) or {})
+        traced.model_options = _clone_model_options_safe(getattr(guider, 'model_options', {}) or {})
 
         transformer_options = traced.model_options.setdefault('transformer_options', {})
         patches_replace = transformer_options.setdefault('patches_replace', {})
@@ -6169,10 +6177,7 @@ class MiniMaxH3LatentLabMLPChunking:
             except Exception as exc:
                 reserve_stats['error'] = f'{type(exc).__name__}: {exc}'
                 _lm_print('[MiniMaxH3 LongMedia] Activation reserve fallback: ' + reserve_stats['error'], flush=True)
-        try:
-            wrapped.model_options = copy.deepcopy(getattr(guider, 'model_options', {}) or {})
-        except Exception:
-            wrapped.model_options = dict(getattr(guider, 'model_options', {}) or {})
+        wrapped.model_options = _clone_model_options_safe(getattr(guider, 'model_options', {}) or {})
 
         transformer_options = wrapped.model_options.setdefault('transformer_options', {})
         _runtime_backend = str(
@@ -8058,7 +8063,11 @@ def _v0322_attach_native_av_context_ref(positive_list, previous_av, plan, segmen
 def _clone_guider_with_segment_audio(guider, plan, segment_index, previous_av=None):
     """Clone guider cheaply, select pass conditioning, and add previous motion context."""
     shifted = copy.copy(guider)
-    shifted.model_options = copy.deepcopy(getattr(guider, 'model_options', {}) or {})
+    # model_options may contain CUDA/AIMDO-backed tensors and storages. Never deepcopy them.
+    import comfy.model_patcher
+    shifted.model_options = comfy.model_patcher.create_model_options_clone(
+        getattr(guider, 'model_options', {}) or {}
+    )
     timeline = _segment_timeline_contract(plan, segment_index)
     start_frame = int(timeline['context_start'])
     visible_start_frame = int(timeline['visible_start'])
@@ -9381,6 +9390,83 @@ class MiniMaxH3LongMediaPlanner:
         return (plan, int(len(normalized)), float(requested), report)
 
 
+
+def _longmedia_native_reference_execute_safe(native_cls, *, clip, **kwargs):
+    """Run MiniMax H3 native reference conditioning with the old AIMDO pinned-memory gate.
+
+    NativeReferenceToVideo invokes the large MiniMaxH3TEModel before the sampler
+    memory policy exists. On Windows/AIMDO this can fail in HostBuffer.read_file_slice
+    (GetOverlappedResult error 1450) when pinned host mappings are exhausted. Mirror
+    the proven 0.3.59 sampler-local workaround around the TE/reference encode only,
+    then restore the user's global ComfyUI setting.
+    """
+    previous = False
+    changed = False
+    try:
+        from comfy.cli_args import args as _args
+        previous = bool(getattr(_args, 'disable_pinned_memory', False))
+        if not previous:
+            _args.disable_pinned_memory = True
+            changed = True
+
+        # Release any already-established pins on CLIP/TE patchers before the
+        # first AIMDO weight fault. Different ComfyUI versions expose the patcher
+        # at slightly different locations, so probe conservatively.
+        candidates = []
+        for obj in (
+            clip,
+            getattr(clip, 'patcher', None),
+            getattr(clip, 'model_patcher', None),
+            getattr(clip, 'cond_stage_model', None),
+            getattr(getattr(clip, 'cond_stage_model', None), 'patcher', None),
+            getattr(getattr(clip, 'cond_stage_model', None), 'model_patcher', None),
+        ):
+            if obj is not None and obj not in candidates:
+                candidates.append(obj)
+        unpinned = 0
+        for obj in candidates:
+            fn = getattr(obj, 'unpin_all_weights', None)
+            if callable(fn):
+                try:
+                    fn()
+                    unpinned += 1
+                except Exception as exc:
+                    _lm_print(
+                        '[MiniMaxH3 LongMedia][0.4.11 TE PINNED-MEMORY GATE] '
+                        f'unpin warning {type(exc).__name__}: {exc}',
+                        flush=True,
+                    )
+        try:
+            import comfy.model_management as _mm
+            if hasattr(_mm, 'soft_empty_cache'):
+                _mm.soft_empty_cache()
+        except Exception:
+            pass
+        _lm_print(
+            '[MiniMaxH3 LongMedia][0.4.11 TE PINNED-MEMORY GATE] '
+            f'disable_pinned_memory {previous}->True for NativeReferenceToVideo; '
+            f'unpinned_patchers={unpinned}; restore_after_encode=True',
+            flush=True,
+        )
+        return native_cls.execute(clip=clip, **kwargs)
+    finally:
+        if changed:
+            try:
+                from comfy.cli_args import args as _args
+                _args.disable_pinned_memory = previous
+                _lm_print(
+                    '[MiniMaxH3 LongMedia][0.4.11 TE PINNED-MEMORY RESTORE] '
+                    f'disable_pinned_memory restored to {previous}',
+                    flush=True,
+                )
+            except Exception as exc:
+                _lm_print(
+                    '[MiniMaxH3 LongMedia][0.4.11 TE PINNED-MEMORY RESTORE] '
+                    f'warning {type(exc).__name__}: {exc}',
+                    flush=True,
+                )
+
+
 class MiniMaxH3LatentLabLongMediaSetup:
     DESCRIPTION = (
         'Orchestrate long-media generation: build a multi-segment plan, '
@@ -9566,10 +9652,11 @@ class MiniMaxH3LatentLabLongMediaSetup:
         safe_images, h3_ref_geometry = _h3_safe_reference_images(images)
         safe_image_by_id = {id(src): safe for src, safe in zip(images, safe_images)}
 
-        # v0.3.13: segmentation is available in every public workflow mode.
-        # segment_seconds is the NEW visible timeline produced per pass; overlap_frames
-        # is additional hidden continuation context and does not reduce that duration.
+        # v0.4.6: segmentation has strict workflow ownership. It exists ONLY in
+        # manual and segmented_continuation. MultiClip may have multiple clips, but
+        # that is clip planning, not segmentation; segmentation controls must not leak.
         workflow_mode = str(workflow_mode or 'hybrid_auto')
+        segmentation_active = workflow_mode in ('manual', 'segmented_continuation')
         external_clip_plan = clip_plan if isinstance(clip_plan, dict) else None
         if workflow_mode == 'multiclip' and external_clip_plan is not None:
             kind = str(external_clip_plan.get('kind') or '')
@@ -9630,7 +9717,7 @@ class MiniMaxH3LatentLabLongMediaSetup:
             raise ValueError(f'Unknown workflow_mode={workflow_mode!r}')
 
         effective_segment_seconds = float(segment_seconds)
-        effective_overlap_frames = int(overlap_frames)
+        effective_overlap_frames = int(overlap_frames) if segmentation_active else 0
         effective_manual_duration = float(manual_duration)
         effective_duration_source = duration_source
         if workflow_mode == 'multiclip':
@@ -9648,6 +9735,35 @@ class MiniMaxH3LatentLabLongMediaSetup:
             video_fps=float(video_fps),
             resolution_mode=resolution_mode,
         )
+        plan = _dc_replace(
+            plan,
+            workflow_mode=workflow_mode,
+            segmentation_active=bool(segmentation_active),
+        )
+
+        # Strict isolation: all ordinary non-segmentation workflows are exactly one
+        # H3 pass regardless of segment_duration. MultiClip owns its own clip count
+        # below and is intentionally excluded from segmentation.
+        if (not segmentation_active) and workflow_mode != 'multiclip':
+            full_frames = int(align_frame_count(max(5, int(plan.output_frames))))
+            plan = _dc_replace(
+                plan,
+                segment_frames=full_frames,
+                segment_lengths=(full_frames,),
+                segment_starts=(0,),
+                overlap_frames=0,
+                step_frames=full_frames,
+                passes=1,
+                generated_frames=full_frames,
+                trim_frames=max(0, full_frames - int(plan.output_frames)),
+                timeline_policy='single',
+            )
+            _lm_print(
+                '[MiniMaxH3 LongMedia][0.4.6 SEGMENTATION ISOLATION] '
+                f'workflow={workflow_mode}; segmentation_active=False; passes=1; '
+                'segment_duration_ignored=True; overlap_ignored=True',
+                flush=True,
+            )
 
         if workflow_mode == 'segmented_continuation':
             multiclip_clips, fixed_lengths, fixed_starts, fixed_generated = _v111_build_fixed_clip_specs(
@@ -9656,6 +9772,7 @@ class MiniMaxH3LatentLabLongMediaSetup:
             plan = _dc_replace(
                 plan,
                 mode='multiclip', duration_basis=f'{plan.duration_basis}:fixed_segments',
+                workflow_mode='segmented_continuation', segmentation_active=True,
                 segment_frames=int(fixed_lengths[0]), segment_lengths=tuple(fixed_lengths),
                 segment_starts=tuple(fixed_starts), overlap_frames=int(plan.overlap_frames),
                 step_frames=max(1, int(fixed_lengths[0]) - int(plan.overlap_frames)),
@@ -9677,6 +9794,7 @@ class MiniMaxH3LatentLabLongMediaSetup:
             plan = _dc_replace(
                 plan,
                 mode='multiclip', duration_basis='multiclip',
+                workflow_mode='multiclip', segmentation_active=False,
                 total_duration=float(mc_output_frames) / float(FPS), output_frames=int(mc_output_frames),
                 segment_frames=int(mc_lengths[0]), segment_lengths=tuple(mc_lengths), segment_starts=tuple(mc_starts),
                 overlap_frames=int(effective_overlap_frames), step_frames=max(1, int(mc_lengths[0]) - int(effective_overlap_frames)),
@@ -10001,8 +10119,8 @@ class MiniMaxH3LatentLabLongMediaSetup:
             if ref_audio is not None:
                 ref_audios['ref_audio_0'] = ref_audio
             setup_memory_events.append(_setup_memory_isolation('before_native_reference', unload_models=True))
-            positive, target_av = NativeReferenceToVideo.execute(
-                clip=clip, vae=vae, audio_vae=audio_vae,
+            positive, target_av = _longmedia_native_reference_execute_safe(
+                NativeReferenceToVideo, clip=clip, vae=vae, audio_vae=audio_vae,
                 prompt=segment0_prompt, width=width, height=height,
                 length=plan.segment_lengths[0], ref_image_size=('max' if images else resolution_mode),
                 ref_images=ref_images, ref_videos=ref_videos, ref_audios=ref_audios,
@@ -10054,8 +10172,8 @@ class MiniMaxH3LatentLabLongMediaSetup:
                 for i, aud in enumerate(audios):
                     ref_audios[f'ref_audio_{i}'] = aud
             setup_memory_events.append(_setup_memory_isolation('before_native_reference', unload_models=True))
-            positive, target_av = NativeReferenceToVideo.execute(
-                clip=clip, vae=vae, audio_vae=audio_vae,
+            positive, target_av = _longmedia_native_reference_execute_safe(
+                NativeReferenceToVideo, clip=clip, vae=vae, audio_vae=audio_vae,
                 width=width, height=height, length=plan.segment_lengths[0],
                 prompt=segment0_prompt, ref_image_size=('max' if images else resolution_mode),
                 ref_images=ref_images, ref_videos=ref_videos, ref_audios=ref_audios,
@@ -10156,8 +10274,8 @@ class MiniMaxH3LatentLabLongMediaSetup:
                 for i, aud in enumerate(audios):
                     ref_audios[f'ref_audio_{i}'] = aud
             setup_memory_events.append(_setup_memory_isolation('before_native_reference', unload_models=True))
-            positive, target_av = NativeReferenceToVideo.execute(
-                clip=clip, vae=vae, audio_vae=audio_vae,
+            positive, target_av = _longmedia_native_reference_execute_safe(
+                NativeReferenceToVideo, clip=clip, vae=vae, audio_vae=audio_vae,
                 width=width, height=height, length=plan.segment_lengths[0],
                 prompt=segment0_prompt, ref_image_size=('max' if images else resolution_mode),
                 ref_images=ref_images, ref_videos=ref_videos, ref_audios=ref_audios,
@@ -10212,7 +10330,7 @@ class MiniMaxH3LatentLabLongMediaSetup:
             plan,
             audio_output_mode=audio_mode,
             suppress_visible_opening_anchor=False,
-            regression_safe_segmented_conditioning=(workflow_mode in ('segmented_continuation', 'multiclip')),
+            regression_safe_segmented_conditioning=bool(segmentation_active),
             decouple_original_image_refs_after_pass0=False,
             release_guard=True,
         )
@@ -10262,7 +10380,7 @@ class MiniMaxH3LatentLabLongMediaSetup:
         report = json.dumps({
             'mode': plan.mode,
             'passes': plan.passes,
-            'segmentation_active': bool(plan.passes > 1),
+            'segmentation_active': bool(getattr(plan, 'segmentation_active', False)),
             'manual_duration_seconds': float(plan.total_duration),
             'segment_seconds_requested': float(segment_seconds),
             'multiclip_enabled': bool(workflow_mode == 'multiclip'),
@@ -10273,7 +10391,7 @@ class MiniMaxH3LatentLabLongMediaSetup:
             'release_guard': True,
             'multiclip_clip_durations': ([float(c['duration']) for c in multiclip_clips] if multiclip_clips else None),
             'multiclip_segment_seeds': ([c['seed'] for c in multiclip_clips] if multiclip_clips else None),
-            'segment_seconds_semantics': 'new_output_timeline_plus_extra_overlap_context',
+            'segment_seconds_semantics': ('new_output_timeline_plus_extra_overlap_context' if segmentation_active else 'ignored_outside_manual_and_segmented_continuation'),
             'segment_lengths_frames': list(plan.segment_lengths),
             'segment_starts_frames': list(plan.segment_starts),
             'overlap_frames': plan.overlap_frames,
@@ -10473,7 +10591,7 @@ class MiniMaxH3LatentLabLongMediaNextSegment:
 
 
 class MiniMaxH3LatentLabRefineSigmas:
-    """Split the connected schedule into a true KSampler Advanced two-stage trajectory."""
+    """Describe the true base/refiner split executed inside one unified model lifecycle."""
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -10505,7 +10623,7 @@ class MiniMaxH3LatentLabRefineSigmas:
             'main_sigma_end': float(main[-1].detach().float().cpu()),
             'refine_sigma_start': float(refine[0].detach().float().cpu()),
             'refine_sigma_end': float(refine[-1].detach().float().cpu()),
-            'scheduler_source': 'connected_sigmas_true_advanced_split',
+            'scheduler_source': 'connected_sigmas_true_advanced_split_unified_runtime',
             'main_return_with_leftover_noise': True,
             'refine_add_noise': False,
             'intervals_total': total_steps,
@@ -10519,120 +10637,42 @@ class MiniMaxH3LatentLabRefineSigmas:
 
 
 
-class MiniMaxH3LatentLabStockAdvancedRefiner:
-    """Run refiner through the stock ComfyUI KSampler Advanced path.
+class _MiniMaxH3SeededEmptyNoise:
+    """Zero-noise carrier that preserves the stage-1 effective seed.
 
-    This node intentionally returns the stock solver state from
-    ``comfy.sample.sample()``. It does not substitute preview x0, does not freeze
-    streams, and does not reconstruct NestedTensor outputs. The caller is
-    expected to pass an in-progress latent from stage 1 and a full connected
-    sigma schedule together with ``start_at_step``.
+    Stock ComfyUI DisableNoise uses seed=0. SamplerCustomAdvanced forwards the
+    NOISE object's seed into guider.sample(), so a two-stage LongMedia trajectory
+    must carry the original effective seed even though stage 2 adds no noise.
     """
+    def __init__(self, seed):
+        self.seed = int(seed) & 0xFFFFFFFFFFFFFFFF
 
+    def generate_noise(self, input_latent):
+        import comfy.sample
+        return comfy.sample.prepare_empty_noise(input_latent["samples"])
+
+
+class MiniMaxH3LatentLabSeededDisableNoise:
     @classmethod
     def INPUT_TYPES(cls):
         return {
             'required': {
-                'guider': ('GUIDER',),
-                'final_av': ('LATENT',),
-                'sigmas': ('SIGMAS',),
-                'start_at_step': ('INT', {'default': 0, 'min': 0, 'max': 100000, 'step': 1}),
                 'seed': ('INT', {'default': 0, 'min': 0, 'max': 0xffffffffffffffff}),
             }
         }
 
-    RETURN_TYPES = ('LATENT', 'STRING')
-    RETURN_NAMES = ('refined_av', 'report')
-    FUNCTION = 'refine'
+    RETURN_TYPES = ('NOISE',)
+    RETURN_NAMES = ('noise',)
+    FUNCTION = 'build'
     CATEGORY = 'MiniMax H3/LongMedia/Internal'
 
-    @staticmethod
-    def _restore_raw_conditioning(converted):
-        raw = []
-        for item in list(converted or []):
-            if not isinstance(item, dict):
-                raise RuntimeError('Stock refiner expected CFGGuider converted conditioning dictionaries.')
-            meta = item.copy()
-            cross_attn = meta.pop('cross_attn', None)
-            meta.pop('uuid', None)
-            raw.append([cross_attn, meta])
-        return raw
-
-    def refine(self, guider, final_av, sigmas, start_at_step=0, seed=0):
-        import comfy.sample
-
-        if final_av is None or not isinstance(final_av, dict) or 'samples' not in final_av:
-            raise RuntimeError('Stock Advanced refiner requires the stage-1 H3 AV LATENT.')
-        model = getattr(guider, 'model_patcher', None)
-        if model is None:
-            raise RuntimeError('Stock Advanced refiner could not resolve model_patcher from GUIDER.')
-        original_conds = getattr(guider, 'original_conds', None) or {}
-        positive = self._restore_raw_conditioning(original_conds.get('positive', []))
-        negative = self._restore_raw_conditioning(original_conds.get('negative', []))
-        cfg = float(getattr(guider, 'cfg', 1.0))
-
-        latent_image = final_av['samples']
-        latent_image = comfy.sample.fix_empty_latent_channels(
-            model,
-            latent_image,
-            final_av.get('downscale_ratio_spacial', None),
-            final_av.get('downscale_ratio_temporal', None),
-        )
-        noise = comfy.sample.prepare_empty_noise(latent_image)
-        noise_mask = final_av.get('noise_mask', None)
-        total_steps = max(0, int(sigmas.numel()) - 1) if torch.is_tensor(sigmas) else max(0, len(sigmas) - 1)
-        start_at_step = max(0, min(int(start_at_step), total_steps))
-
+    def build(self, seed=0):
         _lm_print(
-            '[MiniMaxH3 LongMedia][0.4.1 STOCK ADVANCED REFINER] '
-            f'sampler=euler; scheduler=simple; total_steps={int(total_steps)}; '
-            f'add_noise=disable; start_at_step={int(start_at_step)}; end_at_step=10000; '
-            'return_with_leftover_noise=disable; output=stock_solver_state',
+            '[MiniMaxH3 LongMedia][0.4.2 SEEDED DISABLE NOISE] '
+            f'add_noise=False; forwarded_seed={int(seed) & 0xFFFFFFFFFFFFFFFF}',
             flush=True,
         )
-
-        samples = comfy.sample.sample(
-            model,
-            noise,
-            int(total_steps),
-            cfg,
-            'euler',
-            'simple',
-            positive,
-            negative,
-            latent_image,
-            denoise=1.0,
-            disable_noise=True,
-            start_step=int(start_at_step),
-            last_step=10000,
-            force_full_denoise=True,
-            noise_mask=noise_mask,
-            sigmas=sigmas,
-            callback=None,
-            disable_pbar=False,
-            seed=int(seed),
-        )
-
-        out = final_av.copy()
-        out.pop('downscale_ratio_spacial', None)
-        out.pop('downscale_ratio_temporal', None)
-        out['samples'] = samples
-        report = json.dumps({
-            'mode': 'stock_ksampler_advanced_true_split',
-            'sampler': 'euler',
-            'scheduler': 'simple',
-            'steps': int(total_steps),
-            'start_at_step': int(start_at_step),
-            'end_at_step': 10000,
-            'add_noise': False,
-            'return_with_leftover_noise': False,
-            'force_full_denoise': True,
-            'sigma_source': 'connected_full_schedule',
-            'output': 'stock_solver_state',
-            'x0_substitution': False,
-            'stream_freeze': False,
-        })
-        return (out, report)
+        return (_MiniMaxH3SeededEmptyNoise(seed),)
 
 
 class MiniMaxH3LatentLabProtectRefineAV:
@@ -10813,6 +10853,394 @@ def _resolve_h3_memory_mode(guider, requested):
         else:
             effective, reason = 'normal', 'model fits normal residency policy'
     return {'requested': requested, 'effective': effective, 'reason': reason, 'model_bytes': model_bytes, 'gpu_bytes': gpu_bytes}
+
+
+
+class MiniMaxH3LatentLabUnifiedRuntimeSampler:
+    """Execute every LongMedia segment inside one ComfyUI sampling lifecycle.
+
+    The stock CFGGuider.sample() owns prepare_sampling/pre_run/cleanup, which means
+    calling it once per segment reloads/reinitializes H3 each time.  This runtime
+    node opens that lifecycle once, runs guider.inner_sample() for every segment,
+    updates continuation conditioning/latents between segments, then cleans up once.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            'required': {
+                'initial_av': ('LATENT',),
+                'long_media_plan': ('LONG_MEDIA_PLAN',),
+                'guider': ('GUIDER',),
+                'sampler': ('SAMPLER',),
+                'sigmas': ('SIGMAS',),
+                'seed': ('INT', {'default': 0, 'min': 0, 'max': 0xffffffffffffffff}),
+                'video_context_denoise': ('FLOAT', {'default': 0.0, 'min': 0.0, 'max': 1.0, 'step': 0.01}),
+                'audio_context_denoise': ('FLOAT', {'default': 0.0, 'min': 0.0, 'max': 1.0, 'step': 0.01}),
+                'offload_completed_segments': ('BOOLEAN', {'default': True}),
+                'refine_enabled': ('BOOLEAN', {'default': False}),
+                'refine_steps': ('INT', {'default': 2, 'min': 1, 'max': 1000, 'step': 1}),
+            }
+        }
+
+    RETURN_TYPES = ('LATENT', 'STRING')
+    RETURN_NAMES = ('final_av', 'runtime_report')
+    FUNCTION = 'run'
+    CATEGORY = 'MiniMax H3/LongMedia/Internal'
+
+    @staticmethod
+    def _copy_conds(original_conds):
+        import comfy.samplers
+        conds = {}
+        for key, values in (original_conds or {}).items():
+            conds[key] = [item.copy() if hasattr(item, 'copy') else item for item in values]
+        comfy.samplers.preprocess_conds_hooks(conds)
+        return conds
+
+    @staticmethod
+    def _pack_segment_inputs(latent, model_patcher, seed, device):
+        import comfy.sample
+        import comfy.utils
+        import comfy.sampler_helpers
+
+        local = latent.copy()
+        samples = comfy.sample.fix_empty_latent_channels(
+            model_patcher,
+            local['samples'],
+            local.get('downscale_ratio_spacial', None),
+            local.get('downscale_ratio_temporal', None),
+        )
+        local['samples'] = samples
+        batch_inds = local.get('batch_index', None)
+        noise = comfy.sample.prepare_noise(samples, int(seed) & 0xFFFFFFFFFFFFFFFF, batch_inds)
+
+        if getattr(samples, 'is_nested', False):
+            stream_shapes = [tuple(x.shape) for x in samples.unbind()]
+            packed_samples, latent_shapes = comfy.utils.pack_latents(samples.unbind())
+            packed_noise, _ = comfy.utils.pack_latents(noise.unbind())
+        else:
+            stream_shapes = [tuple(samples.shape)]
+            latent_shapes = [samples.shape]
+            packed_samples = samples
+            packed_noise = noise
+
+        denoise_mask = local.get('noise_mask', None)
+        if denoise_mask is not None:
+            if getattr(denoise_mask, 'is_nested', False):
+                masks = list(denoise_mask.unbind())[:len(latent_shapes)]
+            else:
+                masks = [denoise_mask]
+            for i in range(len(masks), len(latent_shapes)):
+                masks.append(torch.ones(latent_shapes[i]))
+            for i in range(len(masks)):
+                masks[i] = comfy.sampler_helpers.prepare_mask(masks[i], latent_shapes[i], device)
+            if len(masks) > 1:
+                denoise_mask, _ = comfy.utils.pack_latents(masks)
+            else:
+                denoise_mask = masks[0]
+            denoise_mask = denoise_mask.float()
+
+        return local, packed_samples, packed_noise, denoise_mask, latent_shapes, stream_shapes
+
+    @staticmethod
+    def _unpack_segment_output(template_latent, packed_output, latent_shapes):
+        import comfy.utils
+        import comfy.nested_tensor
+        out = template_latent.copy()
+        out.pop('downscale_ratio_spacial', None)
+        out.pop('downscale_ratio_temporal', None)
+        if len(latent_shapes) > 1:
+            out['samples'] = comfy.nested_tensor.NestedTensor(
+                comfy.utils.unpack_latents(packed_output, latent_shapes)
+            )
+        else:
+            out['samples'] = packed_output
+        return out
+
+    def run(self, initial_av, long_media_plan, guider, sampler, sigmas, seed,
+            video_context_denoise=0.0, audio_context_denoise=0.0,
+            offload_completed_segments=True, refine_enabled=False, refine_steps=2):
+        import comfy.samplers
+        import comfy.sampler_helpers
+        import comfy.model_management
+        import comfy.model_patcher
+        import comfy.hooks
+        import comfy.utils
+        import comfy.multigpu
+        import latent_preview
+
+        plan = long_media_plan
+        passes = max(1, int(getattr(plan, 'passes', 1) or 1))
+        segmentation_active = bool(getattr(plan, 'segmentation_active', False))
+        workflow_mode = str(getattr(plan, 'workflow_mode', '') or '')
+        full_sigmas = sigmas
+        total_steps = max(0, int(full_sigmas.numel()) - 1) if torch.is_tensor(full_sigmas) else max(0, len(full_sigmas) - 1)
+        if bool(refine_enabled):
+            runtime_main_sigmas, runtime_refine_sigmas, total_steps, refine_switch_step, refine_steps_effective, _ = split_refine_sigmas(
+                full_sigmas, int(refine_steps)
+            )
+        else:
+            runtime_main_sigmas = full_sigmas
+            runtime_refine_sigmas = None
+            refine_switch_step = total_steps
+            refine_steps_effective = 0
+        _lm_print(
+            '[MiniMaxH3 LongMedia][0.4.7 REFINER RESTORED] '
+            f'enabled={bool(refine_enabled)}; total_steps={int(total_steps)}; '
+            f'base_steps={int(refine_switch_step)}; refine_steps={int(refine_steps_effective)}; '
+            'model_lifecycle=single; second_model_load=False',
+            flush=True,
+        )
+        if (not segmentation_active) and workflow_mode not in ('multiclip',) and passes != 1:
+            raise RuntimeError(
+                f'LongMedia invariant violated: segmentation is disabled for workflow={workflow_mode!r} but passes={passes}. '
+                'Only manual/segmented_continuation may create segmentation passes.'
+            )
+        model_patcher = guider.model_patcher
+        device = model_patcher.load_device
+
+        # Save externally-owned guider state. The runtime temporarily mutates it
+        # exactly as CFGGuider.sample() does, but restores everything at the end.
+        original_model_options = guider.model_options
+        original_original_conds = getattr(guider, 'original_conds', None)
+        runtime_template_guider = copy.copy(guider)
+        runtime_template_guider.original_conds = dict(original_original_conds or {})
+        # Structured Comfy clone only: model_options can contain invalidated / device-backed
+        # storages that Python deepcopy() cannot safely clone.
+        runtime_template_guider.model_options = comfy.model_patcher.create_model_options_clone(
+            original_model_options or {}
+        )
+        original_hook_mode = model_patcher.hook_mode
+        original_inner_model = getattr(guider, 'inner_model', None)
+        original_conds_runtime = getattr(guider, 'conds', None)
+        original_loaded_models = getattr(guider, 'loaded_models', None)
+
+        first_seed = _v85_segment_seed(plan, seed, 0) if getattr(plan, 'mode', None) == 'multiclip' else int(seed) & 0xFFFFFFFFFFFFFFFF
+        first_local, first_latent, first_noise, first_mask, first_shapes, _ = self._pack_segment_inputs(
+            initial_av, model_patcher, first_seed, device
+        )
+
+        # Prepare hooks/model exactly once for the whole movie.
+        guider.conds = self._copy_conds(getattr(guider, 'original_conds', {}) or {})
+        guider.model_options = comfy.model_patcher.create_model_options_clone(original_model_options)
+        if comfy.samplers.get_total_hook_groups_in_conds(guider.conds) <= 1:
+            model_patcher.hook_mode = comfy.hooks.EnumHookMode.MinVram
+        comfy.sampler_helpers.prepare_model_patcher(model_patcher, guider.conds, guider.model_options)
+        comfy.samplers.filter_registered_hooks_on_conds(guider.conds, guider.model_options)
+
+        inner_model = loaded_models = multigpu_patchers = None
+        runtime_thread_pool = None
+        stitched = previous_segment = None
+        completed = 0
+        try:
+            inner_model, prepared_conds, loaded_models = comfy.sampler_helpers.prepare_sampling(
+                model_patcher, first_noise.shape, guider.conds, guider.model_options
+            )
+            guider.inner_model = inner_model
+            guider.conds = prepared_conds
+            guider.loaded_models = loaded_models
+
+            multigpu_patchers = comfy.sampler_helpers.prepare_model_patcher_multigpu_clones(
+                model_patcher, loaded_models, guider.model_options
+            )
+            if multigpu_patchers:
+                all_devices = [device] + [p.load_device for p in multigpu_patchers]
+                runtime_thread_pool = comfy.multigpu.MultiGPUThreadPool(all_devices)
+                guider.model_options['multigpu_thread_pool'] = runtime_thread_pool
+
+            with comfy.model_management.cuda_device_context(device):
+                comfy.samplers.cast_to_load_options(
+                    guider.model_options, device=device, dtype=model_patcher.model_dtype()
+                )
+                model_patcher.pre_run()
+                for patcher in multigpu_patchers:
+                    patcher.pre_run()
+
+                for segment_index in range(passes):
+                    if segment_index == 0:
+                        segment_av = first_local
+                        effective_seed = first_seed
+                        segment_guider = runtime_template_guider
+                    else:
+                        if getattr(plan, 'mode', None) == 'storyboard_bridge':
+                            storyboard_avs = getattr(plan, 'storyboard_segment_avs', None)
+                            if not storyboard_avs or segment_index >= len(storyboard_avs):
+                                raise RuntimeError('Unified runtime: storyboard pass latent is missing from LongMediaPlan')
+                            segment_av = storyboard_avs[segment_index]
+                            segment_guider = _clone_guider_with_segment_audio(
+                                runtime_template_guider, plan, segment_index, previous_av=None
+                            )
+                        elif workflow_mode == 'multiclip':
+                            # MultiClip is NOT segmentation. We reuse only the AV target sizing/source
+                            # preparation helper with overlap forced to zero by Setup; continuity comes
+                            # from native H3 motion/AV context in the per-clip guider.
+                            segment_av = MiniMaxH3LatentLabLongMediaNextSegment().prepare(
+                                plan, previous_segment, segment_index, 1.0, 1.0
+                            )[0]
+                            segment_guider = _clone_guider_with_segment_audio(
+                                runtime_template_guider, plan, segment_index, previous_av=previous_segment
+                            )
+                        elif segmentation_active:
+                            segment_av = MiniMaxH3LatentLabLongMediaNextSegment().prepare(
+                                plan, previous_segment, segment_index,
+                                float(video_context_denoise), float(audio_context_denoise)
+                            )[0]
+                            segment_guider = _clone_guider_with_segment_audio(
+                                runtime_template_guider, plan, segment_index, previous_av=previous_segment
+                            )
+                        else:
+                            raise RuntimeError(
+                                f'Unexpected extra LongMedia pass outside segmentation/MultiClip: workflow={workflow_mode!r}, index={segment_index}'
+                            )
+                        effective_seed = (
+                            _v85_segment_seed(plan, seed, segment_index)
+                            if getattr(plan, 'mode', None) == 'multiclip'
+                            else int(seed) & 0xFFFFFFFFFFFFFFFF
+                        )
+
+                    local, packed_latent, packed_noise, denoise_mask, latent_shapes, _ = self._pack_segment_inputs(
+                        segment_av, model_patcher, effective_seed, device
+                    )
+                    packed_latent = packed_latent.to(device=device, dtype=torch.float32)
+                    packed_noise = packed_noise.to(device=device, dtype=torch.float32)
+                    local_sigmas = runtime_main_sigmas.to(device)
+                    if denoise_mask is not None:
+                        denoise_mask = denoise_mask.to(device)
+
+                    # Switch only the per-segment conditioning/model options;
+                    # model residency and pre_run state remain untouched.
+                    guider.original_conds = dict(getattr(segment_guider, 'original_conds', {}) or {})
+                    guider.conds = self._copy_conds(guider.original_conds)
+                    guider.model_options = comfy.model_patcher.create_model_options_clone(
+                        getattr(segment_guider, 'model_options', original_model_options)
+                    )
+                    if runtime_thread_pool is not None:
+                        guider.model_options['multigpu_thread_pool'] = runtime_thread_pool
+
+                    x0_output = {}
+                    preview_cb = latent_preview.prepare_callback(
+                        model_patcher, max(0, int(local_sigmas.shape[-1]) - 1), x0_output
+                    )
+                    if len(latent_shapes) > 1:
+                        def callback(step, x0, x, total_steps, _cb=preview_cb, _shapes=latent_shapes):
+                            import comfy.nested_tensor
+                            nx0 = comfy.nested_tensor.NestedTensor(comfy.utils.unpack_latents(x0, _shapes))
+                            nx = comfy.nested_tensor.NestedTensor(comfy.utils.unpack_latents(x, _shapes))
+                            return _cb(step, nx0, nx, total_steps)
+                    else:
+                        callback = preview_cb
+
+                    _lm_print(
+                        '[MiniMaxH3 LongMedia][0.4.6 UNIFIED RUNTIME] '
+                        f'unit={segment_index + 1}/{passes}; workflow={getattr(plan, "workflow_mode", "unknown")}; seed={int(effective_seed)}; '
+                        'model_lifecycle=reused; prepare_sampling=False; pre_run=False',
+                        flush=True,
+                    )
+                    # Stage 1: normal base sampling. This remains inside the already-open
+                    # prepare_sampling/pre_run lifecycle.
+                    sampled_packed = guider.inner_sample(
+                        packed_noise, packed_latent, device, sampler, local_sigmas,
+                        denoise_mask, callback, False, int(effective_seed),
+                        latent_shapes=latent_shapes,
+                    )
+
+                    # Stage 2: restore the proven KSampler-Advanced continuation semantics
+                    # without opening a second model lifecycle. Zero noise + same seed,
+                    # same sampler, same model/wrappers; only the tail sigmas are executed.
+                    if bool(refine_enabled) and int(refine_steps_effective) > 0:
+                        refine_sigmas_device = runtime_refine_sigmas.to(device)
+                        refine_noise = torch.zeros_like(sampled_packed, device=device, dtype=torch.float32)
+
+                        # inner_sample mutates guider.conds via process_conds(), so reset the
+                        # per-segment raw conditioning before the second stage exactly as a
+                        # second SamplerCustomAdvanced node would receive it.
+                        guider.conds = self._copy_conds(guider.original_conds)
+
+                        refine_x0_output = {}
+                        refine_preview_cb = latent_preview.prepare_callback(
+                            model_patcher, max(0, int(refine_sigmas_device.shape[-1]) - 1), refine_x0_output
+                        )
+                        if len(latent_shapes) > 1:
+                            def refine_callback(step, x0, x, total_steps, _cb=refine_preview_cb, _shapes=latent_shapes):
+                                import comfy.nested_tensor
+                                nx0 = comfy.nested_tensor.NestedTensor(comfy.utils.unpack_latents(x0, _shapes))
+                                nx = comfy.nested_tensor.NestedTensor(comfy.utils.unpack_latents(x, _shapes))
+                                return _cb(step, nx0, nx, total_steps)
+                        else:
+                            refine_callback = refine_preview_cb
+
+                        sampled_packed = guider.inner_sample(
+                            refine_noise, sampled_packed, device, sampler, refine_sigmas_device,
+                            denoise_mask, refine_callback, False, int(effective_seed),
+                            latent_shapes=latent_shapes,
+                        )
+                        _lm_print(
+                            '[MiniMaxH3 LongMedia][0.4.7 REFINER] '
+                            f'unit={segment_index + 1}/{passes}; seed={int(effective_seed)}; '
+                            f'base_steps={int(refine_switch_step)}; refine_steps={int(refine_steps_effective)}; '
+                            'add_noise=False; same_seed=True; same_sampler=True; same_model_lifecycle=True',
+                            flush=True,
+                        )
+
+                    sampled_output = self._unpack_segment_output(local, sampled_packed, latent_shapes)
+                    previous_segment = sampled_output
+                    if stitched is None:
+                        stitched = sampled_output
+                    else:
+                        stitch_overlap = int(plan.overlap_frames) if segmentation_active else 0
+                        stitched = MiniMaxH3LatentLabStitchContinuation().stitch(
+                            stitched, sampled_output,
+                            stitch_overlap,
+                            False, bool(offload_completed_segments)
+                        )[0]
+                    completed += 1
+
+                _lm_print(
+                    '[MiniMaxH3 LongMedia][0.4.6 UNIFIED RUNTIME] '
+                    f'completed_segments={completed}; one_prepare_sampling=True; one_pre_run=True; one_cleanup=True',
+                    flush=True,
+                )
+        finally:
+            try:
+                if runtime_thread_pool is not None:
+                    runtime_thread_pool.shutdown()
+                    runtime_thread_pool = None
+            except Exception:
+                pass
+            try:
+                model_patcher.cleanup()
+                for patcher in (multigpu_patchers or []):
+                    patcher.cleanup()
+            finally:
+                if loaded_models is not None:
+                    try:
+                        comfy.sampler_helpers.cleanup_models(guider.conds, loaded_models)
+                    except Exception:
+                        pass
+                model_patcher.restore_hook_patches()
+                model_patcher.hook_mode = original_hook_mode
+                guider.model_options = original_model_options
+                guider.original_conds = original_original_conds
+                guider.inner_model = original_inner_model
+                guider.conds = original_conds_runtime
+                guider.loaded_models = original_loaded_models
+
+        if stitched is None:
+            raise RuntimeError('Unified LongMedia runtime produced no segment output.')
+        return (stitched, json.dumps({
+            'runtime': 'unified_single_model_lifecycle',
+            'passes': passes,
+            'completed_segments': completed,
+            'prepare_sampling_calls': 1,
+            'pre_run_calls': 1,
+            'cleanup_calls': 1,
+            'guider_sample_calls': 0,
+            'model_reload_between_segments': False,
+            'refine_enabled': bool(refine_enabled),
+            'refine_steps_effective': int(refine_steps_effective),
+            'refine_switch_step': int(refine_switch_step),
+            'refine_model_reload': False,
+        }))
 
 
 class MiniMaxH3LatentLabLongMediaSampler:
@@ -11173,10 +11601,9 @@ class MiniMaxH3LatentLabLongMediaSampler:
         # 0.2.16 diagnostic build deliberately disables intra-step cache flushing:
         # we want an undistorted first-step allocator trace, including OOM events.
         guard_state = None
-        # 0.4.1 refine policy: when enabled, one connected SIGMAS trajectory is
-        # split into two KSampler-Advanced-style stages. Stage 1 stops before the
-        # final R intervals and returns the in-progress latent; stage 2 continues
-        # the same schedule with add_noise disabled and performs the final denoise.
+        # 0.4.7 refiner: true two-stage Advanced split restored inside the unified runtime.
+        # The model lifecycle stays open across both stages; only inner_sample is
+        # invoked for the base and low-noise tail phases.
         main_sigmas = sigmas
         refine_sigmas = None
         refine_steps_effective = 0
@@ -11187,169 +11614,34 @@ class MiniMaxH3LatentLabLongMediaSampler:
                 sigmas, int(refine_steps)
             )
             _lm_print(
-                '[MiniMaxH3 LongMedia][0.4.2 ADDITIVE FINAL-LATENT REFINE] '
-                f'base_steps={int(base_steps)} + refine_steps={int(refine_steps_effective)}; '
-                f'refine_tail_start={int(refine_tail_start)}; main sampler keeps full SIGMAS; '
-                'refiner calls stock comfy.sample.sample KSampler Advanced path; H3 audio is frozen with denoise=0; refiner AV output is passed through directly without post-refine repack',
+                '[MiniMaxH3 LongMedia][0.4.7 REFINER RESTORED] '
+                f'total_steps={int(base_steps)}; main_steps={int(refine_tail_start)}; '
+                f'refine_steps={int(refine_steps_effective)}; switch_step={int(refine_tail_start)}; '
+                'true_refiner=True; same_model_lifecycle=True; second_model_load=False',
                 flush=True,
             )
 
-        first_effective_seed = _v85_segment_seed(plan, seed, 0) if getattr(plan, 'mode', None) == 'multiclip' else int(seed)
-        first_noise = graph.node("RandomNoise", noise_seed=int(first_effective_seed))
-        _lm_print(
-            (f'[MiniMaxH3 LongMedia][0.3.87 MULTICLIP SEED] clip=1 seed={int(first_effective_seed) & 0xFFFFFFFFFFFFFFFF}'
-             if getattr(plan, 'mode', None) == 'multiclip'
-             else f'[MiniMaxH3 LongMedia][V62 SAME SEED] pass=0 seed={int(seed) & 0xFFFFFFFFFFFFFFFF}'),
-            flush=True,
-        )
-        first_sample = graph.node(
-            "SamplerCustomAdvanced",
-            noise=first_noise.out(0),
+        unified_runtime = graph.node(
+            "MiniMaxH3LatentLabUnifiedRuntimeSampler",
+            initial_av=initial_av,
+            long_media_plan=plan,
             guider=traced_guider,
             sampler=profiled_sampler,
-            sigmas=main_sigmas,
-            latent_image=initial_av,
+            sigmas=sigmas,
+            seed=int(seed),
+            video_context_denoise=float(video_context_denoise),
+            audio_context_denoise=float(audio_context_denoise),
+            offload_completed_segments=bool(offload_completed_segments),
+            refine_enabled=bool(refine_enabled),
+            refine_steps=int(refine_steps),
         )
-        first_main_output = first_sample.out(0)
-        if bool(refine_enabled) and int(refine_steps_effective) > 0:
-            first_refine = graph.node(
-                "MiniMaxH3LatentLabStockAdvancedRefiner",
-                guider=traced_guider,
-                final_av=first_main_output,
-                sigmas=refine_sigmas,
-                start_at_step=int(refine_tail_start),
-                seed=int(first_effective_seed),
-            )
-            first_main_output = first_refine.out(0)
-            _lm_print(
-                '[MiniMaxH3 LongMedia][0.4.1 TRUE ADVANCED REFINER] '
-                'stage2_output=stock_solver_state; x0_substitution=False; stream_freeze=False',
-                flush=True,
-            )
-        # Pass 0 has no frozen continuation head. The optional second-stage refine
-        # has completed before this latent becomes continuation state.
-        previous_segment = first_main_output
-        stitched = previous_segment
-
-        for segment_index in range(1, plan.passes):
-            if getattr(plan, 'mode', None) == 'storyboard_bridge':
-                storyboard_avs = getattr(plan, 'storyboard_segment_avs', None)
-                if not storyboard_avs or segment_index >= len(storyboard_avs):
-                    raise RuntimeError('V64 storyboard pass latent is missing from LongMediaPlan')
-                prepared_av = storyboard_avs[segment_index]
-            else:
-                prepared = graph.node(
-                    "MiniMaxH3LatentLabLongMediaNextSegment",
-                    long_media_plan=plan,
-                    previous_av=previous_segment,
-                    segment_index=segment_index,
-                    video_context_denoise=float(video_context_denoise),
-                    audio_context_denoise=float(audio_context_denoise),
-                )
-                prepared_av = prepared.out(0)
-            # V62: one long shot owns one stochastic trajectory.  Continuation
-            # passes reuse the exact same base seed; motion/keyframe context, not
-            # a fresh random seed, is responsible for advancing the scene.
-            segment_effective_seed = (
-                _v85_segment_seed(plan, seed, segment_index)
-                if getattr(plan, 'mode', None) == 'multiclip'
-                else int(seed) & 0xFFFFFFFFFFFFFFFF
-            )
-            noise = graph.node(
-                "RandomNoise",
-                noise_seed=int(segment_effective_seed),
-            )
-            _lm_print(
-                (f'[MiniMaxH3 LongMedia][0.3.87 MULTICLIP SEED] clip={segment_index + 1} seed={int(segment_effective_seed)}'
-                 if getattr(plan, 'mode', None) == 'multiclip'
-                 else f'[MiniMaxH3 LongMedia][V62 SAME SEED] pass={segment_index} seed={int(seed) & 0xFFFFFFFFFFFFFFFF} (same as pass 0)'),
-                flush=True,
-            )
-            if getattr(plan, 'mode', None) == 'storyboard_bridge':
-                segment_guider = _clone_guider_with_segment_audio(
-                    guider, plan, segment_index, previous_av=None,
-                )
-            else:
-                runtime_guider = graph.node(
-                    "MiniMaxH3LatentLabRuntimeContinuationGuider",
-                    guider=guider,
-                    long_media_plan=plan,
-                    previous_av=previous_segment,
-                    segment_index=segment_index,
-                )
-                segment_guider = runtime_guider.out(0)
-            segment_mlp_chunker = graph.node(
-                "MiniMaxH3LatentLabMLPChunking",
-                guider=segment_guider,
-                chunk_tokens=effective_mlp_chunk_tokens,
-                max_blocks=128,
-                sol_mode=str(attention_mode),
-                sol_tau_start=float(sol_tau_start),
-                sol_tau_end=float(sol_tau_end),
-                sol_curve=str(sol_curve),
-                sol_min_tokens=int(sol_min_tokens),
-                sol_dense_percent=float(sol_dense_percent),
-                sol_sink_conditioning=str(sol_sink_conditioning),
-                sol_qkv_chunk_tokens=int(sol_qkv_chunk_tokens),
-                sol_out_proj_chunk_tokens=int(sol_out_proj_chunk_tokens),
-                vram_activation_reserve_mb=int(vram_activation_reserve_mb),
-                inter_block_vram_guard_mb=int(inter_block_vram_guard_mb),
-                inter_block_guard_cooldown_blocks=int(inter_block_guard_cooldown_blocks),
-                inter_block_guard_emergency_mb=int(inter_block_guard_emergency_mb),
-                inter_block_guard_emergency_cooldown_blocks=int(inter_block_guard_emergency_cooldown_blocks),
-                late_block_guard_start=int(late_block_guard_start),
-                late_block_guard_target_mb=int(late_block_guard_target_mb),
-                late_block_guard_min_cached_mb=int(late_block_guard_min_cached_mb),
-                step_boundary_cleanup_mb=int(step_boundary_cleanup_mb),
-                sol_sigma_hi=float(sol_sigma_hi),
-                sol_sigma_lo=float(sol_sigma_lo),
-                memory_mode=str(memory_mode),
-                requested_memory_mode=str(requested_memory_mode),
-            )
-            sampled = graph.node(
-                "SamplerCustomAdvanced",
-                noise=noise.out(0),
-                guider=segment_mlp_chunker.out(0),
-                sampler=profiled_sampler,
-                sigmas=main_sigmas,
-                latent_image=prepared_av,
-            )
-            sampled_output = sampled.out(0)
-            if bool(refine_enabled) and int(refine_steps_effective) > 0:
-                refined = graph.node(
-                    "MiniMaxH3LatentLabStockAdvancedRefiner",
-                    guider=segment_mlp_chunker.out(0),
-                    final_av=sampled_output,
-                    sigmas=refine_sigmas,
-                    start_at_step=int(refine_tail_start),
-                    seed=int(segment_effective_seed),
-                )
-                sampled_output = refined.out(0)
-                _lm_print(
-                    f'[MiniMaxH3 LongMedia][0.4.1 TRUE ADVANCED REFINER] clip={int(segment_index)+1}; '
-                    'stage2_output=stock_solver_state; x0_substitution=False; stream_freeze=False',
-                    flush=True,
-                )
-            if bool(refine_enabled) and getattr(plan, 'mode', None) != 'storyboard_bridge' and int(plan.overlap_frames) > 0:
-                # Preserve the exact frozen AV continuation head after both the
-                # both stages of the continuous refine trajectory.
-                protected = graph.node(
-                    "MiniMaxH3LatentLabProtectRefineAV",
-                    base_av=prepared_av,
-                    refined_av=sampled_output,
-                    overlap_frames=int(plan.overlap_frames),
-                )
-                sampled_output = protected.out(0)
-            joined = graph.node(
-                "MiniMaxH3LatentLabStitchContinuation",
-                previous_av=stitched,
-                sampled_continuation_av=sampled_output,
-                overlap_frames=(0 if getattr(plan, 'mode', None) == 'storyboard_bridge' else plan.overlap_frames),
-                blend_video_overlap=False,  # continuity policy: hidden frozen overlap is context only; never re-blend it
-                offload_to_cpu=bool(offload_completed_segments),
-            )
-            previous_segment = sampled_output
-            stitched = joined.out(0)
+        stitched = unified_runtime.out(0)
+        _lm_print(
+            '[MiniMaxH3 LongMedia][0.4.4 UNIFIED EXECUTOR] '
+            f'passes={int(plan.passes)}; graph_level_sampler_nodes=0; '
+            'runtime_sampler_lifecycle=1; model_reload_between_segments=False',
+            flush=True,
+        )
 
         try:
             _profile_video, _profile_audio = unpack_av_samples(initial_av)
@@ -11368,11 +11660,11 @@ class MiniMaxH3LatentLabLongMediaSampler:
 
         report = json.dumps({
             "passes": plan.passes,
-            "segmentation_active": bool(plan.passes > 1),
+            "segmentation_active": bool(getattr(plan, "segmentation_active", False)),
             "segment_lengths_frames": list(plan.segment_lengths),
             "segment_starts_frames": list(plan.segment_starts),
             "overlap_frames": int(plan.overlap_frames),
-            "sequential_context_carry": bool(plan.passes > 1),
+            "sequential_context_carry": bool(int(getattr(plan, "passes", 1) or 1) > 1),
             "advanced_refine_enabled": bool(refine_enabled),
             "advanced_refine_add_noise": False,
             "advanced_refine_legacy_add_noise_input_ignored": bool(refine_add_noise),
@@ -11383,14 +11675,14 @@ class MiniMaxH3LatentLabLongMediaSampler:
             "advanced_refine_base_steps": int(base_steps),
             "advanced_refine_total_model_steps": int(base_steps),
             "advanced_refine_tail_start": int(refine_tail_start),
-            "advanced_refine_interval_policy": "single_connected_schedule_split_between_main_and_refiner",
+            "advanced_refine_interval_policy": "true_two_stage_split_inside_single_model_lifecycle",
             "advanced_refine_latent_source": "stage1_in_progress_solver_state",
             "advanced_refine_latent_clone": False,
             "advanced_refine_latent_rebuild": False,
             "advanced_refine_renoise": False,
-            "advanced_refine_scheduler_source": "true_connected_two_stage_schedule",
-            "advanced_refine_audio_policy": "joint_AV_continues_through_both_sampling_stages",
-            "advanced_refine_overlap_policy": "restore_exact_pre_sampling_frozen_av_head",
+            "advanced_refine_scheduler_source": "unified_runtime_true_advanced_split",
+            "advanced_refine_audio_policy": "joint_AV_continues_through_refiner",
+            "advanced_refine_overlap_policy": "unchanged_single_execution",
             "hybrid_keyframe_scope": (
                 "first_only_pass0_last_only_final"
                 if getattr(plan, 'mode', None) == 'hybrid' and plan.passes > 1
@@ -11740,8 +12032,9 @@ NODE_CLASS_MAPPINGS = {
     'MiniMaxH3LatentLabLongMediaNextSegment': MiniMaxH3LatentLabLongMediaNextSegment,
     'MiniMaxH3LatentLabRuntimeContinuationGuider': MiniMaxH3LatentLabRuntimeContinuationGuider,
     'MiniMaxH3LatentLabRefineSigmas': MiniMaxH3LatentLabRefineSigmas,
-    'MiniMaxH3LatentLabStockAdvancedRefiner': MiniMaxH3LatentLabStockAdvancedRefiner,
+    'MiniMaxH3LatentLabSeededDisableNoise': MiniMaxH3LatentLabSeededDisableNoise,
     'MiniMaxH3LatentLabProtectRefineAV': MiniMaxH3LatentLabProtectRefineAV,
+    'MiniMaxH3LatentLabUnifiedRuntimeSampler': MiniMaxH3LatentLabUnifiedRuntimeSampler,
     'MiniMaxH3LatentLabLongMediaSampler': MiniMaxH3LatentLabLongMediaSampler,
     'MiniMaxH3LatentLabLongMediaDecode': MiniMaxH3LatentLabLongMediaDecode,
     'MiniMaxH3LatentLabAttentionChunking': MiniMaxH3LatentLabAttentionChunking,

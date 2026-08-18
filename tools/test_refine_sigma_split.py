@@ -14,12 +14,12 @@ def check(total, refine):
     assert base_steps == total
     assert requested == max(1, refine)
     assert effective == min(max(1, refine), total)
-    assert torch.equal(main, sigmas), (main, sigmas)
+    assert torch.equal(main, sigmas[:tail_start + 1]), (main, sigmas[:tail_start + 1])
     assert torch.equal(low, sigmas[-(effective + 1):])
     assert tail_start == total - effective
-    assert main.numel() - 1 == total
+    assert main.numel() - 1 == tail_start
     assert low.numel() - 1 == effective
-    assert total + effective == (main.numel() - 1) + (low.numel() - 1)
+    assert total == (main.numel() - 1) + (low.numel() - 1)
 
 check(12, 3)
 check(8, 2)

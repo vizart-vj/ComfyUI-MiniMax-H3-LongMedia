@@ -14,6 +14,7 @@ assert "if bool(getattr(plan, 'lip_sync_native_audio_guide', False)):\n        a
 assert "generation_mode is legacy compatibility storage" in facade
 assert 'lmSetWidgetVisible(lmWidget(node, "generation_mode"), false);' in facade
 assert 'lmSetWidgetVisible(lmWidget(node, name), false);' in facade
-assert 'lmSetWidgetVisible(segmentDuration, !multiclip);' in facade
+assert 'lmSetWidgetVisible(segmentDuration, manual || segmented);' in facade
+assert 'lmSetWidgetVisible(lmWidget(node, "overlap_frames"), manual || segmented);' in facade
 assert 'const lipSync = audioMode === "lip_sync";' in facade
 print('LIP_SYNC_AUDIO_MODE_REGRESSION: PASS')

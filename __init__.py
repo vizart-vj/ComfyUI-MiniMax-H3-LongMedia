@@ -1,4 +1,4 @@
-__version__ = "0.4.0"
+__version__ = "0.4.11"
 
 from . import lora_compat as _lora_compat  # noqa: F401
 from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS

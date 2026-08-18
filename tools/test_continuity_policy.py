@@ -264,7 +264,7 @@ Style: realistic cinematic live-action, no cuts."""
 
 def test_v331_source_seam_invariants() -> None:
     source = (ROOT / "nodes.py").read_text(encoding="utf-8")
-    assert "blend_video_overlap=False,  # continuity policy: hidden frozen overlap is context only; never re-blend it" in source
+    assert "blend_video_overlap=False, offload_to_cpu=False" in source
     assert "merged_keyframes.sort(" in source
     assert '"hidden_overlap": "exact_context_trim_no_blend"' in source
 

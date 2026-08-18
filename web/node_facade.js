@@ -508,7 +508,7 @@ function lmRefreshSetup(node) {
     }
     lmSetWidgetVisible(lmWidget(node, "manual_duration"), !multiclip);
     lmSetWidgetVisible(lmWidget(node, "duration_source"), !multiclip);
-    lmSetWidgetVisible(segmentDuration, !multiclip);
+    lmSetWidgetVisible(segmentDuration, manual || segmented);
     // Keep serialized JSON as backend storage only; users edit clip cards.
     lmSetWidgetVisible(lmWidget(node, "multiclip_json"), false);
     const multiclipEditor = lmEnsureMulticlipEditor(node);
@@ -517,7 +517,7 @@ function lmRefreshSetup(node) {
         lmSetWidgetVisible(multiclipEditor, multiclip && !externalPlanner);
         if (multiclip && !externalPlanner) lmSyncMulticlipEditorFromStorage(node);
     }
-    // overlap remains an expert control in Manual, but its value is honored in all modes.
+    // Segmentation controls exist only in Manual and Segmented Continuation.
     lmSetWidgetVisible(lmWidget(node, "overlap_frames"), manual || segmented);
     lmSetWidgetVisible(lmWidget(node, "conditioning_mode"), manual);
     // v0.3.95: generation_mode is legacy compatibility storage; lip-sync lives in audio_mode.

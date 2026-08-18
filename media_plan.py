@@ -76,6 +76,9 @@ class LongMediaPlan:
     release_guard: bool = True
     # v0.3.111 unified clip executor: legacy/single, fixed segmentation, or planned MultiClip.
     timeline_policy: str = "legacy"
+    # v0.4.6: explicit workflow ownership. Never infer segmentation from passes.
+    workflow_mode: str = "hybrid_auto"
+    segmentation_active: bool = False
 
 
 def _align_up_frames(frame_count: int) -> int:
