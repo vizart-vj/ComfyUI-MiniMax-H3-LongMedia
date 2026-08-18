@@ -4,9 +4,9 @@ Production-oriented ComfyUI nodes for **MiniMax H3** long-form video/audio gener
 
 ![screenshot](ex.png)
 
-**Current stable release: 0.4.0**
+**Current stable release: 0.4.11**
 
-## What 0.4.0 provides
+## What 0.4.11 provides
 
 - Unified clip executor for **MultiClip** and **fixed segmentation**.
 - Per-clip prompt/duration/seed Planner for MultiClip.
