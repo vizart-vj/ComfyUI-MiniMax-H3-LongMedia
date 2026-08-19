@@ -2,6 +2,8 @@
 
 Production-oriented ComfyUI nodes for **MiniMax H3** long-form video/audio generation, reference-driven editing, MultiClip planning, fixed segmentation, lip-sync and adaptive low-VRAM execution.
 
+![screenshot](ex.png)
+
 **Current stable release: 0.4.2**
 
 ## What 0.4.2 provides
