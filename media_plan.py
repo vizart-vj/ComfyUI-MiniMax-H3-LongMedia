@@ -70,10 +70,6 @@ class LongMediaPlan:
     # v0.3.43: original still-image refs are used only on pass 0. Later passes
     # continue from generated AV state and must not carry full spatial image ref latents.
     decouple_original_image_refs_after_pass0: bool = False
-    # v0.3.86+: console release guard is persisted with the plan so downstream
-    # nodes can preserve the workflow-selected logging policy. This flag affects
-    # diagnostics only; it must never alter sampling/memory/OOM behavior.
-    release_guard: bool = True
     # v0.3.111 unified clip executor: legacy/single, fixed segmentation, or planned MultiClip.
     timeline_policy: str = "legacy"
     # v0.4.6: explicit workflow ownership. Never infer segmentation from passes.

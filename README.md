@@ -2,11 +2,9 @@
 
 Production-oriented ComfyUI nodes for **MiniMax H3** long-form video/audio generation, reference-driven editing, MultiClip planning, fixed segmentation, lip-sync and adaptive low-VRAM execution.
 
-![screenshot](ex.png)
+**Current stable release: 0.4.2**
 
-**Current stable release: 0.4.11**
-
-## What 0.4.11 provides
+## What 0.4.2 provides
 
 - Unified clip executor for **MultiClip** and **fixed segmentation**.
 - Per-clip prompt/duration/seed Planner for MultiClip.
@@ -20,6 +18,9 @@ Production-oriented ComfyUI nodes for **MiniMax H3** long-form video/audio gener
 - Dynamic VRAM-aware model residency and memory cleanup.
 - Tiled H3 video decode for long outputs.
 - Native INT8 / W4A8 / supported quantized ComfyUI execution paths without replacing stock quantized math.
+- Native continuous MultiClip video-latent assembly followed by a single H3 VideoVAE decode.
+- Compatibility with scalar and multi-element MiniMax modulation-row layouts in chunked MLP and final output heads.
+- Quiet release console: routine internal diagnostics are suppressed; only actionable failures are surfaced.
 
 ## Main nodes
 
@@ -82,7 +83,7 @@ Exposes advanced conditioning/timeline controls for controlled diagnostics and A
 
 ## MultiClip vs fixed segmentation
 
-0.4.0 deliberately uses one continuation engine for both policies.
+0.4.2 keeps one sequential generation engine for both policies, but MultiClip and fixed segmentation have different output assembly semantics.
 
 ```text
 LongMedia clip executor
@@ -90,7 +91,7 @@ LongMedia clip executor
 └── planned timeline  -> multiclip
 ```
 
-The shared engine owns:
+The shared generation engine owns:
 
 - global/local timeline conversion;
 - per-clip conditioning;
@@ -98,10 +99,12 @@ The shared engine owns:
 - Motion Context;
 - audio slicing and lip-sync timing;
 - AV handoff;
-- sampling;
-- stitching and final trim.
+- sequential sampling.
 
-Only **clip-boundary math and prompt ownership** differ.
+Output assembly is intentionally different:
+
+- **MultiClip** keeps all sequential video clips on one valid native H3 temporal latent lattice and performs **one VideoVAE decode** for the assembled timeline. Each continuation drops only the repeated native 5-frame / 2-latent-token prefix before assembly. This avoids per-clip VideoVAE temporal-state resets and RGB seam repair.
+- **segmented_continuation/manual segmentation** retain their continuation/stitch policy and are the only workflows allowed to own segmentation overlap controls.
 
 See:
 
@@ -149,7 +152,7 @@ Uses input audio as H3 reference conditioning while retaining generated output a
 Uses input audio as H3 reference/timing context and restores the untouched source track in the final result.
 
 ### `lip_sync`
-Uses `audio_1` as the authoritative performance source for audiovisual timing and restores the untouched source track at output. There is no public manual reference-strength control in 0.4.0; lip-sync behavior is fixed by the mode rather than a user weight.
+Uses `audio_1` as the authoritative performance source for audiovisual timing and restores the untouched source track at output. There is no public manual reference-strength control in 0.4.2; lip-sync behavior is fixed by the mode rather than a user weight.
 
 For performance prompts, describe the semantic action (`speaks`, `sings`) but let the source audio own phonetic timing.
 
@@ -203,7 +206,7 @@ LongMedia can run H3 checkpoints larger than physical VRAM by coordinating activ
 
 ## OOM prevention
 
-0.4.0 includes geometry-aware Governor V4 behavior. The runtime does not classify a huge sequence as safe solely because VRAM is free before transformer workspaces become resident.
+0.4.2 includes geometry-aware Governor V4 behavior. The runtime does not classify a huge sequence as safe solely because VRAM is free before transformer workspaces become resident.
 
 For dangerous long sequences on constrained GPUs, LongMedia can reject a full-sequence Sage/existing attention path **before QKV allocation** and route into bounded streamed Sol attention.
 
@@ -235,7 +238,8 @@ A single 30 s pass can be technically possible with the streamed memory path, bu
 - [Fixed segmentation prompting rules](docs/PROMPTING_SEGMENTATION.md)
 - [Sampler / VRAM / performance rules](docs/SAMPLER_OPTIMIZATION.md)
 - [Architecture](docs/ARCHITECTURE.md)
-- [0.4.0 release audit](docs/RELEASE_AUDIT.md)
+- [0.4.2 release notes](docs/RELEASE_NOTES_0.4.2.md)
+- [Release audit](docs/RELEASE_AUDIT.md)
 
 ## Example workflow
 
@@ -267,7 +271,7 @@ See:
 
 ## Release quality
 
-The stable 0.4.0 release promotes the validated pre-release baseline and removes pre-release-only hot-reload/runtime artifacts from the distributable package.
+The stable 0.4.2 release consolidates the validated 0.4.11 runtime baseline with native continuous MultiClip VideoVAE decode, modulation-row compatibility fixes, and a quieter release console.
 
 Release audit and verification details are documented in [`docs/RELEASE_AUDIT.md`](docs/RELEASE_AUDIT.md).
 

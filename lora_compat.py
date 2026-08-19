@@ -129,7 +129,7 @@ def _add_minimax_h3_lora_aliases(model: Any, key_map: dict[str, Any]) -> dict[st
         if target in sd_keys:
             _set_prefixed_aliases(key_map, alias, target)
 
-    _LOG.info(
+    _LOG.debug(
         "[MiniMaxH3 LongMedia][LoRA Compat] MiniMax H3 aliases active; blocks=%s",
         len(block_indices),
     )
@@ -163,7 +163,7 @@ def patch_comfy_lora() -> None:
         wrapped._minimax_h3_longmedia_patched = True  # type: ignore[attr-defined]
         wrapped._minimax_h3_longmedia_original = original  # type: ignore[attr-defined]
         comfy_lora.model_lora_keys_unet = wrapped
-        _LOG.info("[MiniMaxH3 LongMedia][LoRA Compat] patched comfy.lora.model_lora_keys_unet")
+        _LOG.debug("[MiniMaxH3 LongMedia][LoRA Compat] patched comfy.lora.model_lora_keys_unet")
 
 
 patch_comfy_lora()

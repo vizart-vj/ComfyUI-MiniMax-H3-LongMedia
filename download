@@ -1,0 +1,2 @@
+# CI metadata is not needed in the installed custom-node package.
+.github/

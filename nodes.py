@@ -132,29 +132,12 @@ def _clone_model_options_safe(model_options):
         return cloned
 
 
-# Release console guard. True = quiet release console; False = full LongMedia diagnostics.
-# The Long Media Setup node owns this switch so the choice is serialized in the workflow.
-_LONGMEDIA_RELEASE_GUARD = True
-_LONGMEDIA_VERBOSE = False
-_LONGMEDIA_ALWAYS_CONSOLE = (
-    "oom", "error", "failed", "failure", "fallback", "exception",
-    "cleanup failed", "emergency trim", "storage guard] trim", "late guard] late guard trim",
-)
-
-def _set_longmedia_release_guard(enabled):
-    global _LONGMEDIA_RELEASE_GUARD, _LONGMEDIA_VERBOSE
-    _LONGMEDIA_RELEASE_GUARD = bool(enabled)
-    _LONGMEDIA_VERBOSE = not _LONGMEDIA_RELEASE_GUARD
-    # Always print the mode transition itself so users can verify the workflow state.
-    builtins.print(
-        f"[MiniMaxH3 LongMedia][0.3.87 RELEASE GUARD] "
-        f"{'ON (release console)' if _LONGMEDIA_RELEASE_GUARD else 'OFF (full diagnostics)'}"
-    )
-
+# Release console policy: routine LongMedia diagnostics are silent.
+# Only actionable runtime failures are surfaced; detailed diagnostics stay in code
+# for targeted development builds without exposing a workflow/user switch.
+_LONGMEDIA_ALWAYS_CONSOLE = ("cuda oom", "error", "exception", "terminal failure")
 
 def _lm_print(*args, **kwargs):
-    if _LONGMEDIA_VERBOSE:
-        return builtins.print(*args, **kwargs)
     text = " ".join(str(a) for a in args).lower()
     if any(marker in text for marker in _LONGMEDIA_ALWAYS_CONSOLE):
         return builtins.print(*args, **kwargs)
@@ -5071,16 +5054,67 @@ class _H3MLPChunkPatch:
             )
             state['announced'] = True
 
-        # Tiny per-segment vectors are cast once and reused.  They are negligible
-        # compared with even one token chunk and avoid repeated weight casts.
+        # Tiny scalar per-segment vectors are cast once and reused. Newer/alternate
+        # Comfy H3 layouts may provide a row tensor (one modulation row per token)
+        # instead of a single Python scalar. Preserve the stock H3 semantics for
+        # both forms instead of coercing a multi-element tensor through int().
         rows = {}
+
+        def _scalar_mod_row(row):
+            if torch.is_tensor(row):
+                if int(row.numel()) != 1:
+                    return None
+                return int(row.reshape(-1)[0].item())
+            return int(row)
+
+        def _mod_row_indices(row, seg_a, seg_b, lo, hi):
+            scalar = _scalar_mod_row(row)
+            if scalar is not None:
+                return scalar
+            flat = row.reshape(-1)
+            seg_a = int(seg_a)
+            seg_b = int(seg_b)
+            lo = int(lo)
+            hi = int(hi)
+            seg_len = max(0, seg_b - seg_a)
+            if int(flat.numel()) == seg_len:
+                ids = flat[lo - seg_a:hi - seg_a]
+            elif int(flat.numel()) == token_count:
+                ids = flat[lo:hi]
+            else:
+                raise RuntimeError(
+                    '[0.4.20 MOD-ROW COMPAT] unsupported multi-row modulation layout: '
+                    f'row_shape={tuple(row.shape)}, row_numel={int(flat.numel())}, '
+                    f'segment={seg_a}:{seg_b} ({seg_len} tokens), total_tokens={token_count}. '
+                    'Update ComfyUI/LongMedia together or report this layout.'
+                )
+            return ids.to(device=shift.device, dtype=torch.long)
+
+        def _segment_mod_params(row, seg_a, seg_b, lo, hi):
+            row_sel = _mod_row_indices(row, seg_a, seg_b, lo, hi)
+            if isinstance(row_sel, int):
+                cached = rows.get(row_sel)
+                if cached is None:
+                    cached = (
+                        shift[row_sel].to(dtype=x.dtype, device=x.device),
+                        scale[row_sel].to(dtype=x.dtype, device=x.device),
+                        gate[row_sel].to(dtype=x.dtype, device=x.device),
+                    )
+                    rows[row_sel] = cached
+                return cached
+            return (
+                shift.index_select(0, row_sel).to(dtype=x.dtype, device=x.device),
+                scale.index_select(0, row_sel).to(dtype=x.dtype, device=x.device),
+                gate.index_select(0, row_sel).to(dtype=x.dtype, device=x.device),
+            )
+
         for _a, _b, row in segments:
-            row = int(row)
-            if row not in rows:
-                rows[row] = (
-                    shift[row].to(dtype=x.dtype, device=x.device),
-                    scale[row].to(dtype=x.dtype, device=x.device),
-                    gate[row].to(dtype=x.dtype, device=x.device),
+            scalar = _scalar_mod_row(row)
+            if scalar is not None and scalar not in rows:
+                rows[scalar] = (
+                    shift[scalar].to(dtype=x.dtype, device=x.device),
+                    scale[scalar].to(dtype=x.dtype, device=x.device),
+                    gate[scalar].to(dtype=x.dtype, device=x.device),
                 )
 
         # v0.3.60: block-resident native INT8 MLP weights.  v0.3.59 called
@@ -5123,7 +5157,7 @@ class _H3MLPChunkPatch:
                         continue
                     local_lo = lo - int(_offset)
                     local_hi = hi - int(_offset)
-                    shift_row, scale_row, _gate_row = rows[int(row)]
+                    shift_row, scale_row, _gate_row = _segment_mod_params(row, a, b, lo, hi)
                     _href[local_lo:local_hi].mul_(
                         1.0 + scale_row
                     ).add_(shift_row)
@@ -5149,7 +5183,7 @@ class _H3MLPChunkPatch:
                         continue
                     local_lo = lo - int(_offset)
                     local_hi = hi - int(_offset)
-                    _shift_row, _scale_row, gate_row = rows[int(row)]
+                    _shift_row, _scale_row, gate_row = _segment_mod_params(row, a, b, lo, hi)
                     _expected[local_lo:local_hi].addcmul_(
                         _mlp_piece[local_lo:local_hi], gate_row
                     )
@@ -5173,7 +5207,7 @@ class _H3MLPChunkPatch:
                         continue
                     local_lo = lo - start
                     local_hi = hi - start
-                    shift_row, scale_row, _gate_row = rows[int(row)]
+                    shift_row, scale_row, _gate_row = _segment_mod_params(row, a, b, lo, hi)
                     h_chunk[local_lo:local_hi].mul_(1.0 + scale_row).add_(shift_row)
 
                 if _v19_active:
@@ -5345,7 +5379,7 @@ class _H3MLPChunkPatch:
                         continue
                     local_lo = lo - start
                     local_hi = hi - start
-                    _shift_row, _scale_row, gate_row = rows[int(row)]
+                    _shift_row, _scale_row, gate_row = _segment_mod_params(row, a, b, lo, hi)
                     x[lo:hi].addcmul_(chunk_out[local_lo:local_hi], gate_row)
                 if _v19_active:
                     for _offset in _v19_offsets:
@@ -5576,9 +5610,27 @@ class _H3MLPChunkPatch:
                             continue
                         local_lo = lo - int(_offset)
                         local_hi = hi - int(_offset)
-                        _href[local_lo:local_hi].mul_(
-                            1.0 + scale_msa[int(row)].to(_href.dtype)
-                        ).add_(shift_msa[int(row)].to(_href.dtype))
+                        _seg = _href[local_lo:local_hi]
+                        if torch.is_tensor(row) and int(row.numel()) != 1:
+                            _flat = row.reshape(-1)
+                            _seg_len = int(b) - int(a)
+                            if int(_flat.numel()) == _seg_len:
+                                _ids = _flat[lo-int(a):hi-int(a)]
+                            elif int(_flat.numel()) == _preblock_tokens:
+                                _ids = _flat[lo:hi]
+                            else:
+                                raise RuntimeError(
+                                    '[0.4.20 NORM1 DIAG MOD-ROW COMPAT] unsupported row layout '
+                                    f'{tuple(row.shape)} for segment {int(a)}:{int(b)}'
+                                )
+                            _ids = _ids.to(device=scale_msa.device, dtype=torch.long)
+                            _sc = scale_msa.index_select(0, _ids).to(_href.dtype)
+                            _sh = shift_msa.index_select(0, _ids).to(_href.dtype)
+                        else:
+                            _ri = int(row.reshape(-1)[0].item()) if torch.is_tensor(row) else int(row)
+                            _sc = scale_msa[_ri].to(_href.dtype)
+                            _sh = shift_msa[_ri].to(_href.dtype)
+                        _seg.mul_(1.0 + _sc).add_(_sh)
                     _v19_norm1_parts.append(_href.detach())
                 _v19_norm1_reference = torch.cat(_v19_norm1_parts, dim=0)
                 del _v19_norm1_parts
@@ -5646,10 +5698,26 @@ class _H3MLPChunkPatch:
                             continue
                         local_lo = lo - int(_offset)
                         local_hi = hi - int(_offset)
-                        _expected[local_lo:local_hi].addcmul_(
-                            _other[local_lo:local_hi],
-                            gate_msa[int(row)].to(_expected.dtype),
-                        )
+                        _seg_expected = _expected[local_lo:local_hi]
+                        _seg_other = _other[local_lo:local_hi]
+                        if torch.is_tensor(row) and int(row.numel()) != 1:
+                            _flat = row.reshape(-1)
+                            _seg_len = int(b) - int(a)
+                            if int(_flat.numel()) == _seg_len:
+                                _ids = _flat[lo-int(a):hi-int(a)]
+                            elif int(_flat.numel()) == _preblock_tokens:
+                                _ids = _flat[lo:hi]
+                            else:
+                                raise RuntimeError(
+                                    '[0.4.20 GATE DIAG MOD-ROW COMPAT] unsupported row layout '
+                                    f'{tuple(row.shape)} for segment {int(a)}:{int(b)}'
+                                )
+                            _ids = _ids.to(device=gate_msa.device, dtype=torch.long)
+                            _gate = gate_msa.index_select(0, _ids).to(_expected.dtype)
+                        else:
+                            _ri = int(row.reshape(-1)[0].item()) if torch.is_tensor(row) else int(row)
+                            _gate = gate_msa[_ri].to(_expected.dtype)
+                        _seg_expected.addcmul_(_seg_other, _gate)
                     _v19_attn_parts.append(_expected)
                 _v19_attn_reference = torch.cat(_v19_attn_parts, dim=0)
                 del _v19_attn_parts
@@ -5933,11 +6001,46 @@ def _install_h3_final_output_streaming(model_patcher, state, chunk_tokens=24576)
             va, vb, vrow = video_seg
             aa, ab, arow = audio_seg
 
+            def _row_mod_params(row, start, stop, local=0, end=None):
+                """Return AdaLN scale/shift for a scalar row or per-token row tensor.
+
+                Newer Comfy H3 layouts may carry one modulation-row id per token.
+                Keep the streamed final head mathematically equivalent to stock H3
+                instead of coercing that tensor through int().
+                """
+                start = int(start)
+                stop = int(stop)
+                local = int(local)
+                if end is None:
+                    end = stop - start
+                end = int(end)
+                if torch.is_tensor(row):
+                    flat = row.reshape(-1)
+                    if int(flat.numel()) == 1:
+                        idx = int(flat[0].item())
+                        return scale[idx], shift[idx]
+                    seg_n = max(0, stop - start)
+                    if int(flat.numel()) == seg_n:
+                        ids = flat[local:end]
+                    elif int(flat.numel()) == int(x.shape[0]):
+                        ids = flat[start + local:start + end]
+                    else:
+                        raise RuntimeError(
+                            '[0.4.20 FINAL-HEAD MOD-ROW COMPAT] unsupported modulation-row layout: '
+                            f'row_shape={tuple(row.shape)}, row_numel={int(flat.numel())}, '
+                            f'segment={start}:{stop} ({seg_n} tokens), total_tokens={int(x.shape[0])}.'
+                        )
+                    ids = ids.to(device=scale.device, dtype=torch.long)
+                    return scale.index_select(0, ids), shift.index_select(0, ids)
+                idx = int(row)
+                return scale[idx], shift[idx]
+
             def _head_segment(start, stop, row, head, label):
                 n = int(stop) - int(start)
                 if n <= 0:
                     # Defensive fallback; target streams are expected non-empty.
-                    return head((layer.norm(x[int(start):int(stop)]) * (1.0 + scale[int(row)]) + shift[int(row)]).to(torch.float32))
+                    sc, sh = _row_mod_params(row, start, stop, 0, n)
+                    return head((layer.norm(x[int(start):int(stop)]) * (1.0 + sc) + sh).to(torch.float32))
 
                 # V24: sampled reference rows are evaluated with the stock mathematical
                 # expression while the real generation still uses the streamed path.
@@ -5954,7 +6057,8 @@ def _install_h3_final_output_streaming(model_patcher, state, chunk_tokens=24576)
                     out_features = int(w.shape[0]) if w is not None else None
                 if out_features is None:
                     # Unknown custom Linear implementation: preserve correctness.
-                    return head((layer.norm(x[int(start):int(stop)]) * (1.0 + scale[int(row)]) + shift[int(row)]).to(torch.float32))
+                    sc, sh = _row_mod_params(row, start, stop, 0, n)
+                    return head((layer.norm(x[int(start):int(stop)]) * (1.0 + sc) + sh).to(torch.float32))
 
                 out = torch.empty((n, int(out_features)), device=x.device, dtype=torch.float32)
                 chunks = (n + chunk - 1) // chunk
@@ -5962,7 +6066,8 @@ def _install_h3_final_output_streaming(model_patcher, state, chunk_tokens=24576)
                     end = min(n, local + chunk)
                     src = x[int(start) + local:int(start) + end]
                     h = layer.norm(src)
-                    h.mul_(1.0 + scale[int(row)]).add_(shift[int(row)])
+                    sc, sh = _row_mod_params(row, start, stop, local, end)
+                    h.mul_(1.0 + sc.to(h.dtype)).add_(sh.to(h.dtype))
                     if probe_local:
                         for q_local, q_abs in zip(probe_local, probe_abs):
                             if local <= q_local < end:
@@ -5996,7 +6101,26 @@ def _install_h3_final_output_streaming(model_patcher, state, chunk_tokens=24576)
                         # rounding even when the operation is mathematically equivalent.
                         idx = torch.tensor(probe_abs, device=x.device, dtype=torch.long)
                         ref_h = layer.norm(x.index_select(0, idx))
-                        ref_h = ref_h * (1.0 + scale[int(row)]) + shift[int(row)]
+                        if torch.is_tensor(row) and int(row.numel()) != 1:
+                            flat_row = row.reshape(-1)
+                            if int(flat_row.numel()) == n:
+                                probe_ids = flat_row.index_select(0, torch.tensor(probe_local, device=flat_row.device, dtype=torch.long))
+                            elif int(flat_row.numel()) == int(x.shape[0]):
+                                probe_ids = flat_row.index_select(0, idx.to(flat_row.device))
+                            else:
+                                raise RuntimeError(
+                                    '[0.4.20 FINAL-HEAD MOD-ROW COMPAT] unsupported probe row layout: '
+                                    f'row_shape={tuple(row.shape)}, row_numel={int(flat_row.numel())}, '
+                                    f'segment_tokens={n}, total_tokens={int(x.shape[0])}.'
+                                )
+                            probe_ids = probe_ids.to(device=scale.device, dtype=torch.long)
+                            ref_sc = scale.index_select(0, probe_ids)
+                            ref_sh = shift.index_select(0, probe_ids)
+                        else:
+                            scalar_row = int(row.reshape(-1)[0].item()) if torch.is_tensor(row) else int(row)
+                            ref_sc = scale[scalar_row]
+                            ref_sh = shift[scalar_row]
+                        ref_h = ref_h * (1.0 + ref_sc) + ref_sh
                         got_h = torch.stack([candidate_hidden[q] for q in probe_abs], dim=0)
                         _v24_final_report(st, 'NORM-ADALN', ref_h, got_h, stream=label, offsets=probe_local)
                         ref_out = head(ref_h.to(torch.float32))
@@ -6222,7 +6346,7 @@ class MiniMaxH3LatentLabMLPChunking:
                 model_size_bytes=int(_model_size_b or 0),
                 min_ram_headroom_gb=10.0,
             )
-            builtins.print(
+            _lm_print(
                 '[MiniMaxH3 LongMedia][0.3.75 RAM FILE-CACHE PREWARM] '
                 f"status={_prewarm.get('status')} payloads={_prewarm.get('payloads',0)} "
                 f"payload={_prewarm.get('payload_bytes',0)/(1024**3):.1f}GB "
@@ -7135,6 +7259,48 @@ def _blend_leading_frames_to_reference(
     return images
 
 
+def _match_leading_frames_photometrically(
+    images: torch.Tensor,
+    reference_tail: torch.Tensor | None,
+    stat_frames: int = 12,
+    decay_frames: int = 24,
+    strength: float = 1.0,
+) -> torch.Tensor:
+    """Photometrically align the start of a decoded clip to the previous clip tail.
+
+    This applies only a per-channel mean/std correction to the *new* clip and
+    fades that correction out over the first frames. Motion stays untouched; we
+    do not crossfade pixels between clips, which would ghost moving content.
+    images and reference_tail are [T, H, W, C] in 0..1.
+    """
+    if reference_tail is None or not torch.is_tensor(reference_tail):
+        return images
+    if images.ndim != 4 or reference_tail.ndim != 4 or int(images.shape[0]) < 1 or int(reference_tail.shape[0]) < 1:
+        return images
+    strength = max(0.0, min(1.0, float(strength)))
+    if strength <= 0.0:
+        return images
+
+    stat_frames = max(1, min(int(stat_frames), int(images.shape[0]), int(reference_tail.shape[0])))
+    decay_frames = max(1, min(int(decay_frames), int(images.shape[0])))
+
+    ref = reference_tail[-stat_frames:].to(images.device, dtype=images.dtype)
+    cur = images[:stat_frames]
+    ref_mean = ref.mean(dim=(0, 1, 2), keepdim=True)
+    ref_std = ref.std(dim=(0, 1, 2), keepdim=True).clamp_min(1e-5)
+    cur_mean = cur.mean(dim=(0, 1, 2), keepdim=True)
+    cur_std = cur.std(dim=(0, 1, 2), keepdim=True).clamp_min(1e-5)
+
+    corrected = ((images - cur_mean) / cur_std) * ref_std + ref_mean
+    corrected = corrected.clamp(0.0, 1.0)
+
+    matched = images.clone()
+    weights = torch.linspace(strength, 0.0, decay_frames, device=images.device, dtype=images.dtype)
+    for i in range(decay_frames):
+        matched[i] = torch.lerp(images[i], corrected[i], weights[i])
+    return matched
+
+
 def _mix_audio_tracks(audio_list, total_duration=None):
     """Mix multiple audio dicts into one, padding channels and duration."""
     if not audio_list:
@@ -7209,6 +7375,233 @@ def _normalize_decoded_audio(decoded, sample_rate, target_samples=None):
             waveform = torch.nn.functional.pad(waveform, (0, target_samples - waveform.shape[-1]))
 
     return {'waveform': waveform.contiguous(), 'sample_rate': int(sample_rate)}
+
+
+
+def _suppress_boundary_photometric_outliers(
+    images: torch.Tensor,
+    seam_frame: int,
+    radius: int = 8,
+    threshold: float = 0.012,
+    strength: float = 0.90,
+) -> tuple[torch.Tensor, dict]:
+    """Suppress isolated exposure pulses near a MultiClip RGB seam without shifting time.
+
+    Only single-frame luminance outliers whose immediate neighbours agree with each
+    other are corrected.  The correction is a per-channel mean offset toward the
+    neighbour baseline; pixels are never temporally blended, duplicated, dropped,
+    or re-ordered.  This is intentionally local to the seam window so genuine scene
+    lighting changes elsewhere remain untouched.
+    """
+    if not torch.is_tensor(images) or images.ndim != 4 or int(images.shape[0]) < 3:
+        return images, {'applied': False, 'corrected_frames': []}
+    n = int(images.shape[0])
+    seam_frame = max(0, min(int(seam_frame), n - 1))
+    radius = max(1, int(radius))
+    lo = max(1, seam_frame - radius)
+    hi = min(n - 1, seam_frame + radius + 1)
+    if hi <= lo:
+        return images, {'applied': False, 'corrected_frames': []}
+
+    work = images.clone()
+    # Rec.709 luma weights are used only for outlier detection; the applied
+    # correction preserves each channel independently.
+    weights = torch.tensor((0.2126, 0.7152, 0.0722), device=work.device, dtype=work.dtype)
+    lum = (work[..., :3] * weights).sum(dim=-1).mean(dim=(1, 2))
+    corrected = []
+    details = []
+    threshold = max(0.001, float(threshold))
+    strength = max(0.0, min(1.0, float(strength)))
+
+    # Two passes allow a pair of adjacent pulse frames to settle without ever
+    # moving time.  Candidate acceptance still requires matching neighbours.
+    for _pass in range(2):
+        changed = False
+        lum = (work[..., :3] * weights).sum(dim=-1).mean(dim=(1, 2))
+        for i in range(lo, hi):
+            prev_l = float(lum[i - 1].item())
+            cur_l = float(lum[i].item())
+            next_l = float(lum[i + 1].item())
+            baseline_l = 0.5 * (prev_l + next_l)
+            spike = cur_l - baseline_l
+            neighbour_gap = abs(prev_l - next_l)
+            # Require an isolated impulse: the frame must be a clear outlier while
+            # the frames on both sides remain mutually consistent.
+            if abs(spike) < threshold or neighbour_gap > max(0.010, threshold * 0.85):
+                continue
+            prev_mean = work[i - 1].mean(dim=(0, 1), keepdim=True)
+            next_mean = work[i + 1].mean(dim=(0, 1), keepdim=True)
+            target_mean = 0.5 * (prev_mean + next_mean)
+            cur_mean = work[i].mean(dim=(0, 1), keepdim=True)
+            delta = (target_mean - cur_mean) * strength
+            # Bound any single correction.  Larger changes are more likely to be
+            # semantic lighting rather than a decode pulse and should be left alone.
+            delta = delta.clamp(-0.08, 0.08)
+            work[i] = (work[i] + delta).clamp(0.0, 1.0)
+            if i not in corrected:
+                corrected.append(i)
+                details.append({
+                    'frame': int(i),
+                    'luma_before': float(cur_l),
+                    'luma_baseline': float(baseline_l),
+                    'luma_delta': float(spike),
+                })
+            changed = True
+        if not changed:
+            break
+
+    return work, {
+        'applied': bool(corrected),
+        'window_start': int(lo),
+        'window_end': int(max(lo, hi - 1)),
+        'threshold': float(threshold),
+        'strength': float(strength),
+        'corrected_frames': [int(x) for x in corrected],
+        'details': details,
+        'temporal_blend': False,
+        'frame_count_changed': False,
+    }
+
+
+def _multiclip_temporal_seam_index(previous_tail: torch.Tensor, next_head: torch.Tensor) -> tuple[int, dict]:
+    """Choose a hard RGB cut only inside the stable part of a real decoded overlap.
+
+    MiniMax H3 can carry a short startup/VAE transient at the beginning of an
+    independently decoded continuation.  For the 34-frame MultiClip preroll we
+    therefore reserve the first 17 decoded frames as an *unsafe startup zone*.
+    They may be used as hidden conditioning/preroll but can never become visible.
+    A small tail guard is reserved as well.  Inside the remaining safe window we
+    compare normalized structure and motion.  The selected seam is a hard ownership
+    switch: no RGB temporal blend, no duplicated frames, and no time hold.
+    """
+    import torch.nn.functional as F
+    n = min(int(previous_tail.shape[0]), int(next_head.shape[0]))
+    if n <= 2:
+        return max(0, n // 2), {
+            'overlap_frames': n,
+            'method': 'center_fallback',
+            'startup_guard_frames': 0,
+            'tail_guard_frames': 0,
+        }
+    a = previous_tail[:n].float().permute(0, 3, 1, 2)
+    b = next_head[:n].float().permute(0, 3, 1, 2)
+    target_h = min(64, int(a.shape[-2]))
+    target_w = min(64, int(a.shape[-1]))
+    if target_h != int(a.shape[-2]) or target_w != int(a.shape[-1]):
+        a = F.interpolate(a, size=(target_h, target_w), mode='bilinear', align_corners=False)
+        b = F.interpolate(b, size=(target_h, target_w), mode='bilinear', align_corners=False)
+
+    def norm_frames(x):
+        mean = x.mean(dim=(1, 2, 3), keepdim=True)
+        std = x.std(dim=(1, 2, 3), keepdim=True).clamp_min(1.0e-4)
+        return (x - mean) / std
+
+    an = norm_frames(a)
+    bn = norm_frames(b)
+
+    # v0.4.17: 17f is one observed H3 output temporal pulse.  With the native
+    # 34f preroll, hide that whole startup phase and keep a 4f tail margin.
+    startup_guard = 17 if n >= 34 else max(1, n // 2)
+    tail_guard = 4 if n >= 12 else 1
+    lo = max(1, min(startup_guard, n - 2))
+    hi = max(lo + 1, n - tail_guard)
+    hi = min(hi, n - 1)
+    if hi <= lo:
+        lo = max(1, n // 2)
+        hi = min(n - 1, lo + 1)
+
+    center = 0.5 * float(lo + max(lo, hi - 1))
+    best_j = max(lo, min(hi - 1, int(round(center))))
+    best_score = None
+    scores = []
+    for j in range(lo, hi):
+        w0 = max(lo, j - 2)
+        w1 = min(hi, j + 3)
+        structure = (an[w0:w1] - bn[w0:w1]).abs().mean()
+        va = an[j] - an[j - 1]
+        vb = bn[min(n - 1, j + 1)] - bn[j]
+        motion = (va - vb).abs().mean()
+        center_penalty = abs(float(j) - center) / max(1.0, float(hi - lo))
+        score = float(structure.item()) + 0.35 * float(motion.item()) + 0.04 * center_penalty
+        scores.append((j, score))
+        if best_score is None or score < best_score:
+            best_j, best_score = int(j), float(score)
+    return best_j, {
+        'overlap_frames': int(n),
+        'method': 'safe_window_normalized_structure_plus_motion',
+        'selected_index': int(best_j),
+        'score': float(best_score if best_score is not None else 0.0),
+        'search_start': int(lo),
+        'search_end': int(max(lo, hi - 1)),
+        'startup_guard_frames': int(startup_guard),
+        'tail_guard_frames': int(tail_guard),
+        'startup_frames_visible': False,
+    }
+
+
+def _multiclip_hidden_overlap_frames() -> int:
+    # 34 = 2*17. Adding it to any native H3 17*k+5 clip keeps the generated
+    # clip on the native frame grid while providing a real overlap for seam search.
+    return 34
+
+
+def _decode_multiclip_audio_segments(segment_latents, audio_vae, segment_lengths, total_duration,
+                                     hidden_overlaps=None, seam_indices=None):
+    """Decode native per-clip H3 audio and splice at the same temporal seams as video."""
+    if audio_vae is None:
+        return None, []
+    sr = int(getattr(audio_vae, 'audio_sample_rate', 32000))
+    hidden_overlaps = list(hidden_overlaps or [])
+    seam_indices = list(seam_indices or [])
+    pieces = []
+    reports = []
+    for i, clip_av in enumerate(segment_latents or []):
+        clip_video, clip_audio = unpack_av_samples(clip_av)
+        if not hasattr(clip_audio, 'shape') or clip_audio.ndim != 4 or int(clip_audio.shape[1]) != 32 or int(clip_audio.shape[2]) != 2:
+            raise RuntimeError(
+                'LongMedia MultiClip received an invalid generated H3 audio latent for per-clip AudioVAE decode: '
+                f'clip={i}, shape={tuple(clip_audio.shape) if hasattr(clip_audio, "shape") else type(clip_audio).__name__}'
+            )
+        decoded = audio_vae.decode(clip_audio)
+        actual_frames = int(frame_count_from_video_t(clip_video.shape[2]))
+        target_samples = int(round((actual_frames / FPS) * sr))
+        norm = _normalize_decoded_audio(decoded, sr, target_samples)
+        pieces.append(norm['waveform'])
+        reports.append({'clip_index': int(i), 'samples': int(norm['waveform'].shape[-1]), 'decoded_frames': actual_frames})
+    if not pieces:
+        return None, reports
+
+    waveform = pieces[0]
+    for i in range(1, len(pieces)):
+        hidden = int(hidden_overlaps[i]) if i < len(hidden_overlaps) else 0
+        seam = int(seam_indices[i]) if i < len(seam_indices) else hidden // 2
+        if hidden <= 0:
+            waveform = torch.cat((waveform, pieces[i]), dim=-1)
+            continue
+        overlap_samples = int(round((hidden / FPS) * sr))
+        seam_samples = int(round((seam / FPS) * sr))
+        overlap_samples = min(overlap_samples, int(waveform.shape[-1]), int(pieces[i].shape[-1]))
+        seam_samples = max(0, min(seam_samples, overlap_samples))
+        cut_left = int(waveform.shape[-1]) - overlap_samples + seam_samples
+        right_start = seam_samples
+        left = waveform[..., :cut_left].clone()
+        right = pieces[i][..., right_start:].clone()
+        # Tiny amplitude ramps suppress a PCM click without blending/re-timing content.
+        fade = min(128, int(left.shape[-1]), int(right.shape[-1]))
+        if fade > 1:
+            down = torch.linspace(1.0, 0.0, fade, device=left.device, dtype=left.dtype)
+            up = torch.linspace(0.0, 1.0, fade, device=right.device, dtype=right.dtype)
+            left[..., -fade:] *= down
+            right[..., :fade] *= up
+        waveform = torch.cat((left, right), dim=-1)
+        reports[i]['hidden_overlap_frames'] = hidden
+        reports[i]['seam_index_frames'] = seam
+
+    total_samples = int(round(float(total_duration) * sr))
+    if int(waveform.shape[-1]) < total_samples:
+        waveform = torch.nn.functional.pad(waveform, (0, total_samples - int(waveform.shape[-1])))
+    waveform = waveform[..., :total_samples]
+    return {'waveform': waveform, 'sample_rate': sr}, reports
 
 
 def _slice_source_audio_for_segment(source_audio, start_frame, length_frames):
@@ -7847,9 +8240,14 @@ def _v83_attach_native_motion_context(positive_list, previous_av, plan, segment_
         )
 
     video_tail = prev_video[:, :, -context_t:]
+    # MultiClip v0.4.16 uses a decoded hidden preroll that is longer than the
+    # native motion guide span. Place the previous tail at the END of that hidden
+    # preroll so its time coordinates line up with the actual global boundary.
+    # Example: hidden overlap 34f, native guide 22f -> guide rows live at 12..34.
+    guide_shift = max(0, int(overlap) - int(run)) if getattr(plan, 'mode', None) == 'multiclip' else 0
     keyframes = [
         {
-            'resolved_frame_index': int(offset),
+            'resolved_frame_index': int(guide_shift + offset),
             'latent': video_tail[:, :, k:k + 1].clone(),
             'longmedia_native_motion_context': True,
         }
@@ -7881,7 +8279,7 @@ def _v83_attach_native_motion_context(positive_list, previous_av, plan, segment_
         end_frame = float(run) + overhang / frame_rescale
         end_coord = round(frame_rescale * end_frame)
         end_frame = float(end_coord) / frame_rescale
-        audio_start_frame = end_frame - float(audio_t) / frame_rescale
+        audio_start_frame = end_frame - float(audio_t) / frame_rescale + float(guide_shift)
         keyframes.append({
             'resolved_frame_index': float(audio_start_frame),
             'audio_latent': prev_audio[..., -audio_t:].clone(),
@@ -7901,7 +8299,7 @@ def _v83_attach_native_motion_context(positive_list, previous_av, plan, segment_
             prior = [
                 kf for kf in prior
                 if bool(kf.get('longmedia_lipsync_audio_guide'))
-                or float(kf.get('resolved_frame_index', 0.0)) >= float(run)
+                or float(kf.get('resolved_frame_index', 0.0)) >= float(guide_shift + run)
             ]
             meta['minimax_keyframes'] = prior + [dict(kf) for kf in keyframes]
             meta.pop('minimax_frame_count', None)  # native arbitrary-guide API
@@ -7917,7 +8315,7 @@ def _v83_attach_native_motion_context(positive_list, previous_av, plan, segment_
             prior = [
                 kf for kf in prior
                 if bool(kf.get('longmedia_lipsync_audio_guide'))
-                or float(kf.get('resolved_frame_index', 0.0)) >= float(run)
+                or float(kf.get('resolved_frame_index', 0.0)) >= float(guide_shift + run)
             ]
             meta['minimax_keyframes'] = prior + [dict(kf) for kf in keyframes]
             meta.pop('minimax_frame_count', None)
@@ -7931,7 +8329,7 @@ def _v83_attach_native_motion_context(positive_list, previous_av, plan, segment_
     if attached:
         _lm_print(
             '[MiniMaxH3 LongMedia][0.3.108 VIDEO MOTION CONTEXT + SOURCE AUDIO CLOCK] '
-            f'segment0->1 context={run}f video_steps={context_t} indices={offsets}; '
+            f'segment0->1 context={run}f hidden_overlap={overlap}f guide_shift={guide_shift}f video_steps={context_t} indices={offsets}; '
             f'audio_steps={audio_t}; source_audio_clock={bool(getattr(plan, 'lip_sync_native_audio_guide', False))}; target head is FRESH and generated under native minimax_keyframes; '
             'existing stitch trims the repeated guide span',
             flush=True,
@@ -9608,7 +10006,6 @@ class MiniMaxH3LatentLabLongMediaSetup:
               audio_1=None, audio_2=None, audio_3=None):
         global NativeReferenceToVideo
 
-        _set_longmedia_release_guard(True)
         setup_memory_events = []
         # Start Setup from a clean model residency state.  This is especially
         # important when re-running a workflow after H3 occupied most of VRAM.
@@ -9790,21 +10187,31 @@ class MiniMaxH3LatentLabLongMediaSetup:
             )
 
         if workflow_mode == 'multiclip':
-            mc_lengths, mc_starts, mc_output_frames = _v85_multiclip_geometry(multiclip_clips, effective_overlap_frames)
+            # v0.4.21: MultiClip is assembled on the native H3 temporal lattice and
+            # decoded ONCE by VideoVAE. H3's smallest complete continuation prefix is
+            # 5 decoded frames == 2 video-latent tokens. Every clip after the first
+            # carries that real continuation head; the head is removed in latent space
+            # before the single continuous decode. This keeps the concatenated video
+            # latent on T=5*k+2 and avoids resetting VideoVAE temporal state per clip.
+            multiclip_native_overlap = 5
+            mc_lengths, mc_starts, mc_output_frames = _v85_multiclip_geometry(
+                multiclip_clips, multiclip_native_overlap
+            )
             plan = _dc_replace(
                 plan,
-                mode='multiclip', duration_basis='multiclip',
+                mode='multiclip', duration_basis='multiclip:native_continuous_vae',
                 workflow_mode='multiclip', segmentation_active=False,
                 total_duration=float(mc_output_frames) / float(FPS), output_frames=int(mc_output_frames),
                 segment_frames=int(mc_lengths[0]), segment_lengths=tuple(mc_lengths), segment_starts=tuple(mc_starts),
-                overlap_frames=int(effective_overlap_frames), step_frames=max(1, int(mc_lengths[0]) - int(effective_overlap_frames)),
+                overlap_frames=int(multiclip_native_overlap), step_frames=max(1, int(mc_lengths[0]) - int(multiclip_native_overlap)),
                 passes=len(mc_lengths), generated_frames=int(mc_output_frames), trim_frames=0,
-                segment_seeds=tuple(c['seed'] for c in multiclip_clips), timeline_policy='planned',
+                segment_seeds=tuple(c['seed'] for c in multiclip_clips), timeline_policy='native_continuous_vae',
             )
             _lm_print(
-                '[MiniMaxH3 LongMedia][0.3.87 MULTICLIP PLAN] '
+                '[MiniMaxH3 LongMedia][0.4.21 MULTICLIP NATIVE CONTINUOUS VAE] '
                 f'clips={len(mc_lengths)} lengths={list(mc_lengths)} starts={list(mc_starts)} '
-                f'overlap={int(effective_overlap_frames)} final={int(mc_output_frames)}f',
+                f'native_overlap={int(multiclip_native_overlap)}f latent_overlap={int(video_latent_t(multiclip_native_overlap))}t '
+                f'final={int(mc_output_frames)}f; video_decode=single_continuous',
                 flush=True,
             )
         mode = plan.mode
@@ -10332,7 +10739,6 @@ class MiniMaxH3LatentLabLongMediaSetup:
             suppress_visible_opening_anchor=False,
             regression_safe_segmented_conditioning=bool(segmentation_active),
             decouple_original_image_refs_after_pass0=False,
-            release_guard=True,
         )
 
         # V57: build every per-pass TEXT conditioning now, while TE is intentionally available.
@@ -10388,7 +10794,6 @@ class MiniMaxH3LatentLabLongMediaSetup:
             'timeline_policy': getattr(plan, 'timeline_policy', 'legacy'),
             'selected_workflow_mode': workflow_mode,
             'multiclip_plan_source': ('external_planner' if (workflow_mode == 'multiclip' and external_clip_plan is not None) else ('setup_editor' if workflow_mode == 'multiclip' else ('fixed_segment_math' if workflow_mode == 'segmented_continuation' else None))),
-            'release_guard': True,
             'multiclip_clip_durations': ([float(c['duration']) for c in multiclip_clips] if multiclip_clips else None),
             'multiclip_segment_seeds': ([c['seed'] for c in multiclip_clips] if multiclip_clips else None),
             'segment_seconds_semantics': ('new_output_timeline_plus_extra_overlap_context' if segmentation_active else 'ignored_outside_manual_and_segmented_continuation'),
@@ -10957,6 +11362,22 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
             out['samples'] = packed_output
         return out
 
+    @staticmethod
+    def _cpu_latent_copy(latent):
+        import comfy.nested_tensor
+        copied = latent.copy()
+        samples = copied.get('samples')
+        if getattr(samples, 'is_nested', False):
+            copied['samples'] = comfy.nested_tensor.NestedTensor([x.detach().cpu() for x in samples.unbind()])
+        elif torch.is_tensor(samples):
+            copied['samples'] = samples.detach().cpu()
+        noise_mask = copied.get('noise_mask', None)
+        if getattr(noise_mask, 'is_nested', False):
+            copied['noise_mask'] = comfy.nested_tensor.NestedTensor([x.detach().cpu() for x in noise_mask.unbind()])
+        elif torch.is_tensor(noise_mask):
+            copied['noise_mask'] = noise_mask.detach().cpu()
+        return copied
+
     def run(self, initial_av, long_media_plan, guider, sampler, sigmas, seed,
             video_context_denoise=0.0, audio_context_denoise=0.0,
             offload_completed_segments=True, refine_enabled=False, refine_steps=2):
@@ -11032,6 +11453,10 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
         runtime_thread_pool = None
         stitched = previous_segment = None
         completed = 0
+        store_per_clip_native_decode = str(getattr(plan, 'mode', '') or '') == 'multiclip'
+        per_clip_segment_latents = []
+        per_clip_segment_lengths = []
+        per_clip_hidden_overlaps = []
         try:
             inner_model, prepared_conds, loaded_models = comfy.sampler_helpers.prepare_sampling(
                 model_patcher, first_noise.shape, guider.conds, guider.model_options
@@ -11071,9 +11496,10 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                                 runtime_template_guider, plan, segment_index, previous_av=None
                             )
                         elif workflow_mode == 'multiclip':
-                            # MultiClip is NOT segmentation. We reuse only the AV target sizing/source
-                            # preparation helper with overlap forced to zero by Setup; continuity comes
-                            # from native H3 motion/AV context in the per-clip guider.
+                            # v0.4.21: generate the clip directly on the planned native
+                            # 5-frame continuation overlap. No 34-frame decoded preroll,
+                            # no RGB seam search, no per-clip VideoVAE reset. The repeated
+                            # 5f/2t head is removed later in LATENT space before one decode.
                             segment_av = MiniMaxH3LatentLabLongMediaNextSegment().prepare(
                                 plan, previous_segment, segment_index, 1.0, 1.0
                             )[0]
@@ -11184,8 +11610,27 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
 
                     sampled_output = self._unpack_segment_output(local, sampled_packed, latent_shapes)
                     previous_segment = sampled_output
+                    if store_per_clip_native_decode:
+                        stored_segment = self._cpu_latent_copy(sampled_output) if bool(offload_completed_segments) else sampled_output
+                        per_clip_segment_latents.append(stored_segment)
+                        visible_len = int(plan.segment_lengths[segment_index])
+                        per_clip_segment_lengths.append(visible_len)
+                        seg_video, _seg_audio = unpack_av_samples(sampled_output)
+                        actual_len = int(frame_count_from_video_t(seg_video.shape[2]))
+                        if int(segment_index) == 0:
+                            per_clip_hidden_overlaps.append(0)
+                        else:
+                            per_clip_hidden_overlaps.append(int(getattr(plan, 'overlap_frames', 0) or 0))
                     if stitched is None:
                         stitched = sampled_output
+                    elif store_per_clip_native_decode:
+                        # MultiClip clips are independently sampled native H3 temporal grids.
+                        # Never concatenate those video latents into one fake H3 timeline:
+                        # e.g. T=37 + T=37 -> T=74 is invalid (H3 requires 5*k+2) and even
+                        # padding such a concat causes 17-frame VAE phase pulses. Keep a
+                        # valid placeholder latent here; final Decode consumes the stored
+                        # per-clip native latents and assembles decoded RGB/audio instead.
+                        pass
                     else:
                         stitch_overlap = int(plan.overlap_frames) if segmentation_active else 0
                         stitched = MiniMaxH3LatentLabStitchContinuation().stitch(
@@ -11227,6 +11672,12 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
 
         if stitched is None:
             raise RuntimeError('Unified LongMedia runtime produced no segment output.')
+        if store_per_clip_native_decode and per_clip_segment_latents:
+            stitched = stitched.copy()
+            stitched['_lm_per_clip_native_video_decode'] = True
+            stitched['_lm_segment_latents'] = per_clip_segment_latents
+            stitched['_lm_segment_lengths'] = list(per_clip_segment_lengths)
+            stitched['_lm_segment_hidden_overlaps'] = list(per_clip_hidden_overlaps)
         return (stitched, json.dumps({
             'runtime': 'unified_single_model_lifecycle',
             'passes': passes,
@@ -11698,7 +12149,8 @@ class MiniMaxH3LatentLabLongMediaSampler:
             },
             "segment_prompting": "V331_iterative_completed_event_state_plus_local_timeline_native_refs",
             "conditioning_payload_copy": "shared_read_only_media_metadata_no_deepcopy",
-            "stitched_single_output": True,
+            "stitched_single_output": bool(getattr(plan, 'mode', None) != 'multiclip'),
+            "multiclip_native_clip_storage": bool(getattr(plan, 'mode', None) == 'multiclip'),
             "stitch_policy": {
                 "hidden_overlap": "exact_context_trim_no_blend",
                 "cross_time_visible_latent_blend": False,
@@ -11840,12 +12292,96 @@ class MiniMaxH3LatentLabLongMediaDecode:
         video, audio = unpack_av_samples(final_av)
         video_vae = plan.video_vae
         audio_vae = plan.audio_vae
-        images, video_decode_info = _decode_video_vae_safe(
-            video_vae, video, enable_tiling, tile_size, temporal_size,
-        )
+        use_per_clip_native_video_decode = bool(final_av.get('_lm_per_clip_native_video_decode')) and bool(final_av.get('_lm_segment_latents'))
+        segment_latents = list(final_av.get('_lm_segment_latents') or []) if use_per_clip_native_video_decode else []
+        segment_lengths = list(final_av.get('_lm_segment_lengths') or []) if use_per_clip_native_video_decode else []
+        segment_hidden_overlaps = list(final_av.get('_lm_segment_hidden_overlaps') or []) if use_per_clip_native_video_decode else []
+        multiclip_seam_indices = [0 for _ in segment_latents]
         output_frames = plan.output_frames
-        if images.dim() == 5:
-            images = images[0]
+        if use_per_clip_native_video_decode:
+            # v0.4.21 native continuous decode: preserve sequential H3 generation,
+            # but do NOT decode clips independently. Strip the repeated native
+            # continuation prefix from every clip after the first, concatenate the
+            # remaining VIDEO latents, validate T=5*k+2, then invoke VideoVAE once.
+            video_parts = []
+            latent_reports = []
+            native_overlap_frames = int(getattr(plan, 'overlap_frames', 0) or 0)
+            overlap_video_t = int(video_latent_t(native_overlap_frames)) if native_overlap_frames > 0 else 0
+            for clip_index, clip_av in enumerate(segment_latents):
+                clip_video, _clip_audio = unpack_av_samples(clip_av)
+                if clip_index == 0:
+                    contribution = clip_video
+                    stripped_t = 0
+                else:
+                    if overlap_video_t <= 0:
+                        contribution = clip_video
+                        stripped_t = 0
+                    else:
+                        if int(clip_video.shape[2]) <= overlap_video_t:
+                            raise RuntimeError(
+                                'MultiClip native continuous decode cannot strip continuation prefix: '
+                                f'clip={clip_index}, clip_t={int(clip_video.shape[2])}, overlap_t={overlap_video_t}.'
+                            )
+                        contribution = clip_video[:, :, overlap_video_t:].contiguous()
+                        stripped_t = overlap_video_t
+                if video_parts:
+                    ref = video_parts[0]
+                    if (int(contribution.shape[0]) != int(ref.shape[0]) or
+                        int(contribution.shape[1]) != int(ref.shape[1]) or
+                        tuple(contribution.shape[-2:]) != tuple(ref.shape[-2:])):
+                        raise RuntimeError(
+                            'MultiClip native continuous VideoVAE requires identical spatial latent geometry; '
+                            f'clip={clip_index}, first={tuple(ref.shape)}, current={tuple(contribution.shape)}.'
+                        )
+                video_parts.append(contribution)
+                latent_reports.append({
+                    'clip_index': int(clip_index),
+                    'native_t': int(clip_video.shape[2]),
+                    'stripped_overlap_t': int(stripped_t),
+                    'contribution_t': int(contribution.shape[2]),
+                })
+            if not video_parts:
+                raise RuntimeError('MultiClip native continuous decode found no stored segment video latents.')
+            continuous_video = torch.cat(video_parts, dim=2)
+            continuous_frames = int(frame_count_from_video_t(int(continuous_video.shape[2])))
+            expected_frames = int(plan.output_frames)
+            if continuous_frames != expected_frames:
+                raise RuntimeError(
+                    'MultiClip native continuous latent geometry mismatch: '
+                    f'assembled_t={int(continuous_video.shape[2])} -> {continuous_frames} frames, '
+                    f'plan expects {expected_frames} frames; overlap={native_overlap_frames}f/{overlap_video_t}t.'
+                )
+            images, video_decode_info = _decode_video_vae_safe(
+                video_vae, continuous_video, enable_tiling, tile_size, temporal_size,
+            )
+            if images.dim() == 5:
+                images = images[0]
+            multiclip_seam_indices = [0 for _ in segment_latents]
+            video_decode_info = dict(video_decode_info or {})
+            video_decode_info.update({
+                'mode': 'single_native_continuous_video_vae_decode',
+                'clip_count': int(len(segment_latents)),
+                'native_overlap_frames': int(native_overlap_frames),
+                'native_overlap_video_t': int(overlap_video_t),
+                'continuous_video_t': int(continuous_video.shape[2]),
+                'continuous_frames': int(continuous_frames),
+                'rgb_seam_processing': False,
+                'per_clip_video_vae_decode': False,
+                'clips': latent_reports,
+            })
+            _lm_print(
+                '[MiniMaxH3 LongMedia][0.4.21 NATIVE CONTINUOUS VIDEO VAE] '
+                f'clips={len(segment_latents)} overlap={native_overlap_frames}f/{overlap_video_t}t '
+                f'assembled_t={int(continuous_video.shape[2])} frames={continuous_frames}; '
+                'single_decode=True rgb_seam_processing=False',
+                flush=True,
+            )
+        else:
+            images, video_decode_info = _decode_video_vae_safe(
+                video_vae, video, enable_tiling, tile_size, temporal_size,
+            )
+            if images.dim() == 5:
+                images = images[0]
         storyboard_duplicate_removed = False
         if getattr(plan, 'mode', None) == 'storyboard_bridge':
             bridge = int(getattr(plan, 'storyboard_bridge_frame', -1))
@@ -11893,6 +12429,7 @@ class MiniMaxH3LatentLabLongMediaDecode:
             'decode_memory_barrier_errors': decode_barrier.get('errors', []),
             'decode_uses_plan_vaes': True,
             'video_decode': video_decode_info,
+            'per_clip_native_video_decode': bool(use_per_clip_native_video_decode),
             'trimmed_video_frames': trimmed,
             'storyboard_duplicate_boundary_frame_removed': storyboard_duplicate_removed,
             'segmented_visible_opening_anchor_suppressed': opening_anchor_suppressed,
@@ -11972,6 +12509,15 @@ class MiniMaxH3LatentLabLongMediaDecode:
                 report_data['generated_audio_decoded'] = False
                 report_data['audio_output_mode'] = audio_output_mode
                 report_data['audio_vae_bypassed'] = True
+            elif use_per_clip_native_video_decode and audio_vae is not None:
+                native_audio_overlap = int(getattr(plan, 'overlap_frames', 0) or 0)
+                audio, multiclip_audio_reports = _decode_multiclip_audio_segments(
+                    segment_latents, audio_vae, segment_lengths, plan.total_duration,
+                    hidden_overlaps=[0] + [native_audio_overlap] * max(0, len(segment_latents) - 1),
+                    seam_indices=[0] + [native_audio_overlap] * max(0, len(segment_latents) - 1),
+                )
+                report_data['multiclip_per_clip_audio_decode'] = True
+                report_data['multiclip_audio_clips'] = multiclip_audio_reports
             elif audio_vae is not None and hasattr(audio, 'shape') and audio.ndim == 4:
                 # MiniMax H3 AudioVAE expects latent layout [B, 32, 2, T]. A Turbo LoRA
                 # or wrong routing can leave a packed/non-audio tensor here. Never hand

@@ -67,7 +67,7 @@ def apply_patch():
     # A compatible Contex Loop / Motion Context copy already owns the merge.
     if getattr(current, PATCH_MARKER, False):
         _applied = True
-        _LOG.info("LongMedia hybrid: compatible H3 payload merge already active")
+        _LOG.debug("LongMedia hybrid: compatible H3 payload merge already active")
         return True
 
     # Fail closed on unknown wrappers instead of stacking process-global patches.
@@ -82,7 +82,7 @@ def apply_patch():
     _orig_extra_conds = current
     cls.extra_conds = _patched_extra_conds
     _applied = True
-    _LOG.info("LongMedia hybrid: self-contained keyframe+Ref2VA payload merge enabled")
+    _LOG.debug("LongMedia hybrid: self-contained keyframe+Ref2VA payload merge enabled")
     return True
 
 

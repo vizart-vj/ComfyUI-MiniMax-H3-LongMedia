@@ -97,7 +97,7 @@ def apply_patch():
     # Compatible Motion Context / Contex Loop owner already active.
     if getattr(current, PATCH_MARKER, False):
         _applied = True
-        _LOG.info("LongMedia motion context: compatible PackedLayout owner already active")
+        _LOG.debug("LongMedia motion context: compatible PackedLayout owner already active")
         return True
 
     where = getattr(current, "__module__", "") or ""
@@ -113,7 +113,7 @@ def apply_patch():
     _orig_init = current
     mm.PackedLayout.__init__ = _patched_init
     _applied = True
-    _LOG.info("LongMedia motion context: marker-gated head-guide PackedLayout patch enabled")
+    _LOG.debug("LongMedia motion context: marker-gated head-guide PackedLayout patch enabled")
     return True
 
 
