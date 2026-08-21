@@ -259,237 +259,8 @@ function lmSanitizeSampler(node) {
 
 
 
-// 0.3.87 MultiClip card editor.
-// Python keeps one stable `multiclip_json` widget for schema/workflow compatibility.
-// This DOM editor is presentation-only and synchronizes into that widget.
-const LM_MULTICLIP_MIN = 2;
-const LM_MULTICLIP_MAX = 16;
-
-function lmMulticlipParse(node) {
-    const storage = lmWidget(node, "multiclip_json");
-    const fallback = [
-        { prompt: "", duration: 7.5, seed: null },
-        { prompt: "", duration: 7.5, seed: null },
-    ];
-    try {
-        const parsed = JSON.parse(String(storage?.value ?? "[]"));
-        if (!Array.isArray(parsed)) return fallback;
-        const out = parsed.slice(0, LM_MULTICLIP_MAX).map((raw) => {
-            const item = raw && typeof raw === "object" ? raw : {};
-            const durationRaw = Number(item.duration);
-            let duration = Number.isFinite(durationRaw) ? durationRaw : 7.5;
-            duration = Math.max(0.25, Math.min(150.0, duration));
-            let seed = item.seed;
-            if (seed === "" || seed === undefined) seed = null;
-            if (seed !== null) {
-                const n = Number(seed);
-                seed = Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : null;
-            }
-            return { prompt: String(item.prompt ?? ""), duration, seed };
-        });
-        while (out.length < LM_MULTICLIP_MIN) out.push({ ...fallback[out.length] });
-        return out;
-    } catch (_) {
-        return fallback;
-    }
-}
-
-function lmMulticlipCommit(node, clips) {
-    const storage = lmWidget(node, "multiclip_json");
-    if (!storage) return;
-    const normalized = clips.slice(0, LM_MULTICLIP_MAX).map((clip) => ({
-        prompt: String(clip.prompt ?? ""),
-        duration: Math.max(0.25, Math.min(150.0, Number(clip.duration) || 7.5)),
-        seed: clip.seed == null || clip.seed === "" ? null : Math.max(0, Math.trunc(Number(clip.seed) || 0)),
-    }));
-    while (normalized.length < LM_MULTICLIP_MIN) normalized.push({ prompt: "", duration: 7.5, seed: null });
-    const value = JSON.stringify(normalized);
-    if (storage.value !== value) {
-        storage.value = value;
-        try { storage.callback?.(value); } catch (_) {}
-    }
-    node.__lmMulticlipClipsV387 = normalized;
-    node.graph?.setDirtyCanvas?.(true, true);
-    app.canvas?.setDirty?.(true, true);
-}
-
-function lmMulticlipStyleInput(el) {
-    Object.assign(el.style, {
-        boxSizing: "border-box",
-        width: "100%",
-        color: "var(--input-text, #eee)",
-        background: "var(--comfy-input-bg, #171717)",
-        border: "1px solid #555",
-        borderRadius: "6px",
-        padding: "6px 8px",
-        font: "12px sans-serif",
-        outline: "none",
-    });
-    return el;
-}
-
-function lmEnsureMulticlipEditor(node) {
-    if (node.__lmMulticlipDomWidgetV387) return node.__lmMulticlipDomWidgetV387;
-    if (typeof node.addDOMWidget !== "function") return null;
-
-    const root = document.createElement("div");
-    Object.assign(root.style, {
-        width: "100%",
-        boxSizing: "border-box",
-        padding: "4px 2px 8px",
-        fontFamily: "sans-serif",
-        color: "#ddd",
-    });
-
-    const toolbar = document.createElement("div");
-    Object.assign(toolbar.style, { display: "flex", gap: "6px", alignItems: "center", marginBottom: "8px" });
-    const add = document.createElement("button");
-    const remove = document.createElement("button");
-    const count = document.createElement("span");
-    add.textContent = "+ Add Clip";
-    remove.textContent = "− Remove Last";
-    count.style.fontSize = "11px";
-    count.style.opacity = "0.8";
-    for (const button of [add, remove]) {
-        Object.assign(button.style, {
-            color: "#eee", background: "#202020", border: "1px solid #777",
-            borderRadius: "4px", padding: "3px 7px", cursor: "pointer", fontSize: "11px",
-        });
-    }
-    toolbar.append(add, remove, count);
-
-    const cards = document.createElement("div");
-    Object.assign(cards.style, {
-        display: "grid",
-        gridTemplateColumns: "repeat(2, minmax(280px, 1fr))",
-        gap: "10px",
-        width: "100%",
-    });
-    root.append(toolbar, cards);
-
-    function render() {
-        const clips = node.__lmMulticlipClipsV387 ?? lmMulticlipParse(node);
-        node.__lmMulticlipClipsV387 = clips;
-        count.textContent = `${clips.length} clips`;
-        add.disabled = clips.length >= LM_MULTICLIP_MAX;
-        remove.disabled = clips.length <= LM_MULTICLIP_MIN;
-        cards.replaceChildren();
-
-        clips.forEach((clip, index) => {
-            const card = document.createElement("div");
-            Object.assign(card.style, {
-                border: `1px solid ${index === 0 ? "#d9a400" : "#397db0"}`,
-                borderRadius: "9px",
-                padding: "9px",
-                background: "rgba(10,10,10,0.45)",
-                minWidth: "0",
-            });
-            const title = document.createElement("div");
-            title.textContent = `CLIP ${index + 1}`;
-            Object.assign(title.style, { fontWeight: "700", fontSize: "14px", marginBottom: "7px" });
-
-            const promptLabel = document.createElement("div");
-            promptLabel.textContent = "Prompt";
-            Object.assign(promptLabel.style, { fontSize: "11px", marginBottom: "3px", opacity: "0.9" });
-            const prompt = lmMulticlipStyleInput(document.createElement("textarea"));
-            prompt.rows = 8;
-            prompt.value = clip.prompt ?? "";
-            prompt.style.resize = "vertical";
-            prompt.addEventListener("input", () => {
-                clip.prompt = prompt.value;
-                lmMulticlipCommit(node, clips);
-            });
-
-            const row = document.createElement("div");
-            Object.assign(row.style, { display: "grid", gridTemplateColumns: "1fr 96px", gap: "8px", marginTop: "7px" });
-
-            const seedWrap = document.createElement("div");
-            const seedLabel = document.createElement("div"); seedLabel.textContent = "Seed";
-            Object.assign(seedLabel.style, { fontSize: "11px", marginBottom: "3px", opacity: "0.9" });
-            const seed = lmMulticlipStyleInput(document.createElement("input"));
-            seed.type = "number"; seed.step = "1"; seed.min = "0";
-            seed.placeholder = "auto";
-            seed.value = clip.seed == null ? "" : String(clip.seed);
-            seed.addEventListener("change", () => {
-                clip.seed = seed.value.trim() === "" ? null : Math.max(0, Math.trunc(Number(seed.value) || 0));
-                lmMulticlipCommit(node, clips);
-            });
-            seedWrap.append(seedLabel, seed);
-
-            const durWrap = document.createElement("div");
-            const durLabel = document.createElement("div"); durLabel.textContent = "Duration s";
-            Object.assign(durLabel.style, { fontSize: "11px", marginBottom: "3px", opacity: "0.9" });
-            const duration = lmMulticlipStyleInput(document.createElement("input"));
-            duration.type = "number"; duration.step = "0.1"; duration.min = "0.25"; duration.max = "150";
-            duration.value = String(clip.duration ?? 7.5);
-            duration.addEventListener("change", () => {
-                clip.duration = Math.max(0.25, Math.min(150, Number(duration.value) || 7.5));
-                duration.value = String(clip.duration);
-                lmMulticlipCommit(node, clips);
-            });
-            durWrap.append(durLabel, duration);
-            row.append(seedWrap, durWrap);
-            card.append(title, promptLabel, prompt, row);
-            cards.append(card);
-        });
-
-        // DOM widgets are not always included perfectly in computeSize on every frontend.
-        requestAnimationFrame(() => {
-            const h = root.scrollHeight + 16;
-            if (Number.isFinite(h) && h > 0) root.style.minHeight = `${h}px`;
-            node.setDirtyCanvas?.(true, true);
-        });
-    }
-
-    add.addEventListener("click", (ev) => {
-        ev.preventDefault(); ev.stopPropagation();
-        const clips = node.__lmMulticlipClipsV387 ?? lmMulticlipParse(node);
-        if (clips.length >= LM_MULTICLIP_MAX) return;
-        const prev = clips[clips.length - 1] ?? { duration: 7.5 };
-        clips.push({ prompt: "", duration: Number(prev.duration) || 7.5, seed: null });
-        lmMulticlipCommit(node, clips);
-        render();
-        setTimeout(() => lmRefreshSetup(node), 0);
-    });
-    remove.addEventListener("click", (ev) => {
-        ev.preventDefault(); ev.stopPropagation();
-        const clips = node.__lmMulticlipClipsV387 ?? lmMulticlipParse(node);
-        if (clips.length <= LM_MULTICLIP_MIN) return;
-        clips.pop();
-        lmMulticlipCommit(node, clips);
-        render();
-        setTimeout(() => lmRefreshSetup(node), 0);
-    });
-
-    const domWidget = node.addDOMWidget("multiclip_editor", "multiclip_editor", root, {
-        serialize: false,
-        hideOnZoom: false,
-        getValue: () => null,
-        setValue: () => {},
-    });
-    domWidget.__lmMulticlipEditorV387 = true;
-    domWidget.computeSize = function (width) {
-        const w = Math.max(600, Number(width) || 650);
-        const h = Math.max(260, root.scrollHeight + 12);
-        return [w, h];
-    };
-    domWidget.__lmRenderV387 = render;
-    node.__lmMulticlipDomWidgetV387 = domWidget;
-    node.__lmMulticlipClipsV387 = lmMulticlipParse(node);
-    render();
-    return domWidget;
-}
-
-function lmSyncMulticlipEditorFromStorage(node) {
-    const editor = lmEnsureMulticlipEditor(node);
-    if (!editor) return;
-    const storage = lmWidget(node, "multiclip_json");
-    const raw = String(storage?.value ?? "");
-    if (raw === node.__lmMulticlipStorageRawV387) return;
-    node.__lmMulticlipStorageRawV387 = raw;
-    node.__lmMulticlipClipsV387 = lmMulticlipParse(node);
-    editor.__lmRenderV387?.();
-}
+// MultiClip clip editing is owned exclusively by MiniMax H3 Long Media Planner.
+// Setup keeps multiclip_json only as hidden legacy/backend compatibility storage.
 
 function lmRefreshSetup(node) {
     lmSanitizeSetup(node);
@@ -509,14 +280,9 @@ function lmRefreshSetup(node) {
     lmSetWidgetVisible(lmWidget(node, "manual_duration"), !multiclip);
     lmSetWidgetVisible(lmWidget(node, "duration_source"), !multiclip);
     lmSetWidgetVisible(segmentDuration, manual || segmented);
-    // Keep serialized JSON as backend storage only; users edit clip cards.
+    // Planner is the only MultiClip editor. Setup retains this serialized field
+    // solely for legacy workflow/backend compatibility and never renders clip cards.
     lmSetWidgetVisible(lmWidget(node, "multiclip_json"), false);
-    const multiclipEditor = lmEnsureMulticlipEditor(node);
-    if (multiclipEditor) {
-        // When an external LongMedia Planner is connected, it is the only clip editor.
-        lmSetWidgetVisible(multiclipEditor, multiclip && !externalPlanner);
-        if (multiclip && !externalPlanner) lmSyncMulticlipEditorFromStorage(node);
-    }
     // Segmentation controls exist only in Manual and Segmented Continuation.
     lmSetWidgetVisible(lmWidget(node, "overlap_frames"), manual || segmented);
     lmSetWidgetVisible(lmWidget(node, "conditioning_mode"), manual);
@@ -529,9 +295,11 @@ function lmRefreshSetup(node) {
         lmSetWidgetVisible(lmWidget(node, name), false);
     lmRefreshSetupInputLabels(node);
     const computed = node.computeSize?.();
-    const width = Math.max(node.size?.[0] ?? 0, computed?.[0] ?? 0, multiclip ? 680 : 450);
+    // Preserve the exact user-selected width across workflow_mode changes.
+    // Only the height is recomputed when MultiClip widgets appear/disappear.
+    const width = Number(node.size?.[0]);
     const height = computed?.[1] ?? node.size?.[1];
-    if (Number.isFinite(width) && Number.isFinite(height) && height > 0) {
+    if (Number.isFinite(width) && width > 0 && Number.isFinite(height) && height > 0) {
         node.setSize?.([width, height]);
     }
     node.setDirtyCanvas?.(true, true);

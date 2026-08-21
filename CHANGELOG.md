@@ -1,13 +1,11 @@
-# 0.4.2
+# 0.4.30
 
-- Reworked MultiClip video output into a single native H3 temporal latent timeline and one VideoVAE decode.
-- Each continuation removes only the repeated native 5-frame / 2-video-token prefix before latent assembly; the final timeline is validated on `T=5*k+2`.
-- Removed the active per-clip decode/RGB seam-repair path and its hidden-preroll, seam-selection, photometric and brightness-guard logic from MultiClip output.
-- Added scalar + multi-element modulation-row compatibility across the low-VRAM chunked MLP path and final video/audio output heads.
-- Removed `release_guard` from the runtime plan/report and switched release logging to a fixed quiet policy.
-- Demoted routine compatibility-patch startup messages from INFO to DEBUG.
-- Updated package metadata and release documentation to `0.4.2`.
-- Preserved the validated 0.4.11 unified model lifecycle, refiner, segmentation isolation, AIMDO TE gate and memory policy.
+- MultiClip prompt authoring belongs to **MiniMax H3 Long Media Planner**: separate Global Prompt and Multiple Clips Prompt, Auto Import, and manual Import Prompt.
+- Imported `clip_N` / `shot_N` sections are copied into editable Planner clip cards; duration and seed remain visual per-card controls.
+- Long Media Setup only consumes the Planner clip plan; it no longer owns the 0.4.30 prompt-import UI.
+- Preserves the stock `CFGGuider.sample()` extension contract so KJ Model Preview Override remains compatible.
+- Import Prompt never toggles Auto Import; frontend-readable connected STRING sources import immediately, while backend-only dynamic sources use an independent one-shot request.
+- Setup preserves the user-selected node width when switching to MultiClip; MultiClip card layout is responsive.
 
 ## v0.4.11
 

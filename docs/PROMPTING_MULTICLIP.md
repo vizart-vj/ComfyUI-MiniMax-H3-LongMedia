@@ -1,6 +1,6 @@
 # MultiClip Prompting Rules
 
-These rules target the `workflow_mode=multiclip` path in ComfyUI-MiniMax-H3-LongMedia 0.4.0.
+These rules target the `workflow_mode=multiclip` path in ComfyUI-MiniMax-H3-LongMedia 0.4.2.
 
 ## Mental model
 
@@ -162,3 +162,29 @@ PLANNER CLIP 3
 - Cross-boundary motion is described as continuation.
 - Audio performance wording matches the actual `audio_1` content.
 - Planner is used only with `workflow_mode=multiclip`.
+
+## 0.4.30 structured prompt import
+
+MultiClip Setup can import clip-local prompts from a separate **Multiple Clips Prompt** field while keeping **Global Prompt** independent.
+
+Supported section aliases:
+
+```text
+clip_1:
+...
+clip_2:
+...
+```
+
+or:
+
+```text
+shot_1:
+...
+shot_2:
+...
+```
+
+Sections must be contiguous from 1 and at least two sections must be present. `clip_N` and `shot_N` are aliases; durations and seeds are intentionally not encoded in the prompt syntax.
+
+**Import Prompt** copies section text into the visible clip cards. The copied text is fully editable afterward. **Auto Import Prompt** is a one-shot convenience for connected/dynamic prompt sources and switches itself off after a successful import.

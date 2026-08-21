@@ -4,12 +4,15 @@ Production-oriented ComfyUI nodes for **MiniMax H3** long-form video/audio gener
 
 ![screenshot](ex.png)
 
-**Current stable release: 0.4.2**
+**Current stable release: 0.4.30**
 
-## What 0.4.2 provides
+## What 0.4.30 provides
 
 - Unified clip executor for **MultiClip** and **fixed segmentation**.
 - Per-clip prompt/duration/seed Planner for MultiClip.
+- Separate **Global Prompt** and **Multiple Clips Prompt** inputs in **MiniMax H3 • Long Media Planner**.
+- `clip_N:` / `shot_N:` structured prompt import into editable MultiClip cards.
+- Manual **Import Prompt** independent from **Auto Import Prompt**; connected dynamic STRING sources can queue a one-shot import for the next execution.
 - Fixed-duration long-form segmentation using the same continuation engine.
 - Native Picture / Video / Audio reference conditioning.
 - `video_ref_edit` for preserving source motion/camera/composition while transferring identity/style from Picture references.
@@ -23,6 +26,7 @@ Production-oriented ComfyUI nodes for **MiniMax H3** long-form video/audio gener
 - Native continuous MultiClip video-latent assembly followed by a single H3 VideoVAE decode.
 - Compatibility with scalar and multi-element MiniMax modulation-row layouts in chunked MLP and final output heads.
 - Quiet release console: routine internal diagnostics are suppressed; only actionable failures are surfaced.
+- Stock `CFGGuider.sample()` extension contract compatibility, including KJ Model Preview Override, while retaining the unified LongMedia model lifecycle.
 
 ## Main nodes
 
@@ -85,7 +89,7 @@ Exposes advanced conditioning/timeline controls for controlled diagnostics and A
 
 ## MultiClip vs fixed segmentation
 
-0.4.2 keeps one sequential generation engine for both policies, but MultiClip and fixed segmentation have different output assembly semantics.
+0.4.30 keeps one sequential generation engine for both policies, but MultiClip and fixed segmentation have different output assembly semantics.
 
 ```text
 LongMedia clip executor
@@ -154,7 +158,7 @@ Uses input audio as H3 reference conditioning while retaining generated output a
 Uses input audio as H3 reference/timing context and restores the untouched source track in the final result.
 
 ### `lip_sync`
-Uses `audio_1` as the authoritative performance source for audiovisual timing and restores the untouched source track at output. There is no public manual reference-strength control in 0.4.2; lip-sync behavior is fixed by the mode rather than a user weight.
+Uses `audio_1` as the authoritative performance source for audiovisual timing and restores the untouched source track at output. There is no public manual reference-strength control in 0.4.30; lip-sync behavior is fixed by the mode rather than a user weight.
 
 For performance prompts, describe the semantic action (`speaks`, `sings`) but let the source audio own phonetic timing.
 
@@ -208,7 +212,7 @@ LongMedia can run H3 checkpoints larger than physical VRAM by coordinating activ
 
 ## OOM prevention
 
-0.4.2 includes geometry-aware Governor V4 behavior. The runtime does not classify a huge sequence as safe solely because VRAM is free before transformer workspaces become resident.
+0.4.30 includes geometry-aware Governor V4 behavior. The runtime does not classify a huge sequence as safe solely because VRAM is free before transformer workspaces become resident.
 
 For dangerous long sequences on constrained GPUs, LongMedia can reject a full-sequence Sage/existing attention path **before QKV allocation** and route into bounded streamed Sol attention.
 
@@ -240,7 +244,7 @@ A single 30 s pass can be technically possible with the streamed memory path, bu
 - [Fixed segmentation prompting rules](docs/PROMPTING_SEGMENTATION.md)
 - [Sampler / VRAM / performance rules](docs/SAMPLER_OPTIMIZATION.md)
 - [Architecture](docs/ARCHITECTURE.md)
-- [0.4.2 release notes](docs/RELEASE_NOTES_0.4.2.md)
+- [0.4.30 release notes](docs/RELEASE_NOTES_0.4.30.md)
 - [Release audit](docs/RELEASE_AUDIT.md)
 
 ## Example workflow
@@ -273,7 +277,7 @@ See:
 
 ## Release quality
 
-The stable 0.4.2 release consolidates the validated 0.4.11 runtime baseline with native continuous MultiClip VideoVAE decode, modulation-row compatibility fixes, and a quieter release console.
+The stable 0.4.30 release consolidates the validated 0.4.11 runtime baseline with native continuous MultiClip VideoVAE decode, modulation-row compatibility fixes, and a quieter release console.
 
 Release audit and verification details are documented in [`docs/RELEASE_AUDIT.md`](docs/RELEASE_AUDIT.md).
 

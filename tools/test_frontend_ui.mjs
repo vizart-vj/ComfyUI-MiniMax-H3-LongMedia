@@ -11,11 +11,14 @@ function loadFrontend(path, exportedNames, appOverrides = {}) {
         ...appOverrides,
     };
     let source = fs.readFileSync(path, "utf8")
-        .replace(/^import \{ app \} from .*?;\s*/m, "");
+        .replace(/^import \{ app \} from .*?;\s*/m, "")
+        .replace(/^import \{ api \} from .*?;\s*/m, "");
     source += `\n;globalThis.__lmExports = { ${exportedNames.join(", ")} };`;
     const timers = [];
+    const api = { addEventListener() {} };
     const context = {
         app,
+        api,
         console,
         WeakSet,
         requestAnimationFrame: (callback) => { callback(); return 1; },

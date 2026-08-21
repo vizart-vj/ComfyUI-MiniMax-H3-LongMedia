@@ -1,4 +1,5 @@
 import { app } from "../../scripts/app.js";
+import { api } from "../../scripts/api.js";
 
 const PLANNER_CLASS = "MiniMaxH3LongMediaPlanner";
 const MIN_CLIPS = 2;
@@ -10,6 +11,101 @@ function className(node) {
 
 function isPlanner(node) { return className(node) === PLANNER_CLASS; }
 function widget(node, name) { return node.widgets?.find((w) => w?.name === name); }
+
+function inputConnected(node, name) {
+    const input = node.inputs?.find((i) => i?.name === name);
+    if (!input) return false;
+    if (input.link != null) return true;
+    return Array.isArray(input.links) && input.links.some((id) => id != null);
+}
+
+// Best-effort immediate import for ordinary text/primitive source nodes.
+// Dynamic outputs (LLM/API/etc.) do not necessarily exist in the browser; those
+// fall back to a one-shot backend import request on the next execution.
+function connectedTextValue(node, name) {
+    const input = node.inputs?.find((i) => i?.name === name);
+    const linkId = input?.link ?? (Array.isArray(input?.links) ? input.links.find((id) => id != null) : null);
+    if (linkId == null) return null;
+    const graph = node.graph ?? app.graph;
+    const links = graph?.links;
+    const link = links instanceof Map ? links.get(linkId) : links?.[linkId];
+    if (!link) return null;
+    const originId = link.origin_id ?? link.originId;
+    const originSlot = Number(link.origin_slot ?? link.originSlot ?? 0);
+    const origin = graph?.getNodeById?.(originId) ?? graph?._nodes?.find((n) => String(n?.id) === String(originId));
+    if (!origin) return null;
+
+    try {
+        const direct = origin.getOutputData?.(originSlot);
+        if (typeof direct === "string" && direct.trim()) return direct;
+    } catch (_) {}
+    const out = origin.outputs?.[originSlot];
+    for (const candidate of [out?._data, out?.value]) {
+        if (typeof candidate === "string" && candidate.trim()) return candidate;
+    }
+
+    const stringWidgets = (origin.widgets ?? []).filter((w) => typeof w?.value === "string");
+    if (!stringWidgets.length) return null;
+    const outputName = String(out?.name ?? "").toLowerCase();
+    const preferred = stringWidgets.find((w) => {
+        const n = String(w?.name ?? w?.label ?? "").toLowerCase();
+        return outputName && n === outputName;
+    }) ?? stringWidgets.find((w) => {
+        const n = String(w?.name ?? w?.label ?? "").toLowerCase();
+        return /(?:text|prompt|string|value)/.test(n);
+    }) ?? (stringWidgets.length === 1 ? stringWidgets[0] : null);
+    return typeof preferred?.value === "string" ? preferred.value : null;
+}
+
+function parseStructuredPrompt(raw) {
+    const text = String(raw ?? "").replace(/\r\n?/g, "\n");
+    const re = /^\s{0,3}(?:#{1,6}\s*)?(?:clip|shot)[ _-]*(\d{1,2})\s*:?\s*$/gim;
+    const matches = [...text.matchAll(re)];
+    if (matches.length < 2) return { ok: false, error: "need at least clip_1 and clip_2" };
+    const sections = new Map();
+    for (let i = 0; i < matches.length; i++) {
+        const idx = Number(matches[i][1]);
+        if (!Number.isInteger(idx) || idx < 1 || idx > MAX_CLIPS) return { ok: false, error: `clip index ${idx} is outside 1..${MAX_CLIPS}` };
+        if (sections.has(idx)) return { ok: false, error: `duplicate clip_${idx}` };
+        const start = matches[i].index + matches[i][0].length;
+        const end = i + 1 < matches.length ? matches[i + 1].index : text.length;
+        sections.set(idx, text.slice(start, end).trim());
+    }
+    const max = Math.max(...sections.keys());
+    for (let i = 1; i <= max; i++) if (!sections.has(i)) return { ok: false, error: `missing clip_${i}` };
+    return { ok: true, prompts: Array.from({ length: max }, (_, i) => sections.get(i + 1) ?? "") };
+}
+
+function importPrompts(node, prompts) {
+    if (!Array.isArray(prompts) || prompts.length < MIN_CLIPS) return false;
+    const clips = node.__lmPlannerClips ?? parse(node);
+    const fallbackDuration = Number(clips[clips.length - 1]?.duration) || 7.5;
+    while (clips.length < Math.min(prompts.length, MAX_CLIPS)) clips.push({ prompt: "", duration: fallbackDuration, seed: null });
+    prompts.slice(0, MAX_CLIPS).forEach((p, i) => { clips[i].prompt = String(p ?? ""); });
+    commit(node, clips);
+    node.__lmPlannerEditor?.__lmPlannerRender?.();
+    return true;
+}
+
+function markImportedSource(node, text) {
+    const state = widget(node, "multiclip_last_import_source");
+    if (!state) return;
+    const value = String(text ?? "");
+    if (state.value !== value) {
+        state.value = value;
+        try { state.callback?.(value); } catch (_) {}
+    }
+}
+
+function importFromWidget(node, automatic = false) {
+    const source = widget(node, "multiclip_prompt");
+    const sourceText = String(source?.value ?? "");
+    const parsed = parseStructuredPrompt(sourceText);
+    if (!parsed.ok) return parsed;
+    importPrompts(node, parsed.prompts);
+    markImportedSource(node, sourceText);
+    return { ok: true, count: parsed.prompts.length };
+}
 
 const HIDDEN_SIZE = () => [0, -4];
 const HIDDEN_DRAW = () => {};
@@ -109,12 +205,15 @@ function ensureEditor(node) {
         display: "flex", flex: "0 0 auto", gap: "6px", alignItems: "center",
         marginBottom: "8px", minWidth: "0",
     });
+    const importButton = document.createElement("button"); importButton.textContent = "Import Prompt";
     const add = document.createElement("button"); add.textContent = "+ Add Clip";
     const remove = document.createElement("button"); remove.textContent = "− Remove Last";
     const count = document.createElement("span");
-    for (const b of [add, remove]) Object.assign(b.style, { color: "#eee", background: "#202020", border: "1px solid #777", borderRadius: "4px", padding: "3px 7px", cursor: "pointer", fontSize: "11px" });
+    const status = document.createElement("span");
+    for (const b of [importButton, add, remove]) Object.assign(b.style, { color: "#eee", background: "#202020", border: "1px solid #777", borderRadius: "4px", padding: "3px 7px", cursor: "pointer", fontSize: "11px" });
     Object.assign(count.style, { fontSize: "11px", opacity: "0.8" });
-    toolbar.append(add, remove, count);
+    Object.assign(status.style, { fontSize: "11px", opacity: "0.75", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
+    toolbar.append(importButton, add, remove, count, status);
 
     // 0.3.93: one bounded viewport owns all clip cards.  The node itself may be
     // freely resized; content never forces the node back to its natural size.
@@ -177,6 +276,43 @@ function ensureEditor(node) {
             app.canvas?.setDirty?.(true, true);
         });
     }
+
+    importButton.addEventListener("click", (ev) => {
+        ev.preventDefault(); ev.stopPropagation();
+        if (inputConnected(node, "multiclip_prompt")) {
+            // Never change Auto Import from the manual button. First try to read
+            // an ordinary connected text node directly so the cards update now.
+            const linkedText = connectedTextValue(node, "multiclip_prompt");
+            if (typeof linkedText === "string" && linkedText.trim()) {
+                const parsed = parseStructuredPrompt(linkedText);
+                if (parsed.ok) {
+                    importPrompts(node, parsed.prompts);
+                    markImportedSource(node, linkedText);
+                    status.textContent = `imported ${parsed.prompts.length} clips`;
+                    render();
+                    return;
+                }
+                status.textContent = parsed.error;
+                return;
+            }
+
+            // A truly dynamic connected output only exists on the backend during
+            // execution. Arm an independent one-shot request; do NOT touch Auto Import.
+            const request = widget(node, "multiclip_import_request");
+            if (request) {
+                request.value = true;
+                try { request.callback?.(true); } catch (_) {}
+                status.textContent = "import queued — run workflow once";
+            } else {
+                status.textContent = "connected prompt is dynamic; run workflow with Auto Import";
+            }
+            node.setDirtyCanvas?.(true, true);
+            return;
+        }
+        const result = importFromWidget(node, false);
+        status.textContent = result.ok ? `imported ${result.count} clips` : result.error;
+        if (result.ok) render();
+    });
 
     add.addEventListener("click", (ev) => { ev.preventDefault(); ev.stopPropagation(); const clips = node.__lmPlannerClips ?? parse(node); if (clips.length >= MAX_CLIPS) return; const prev = clips[clips.length - 1] ?? { duration: 7.5 }; clips.push({ prompt: "", duration: Number(prev.duration) || 7.5, seed: null }); commit(node, clips); render(); });
     remove.addEventListener("click", (ev) => { ev.preventDefault(); ev.stopPropagation(); const clips = node.__lmPlannerClips ?? parse(node); if (clips.length <= MIN_CLIPS) return; clips.pop(); commit(node, clips); render(); });
@@ -269,6 +405,14 @@ function ensureEditor(node) {
 function refresh(node) {
     if (!isPlanner(node)) return;
     setVisible(widget(node, "clips_json"), false);
+    const gp = widget(node, "global_prompt");
+    if (gp) { gp.label = "Global Prompt"; gp.localized_name = "Global Prompt"; }
+    const mp = widget(node, "multiclip_prompt");
+    if (mp) { mp.label = "Multiple Clips Prompt"; mp.localized_name = "Multiple Clips Prompt"; }
+    const ai = widget(node, "multiclip_auto_import");
+    if (ai) { ai.label = "Auto Import Prompt"; ai.localized_name = "Auto Import Prompt"; }
+    setVisible(widget(node, "multiclip_import_request"), false);
+    setVisible(widget(node, "multiclip_last_import_source"), false);
     const raw = String(widget(node, "clips_json")?.value ?? "");
     if (raw !== node.__lmPlannerRaw) {
         node.__lmPlannerRaw = raw;
@@ -278,14 +422,53 @@ function refresh(node) {
     editor?.__lmPlannerRender?.();
 }
 
+function wireAutoImport(node) {
+    if (!isPlanner(node) || node.__lmPlannerAutoImportWired) return;
+    node.__lmPlannerAutoImportWired = true;
+    for (const name of ["multiclip_prompt", "multiclip_auto_import"]) {
+        const w = widget(node, name);
+        if (!w) continue;
+        const prior = w.callback;
+        w.callback = function (...args) {
+            const out = prior?.apply(this, args);
+            const auto = Boolean(widget(node, "multiclip_auto_import")?.value);
+            if (auto && !inputConnected(node, "multiclip_prompt")) {
+                const result = importFromWidget(node, true);
+                if (result.ok) refresh(node);
+            }
+            return out;
+        };
+    }
+}
+
 app.registerExtension({
-    name: "MiniMaxH3.LongMediaPlanner.v2",
+    name: "MiniMaxH3.LongMediaPlanner.v3",
     async beforeRegisterNodeDef(nodeType, nodeData) {
         const cls = nodeType?.comfyClass ?? nodeType?.ComfyClass ?? nodeData?.name;
         if (cls !== PLANNER_CLASS) return;
         nodeType.category = "MiniMax H3/Long Media";
         if (nodeData) { nodeData.hidden = false; nodeData.category = "MiniMax H3/Long Media"; }
     },
-    async nodeCreated(node) { if (isPlanner(node)) setTimeout(() => refresh(node), 0); },
-    async afterConfigureGraph() { for (const node of app.graph?._nodes ?? []) if (isPlanner(node)) refresh(node); },
+    async nodeCreated(node) { if (isPlanner(node)) setTimeout(() => { wireAutoImport(node); refresh(node); }, 0); },
+    async afterConfigureGraph() { for (const node of app.graph?._nodes ?? []) if (isPlanner(node)) { wireAutoImport(node); refresh(node); } },
+});
+
+api.addEventListener("minimax_h3_planner_prompt_import", (event) => {
+    const detail = event?.detail ?? event;
+    const nodeId = String(detail?.node_id ?? "");
+    if (!nodeId) return;
+    const node = app.graph?._nodes?.find((n) => String(n?.id) === nodeId && isPlanner(n));
+    if (!node) return;
+
+    if (detail?.clear_request) {
+        const request = widget(node, "multiclip_import_request");
+        if (request) { request.value = false; try { request.callback?.(false); } catch (_) {} }
+    }
+    const prompts = detail?.prompts;
+    if (Array.isArray(prompts) && prompts.length >= MIN_CLIPS) {
+        if (importPrompts(node, prompts)) {
+            if (typeof detail?.source_text === "string") markImportedSource(node, detail.source_text);
+            refresh(node);
+        }
+    }
 });

@@ -1,6 +1,6 @@
 # Fixed Segmentation Prompting Rules
 
-These rules target `workflow_mode=segmented_continuation` in ComfyUI-MiniMax-H3-LongMedia 0.4.0.
+These rules target `workflow_mode=segmented_continuation` in ComfyUI-MiniMax-H3-LongMedia 0.4.2.
 
 ## Mental model
 

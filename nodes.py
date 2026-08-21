@@ -9458,6 +9458,59 @@ def _v111_build_fixed_clip_specs(total_duration, segment_seconds, overlap_frames
     return specs, lengths, starts, generated
 
 
+
+_V043_MULTICLIP_SECTION_RE = re.compile(
+    r"(?im)^\s{0,3}(?:#{1,6}\s*)?(?:clip|shot)[ _-]*(\d{1,2})\s*:?[ \t]*$"
+)
+
+def _v043_parse_multiclip_prompt_text(raw):
+    """Parse editable clip_N/shot_N prompt sections from a structured text block.
+
+    Section labels are aliases and must form a contiguous 1..N sequence with at
+    least two sections. Durations/seeds intentionally do not live in this syntax.
+    """
+    text = str(raw or '').replace('\r\n', '\n').replace('\r', '\n')
+    matches = list(_V043_MULTICLIP_SECTION_RE.finditer(text))
+    if len(matches) < 2:
+        return tuple()
+    sections = {}
+    for pos, match in enumerate(matches):
+        idx = int(match.group(1))
+        if idx < 1 or idx > 16:
+            raise ValueError(f'MultiClip prompt section index {idx} is outside the supported 1..16 range.')
+        if idx in sections:
+            raise ValueError(f'MultiClip prompt contains duplicate clip/shot section {idx}.')
+        start = match.end()
+        end = matches[pos + 1].start() if pos + 1 < len(matches) else len(text)
+        sections[idx] = text[start:end].strip()
+    expected = list(range(1, max(sections) + 1))
+    if sorted(sections) != expected:
+        missing = [str(i) for i in expected if i not in sections]
+        raise ValueError('MultiClip prompt sections must be contiguous from 1; missing: ' + ', '.join(missing))
+    if len(sections) < 2:
+        return tuple()
+    return tuple(sections[i] for i in expected)
+
+def _v043_import_multiclip_prompts(clips, structured_prompt, fallback_duration=7.5):
+    """Copy structured prompt sections into clip cards while preserving timing/seed."""
+    sections = _v043_parse_multiclip_prompt_text(structured_prompt)
+    if not sections:
+        return tuple(clips), False
+    out = [dict(c) for c in clips]
+    default_duration = float(out[-1].get('duration', fallback_duration)) if out else float(fallback_duration)
+    while len(out) < len(sections):
+        out.append({'prompt': '', 'duration': default_duration, 'seed': None})
+    for i, prompt_text in enumerate(sections):
+        out[i]['prompt'] = str(prompt_text)
+    return tuple(out[:16]), True
+
+def _v043_join_global_local_prompt(global_prompt, local_prompt):
+    global_text = str(global_prompt or '').strip()
+    local_text = str(local_prompt or '').strip()
+    if global_text and local_text:
+        return f'{global_text}\n\n{local_text}'
+    return global_text or local_text
+
 def _v85_parse_multiclip_json(raw, fallback_prompt, fallback_duration):
     try:
         payload = json.loads(raw or '[]')
@@ -9749,11 +9802,37 @@ class MiniMaxH3LongMediaPlanner:
     def INPUT_TYPES(cls):
         return {
             'required': {
+                'global_prompt': ('STRING', {
+                    'default': '',
+                    'multiline': True,
+                    'tooltip': 'Global Prompt shared by every MultiClip clip. Kept separate from editable per-clip prompts and joined only at runtime.',
+                }),
+                'multiclip_prompt': ('STRING', {
+                    'default': '',
+                    'multiline': True,
+                    'tooltip': 'Multiple Clips Prompt import source. Use clip_1:/clip_2: or shot_1:/shot_2:. Import copies text into editable clip cards.',
+                }),
+                'multiclip_auto_import': ('BOOLEAN', {
+                    'default': False,
+                    'tooltip': 'Automatically import a valid structured Multiple Clips Prompt when that source changes.',
+                }),
                 'clips_json': ('STRING', {
                     'default': '[{"prompt":"","duration":7.5,"seed":null},{"prompt":"","duration":7.5,"seed":null}]',
                     'multiline': True,
                     'tooltip': 'Internal serialized clip-card state. The LongMedia Planner frontend hides this field and renders clip cards instead.',
                 }),
+                'multiclip_import_request': ('BOOLEAN', {
+                    'default': False,
+                    'tooltip': 'Internal one-shot manual import request used when Multiple Clips Prompt is connected to a dynamic source.',
+                }),
+                'multiclip_last_import_source': ('STRING', {
+                    'default': '',
+                    'multiline': True,
+                    'tooltip': 'Internal source snapshot so Auto Import never overwrites edited cards unless the structured source actually changes.',
+                }),
+            },
+            'hidden': {
+                'unique_id': 'UNIQUE_ID',
             },
         }
 
@@ -9762,8 +9841,33 @@ class MiniMaxH3LongMediaPlanner:
     FUNCTION = 'build'
     CATEGORY = CATEGORY_LONGMEDIA
 
-    def build(self, clips_json):
+    def build(self, global_prompt, multiclip_prompt, multiclip_auto_import, clips_json, multiclip_import_request=False, multiclip_last_import_source='', unique_id=None):
         clips = _v85_parse_multiclip_json(clips_json, '', 7.5)
+        manual_import = bool(multiclip_import_request)
+        automatic_import = bool(multiclip_auto_import)
+        import_source = str(multiclip_prompt or '')
+        source_changed = import_source != str(multiclip_last_import_source or '')
+        if manual_import or (automatic_import and source_changed):
+            imported = False
+            try:
+                clips, imported = _v043_import_multiclip_prompts(clips, multiclip_prompt, fallback_duration=7.5)
+            except ValueError:
+                # Import is a UI convenience; malformed import text must not destroy
+                # an otherwise valid Planner execution or existing editable cards.
+                imported = False
+            if unique_id is not None:
+                try:
+                    from server import PromptServer
+                    payload = {
+                        'node_id': str(unique_id),
+                        'clear_request': bool(manual_import),
+                    }
+                    if imported:
+                        payload['prompts'] = [str(c.get('prompt') or '') for c in clips]
+                        payload['source_text'] = import_source
+                    PromptServer.instance.send_sync('minimax_h3_planner_prompt_import', payload)
+                except Exception:
+                    pass
         normalized = []
         for idx, clip in enumerate(clips):
             normalized.append({
@@ -9778,6 +9882,7 @@ class MiniMaxH3LongMediaPlanner:
             'version': 1,
             'kind': 'h3_longmedia_clip_plan',
             'source': 'MiniMax H3 LongMedia Planner',
+            'global_prompt': str(global_prompt or '').strip(),
             'clips': normalized,
         }
         report = json.dumps({
@@ -9956,7 +10061,7 @@ class MiniMaxH3LatentLabLongMediaSetup:
                 'multiclip_json': ('STRING', {
                     'default': '[{"prompt":"","duration":7.5,"seed":null},{"prompt":"","duration":7.5,"seed":null}]',
                     'multiline': True,
-                    'tooltip': 'MultiClip only. JSON array: [{prompt, duration, seed}, ...]. Blank prompt inherits main prompt; null seed uses sampler seed + clip index.',
+                    'tooltip': 'MultiClip backend storage. JSON array: [{prompt, duration, seed}, ...]. Prompt is local to the clip; null seed uses sampler seed + clip index.',
                 }),
                 'image_1': ('IMAGE', {'tooltip': 'Native MiniMax H3 <Picture 1> reference.'}),
                 'image_2': ('IMAGE', {'lazy': True, 'tooltip': 'Native MiniMax H3 <Picture 2> reference.'}),
@@ -9973,6 +10078,9 @@ class MiniMaxH3LatentLabLongMediaSetup:
                 'audio_1': ('AUDIO', {'tooltip': 'Native MiniMax H3 <Audio 1> reference. With audio_mode=lip_sync it remains <Audio 1> and also drives a native per-clip H3 Audio Guide; the untouched source is restored at output.'}),
                 'audio_2': ('AUDIO', {'lazy': True, 'tooltip': 'Optional second audio reference. Passed as <Audio 2>; pair with video_2 by convention when they come from the same source.'}),
                 'audio_3': ('AUDIO', {'lazy': True, 'tooltip': 'Optional third audio reference. Passed as <Audio 3>; pair with video_3 by convention when they come from the same source.'}),
+            },
+            'hidden': {
+                'unique_id': 'UNIQUE_ID',
             },
         }
 
@@ -10003,7 +10111,7 @@ class MiniMaxH3LatentLabLongMediaSetup:
               image_1=None, image_2=None, image_3=None, image_4=None, image_5=None,
               image_6=None, image_7=None, image_8=None, image_9=None,
               video_1=None, video_2=None, video_3=None,
-              audio_1=None, audio_2=None, audio_3=None):
+              audio_1=None, audio_2=None, audio_3=None, unique_id=None):
         global NativeReferenceToVideo
 
         setup_memory_events = []
@@ -10055,6 +10163,7 @@ class MiniMaxH3LatentLabLongMediaSetup:
         workflow_mode = str(workflow_mode or 'hybrid_auto')
         segmentation_active = workflow_mode in ('manual', 'segmented_continuation')
         external_clip_plan = clip_plan if isinstance(clip_plan, dict) else None
+        planner_global_prompt = ''
         if workflow_mode == 'multiclip' and external_clip_plan is not None:
             kind = str(external_clip_plan.get('kind') or '')
             version = int(external_clip_plan.get('version', 0) or 0)
@@ -10062,6 +10171,7 @@ class MiniMaxH3LatentLabLongMediaSetup:
             if kind != 'h3_longmedia_clip_plan' or version != 1 or not isinstance(clips_payload, list):
                 raise ValueError('Invalid H3_LONGMEDIA_CLIP_PLAN payload. Rebuild it with MiniMax H3 LongMedia Planner.')
             multiclip_json = json.dumps(clips_payload, ensure_ascii=False)
+            planner_global_prompt = str(external_clip_plan.get('global_prompt') or '').strip()
             _lm_print(
                 f'[MiniMaxH3 LongMedia][0.3.91 PLANNER] workflow=multiclip; external clip_plan selected; clips={len(clips_payload)}',
                 flush=True,
@@ -10097,7 +10207,16 @@ class MiniMaxH3LatentLabLongMediaSetup:
             # Ref2VA <Picture N> reference on every clip, and each clip starts from
             # a fresh AV latent. Native Motion Context is added only for clip 2+.
             conditioning_mode = 'multiclip_ref2va'
-            multiclip_clips = _v85_parse_multiclip_json(multiclip_json, prompt, manual_duration)
+            # 0.4.30: Planner owns Global Prompt, structured import and editable
+            # per-clip prompts. Setup only consumes the opaque clip plan. For legacy
+            # workflows without a Planner, the ordinary Setup prompt remains the
+            # global fallback and multiclip_json remains accepted as compatibility state.
+            local_clips = _v85_parse_multiclip_json(multiclip_json, '', manual_duration)
+            global_prompt_effective = planner_global_prompt if external_clip_plan is not None else str(prompt or '').strip()
+            multiclip_clips = tuple({
+                **dict(c),
+                'prompt': _v043_join_global_local_prompt(global_prompt_effective, c.get('prompt', '')),
+            } for c in local_clips)
             effective_prompt = multiclip_clips[0]['prompt']
         elif workflow_mode == 'video_ref_edit':
             if not videos:
@@ -11363,6 +11482,65 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
         return out
 
     @staticmethod
+    def _run_stock_sample_with_reused_lifecycle(
+        guider, device, noise, latent_image, sampler, sigmas, denoise_mask,
+        callback, disable_pbar, seed,
+    ):
+        """Run the official CFGGuider.sample() contract without reopening H3 residency.
+
+        LongMedia owns prepare_sampling/pre_run/cleanup once for the whole sequence.
+        Third-party integrations, however, attach to CFGGuider.sample() itself (notably
+        OUTER_SAMPLE wrappers such as KJ Model Preview Override).  Keep the stock sample
+        path intact and replace only this guider instance's outer_sample terminal with a
+        lifecycle-reuse implementation that delegates directly to inner_sample().
+
+        This preserves ComfyUI's native NestedTensor packing, latent_shapes propagation,
+        callback adaptation, model_options cloning, hook filtering and wrapper dispatch.
+        """
+        import types
+        import comfy.samplers
+
+        had_instance_outer = 'outer_sample' in getattr(guider, '__dict__', {})
+        previous_instance_outer = getattr(guider, '__dict__', {}).get('outer_sample', None)
+
+        def _outer_sample_reuse(
+            self, wrapped_noise, wrapped_latent, wrapped_sampler, wrapped_sigmas,
+            wrapped_mask=None, wrapped_callback=None, wrapped_disable_pbar=False,
+            wrapped_seed=None, latent_shapes=None,
+        ):
+            with comfy.model_management.cuda_device_context(device):
+                wrapped_noise = wrapped_noise.to(device=device, dtype=torch.float32)
+                wrapped_latent = wrapped_latent.to(device=device, dtype=torch.float32)
+                wrapped_sigmas = wrapped_sigmas.to(device)
+                if wrapped_mask is not None:
+                    wrapped_mask = wrapped_mask.to(device)
+                # sample() may have cloned/cast wrapper state for this pass.  Apply those
+                # casts, but deliberately do not call prepare_sampling/pre_run/cleanup.
+                comfy.samplers.cast_to_load_options(
+                    self.model_options, device=device, dtype=self.model_patcher.model_dtype()
+                )
+                return self.inner_sample(
+                    wrapped_noise, wrapped_latent, device, wrapped_sampler, wrapped_sigmas,
+                    wrapped_mask, wrapped_callback, wrapped_disable_pbar, wrapped_seed,
+                    latent_shapes=latent_shapes,
+                )
+
+        guider.outer_sample = types.MethodType(_outer_sample_reuse, guider)
+        try:
+            return guider.sample(
+                noise, latent_image, sampler, sigmas, denoise_mask, callback,
+                disable_pbar, seed,
+            )
+        finally:
+            if had_instance_outer:
+                guider.outer_sample = previous_instance_outer
+            else:
+                try:
+                    del guider.outer_sample
+                except Exception:
+                    pass
+
+    @staticmethod
     def _cpu_latent_copy(latent):
         import comfy.nested_tensor
         copied = latent.copy()
@@ -11544,62 +11722,71 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                         guider.model_options['multigpu_thread_pool'] = runtime_thread_pool
 
                     x0_output = {}
-                    preview_cb = latent_preview.prepare_callback(
+                    # Pass the native callback into CFGGuider.sample(). Stock ComfyUI owns
+                    # NestedTensor callback adaptation, which is also the contract expected
+                    # by OUTER_SAMPLE integrations such as KJ Model Preview Override.
+                    callback = latent_preview.prepare_callback(
                         model_patcher, max(0, int(local_sigmas.shape[-1]) - 1), x0_output
                     )
+
                     if len(latent_shapes) > 1:
-                        def callback(step, x0, x, total_steps, _cb=preview_cb, _shapes=latent_shapes):
-                            import comfy.nested_tensor
-                            nx0 = comfy.nested_tensor.NestedTensor(comfy.utils.unpack_latents(x0, _shapes))
-                            nx = comfy.nested_tensor.NestedTensor(comfy.utils.unpack_latents(x, _shapes))
-                            return _cb(step, nx0, nx, total_steps)
+                        native_latent = comfy.nested_tensor.NestedTensor(
+                            comfy.utils.unpack_latents(packed_latent, latent_shapes)
+                        )
+                        native_noise = comfy.nested_tensor.NestedTensor(
+                            comfy.utils.unpack_latents(packed_noise, latent_shapes)
+                        )
+                        native_mask = None if denoise_mask is None else comfy.nested_tensor.NestedTensor(
+                            comfy.utils.unpack_latents(denoise_mask, latent_shapes)
+                        )
                     else:
-                        callback = preview_cb
+                        native_latent = packed_latent
+                        native_noise = packed_noise
+                        native_mask = denoise_mask
 
                     _lm_print(
-                        '[MiniMaxH3 LongMedia][0.4.6 UNIFIED RUNTIME] '
+                        '[MiniMaxH3 LongMedia][DEV STOCK SAMPLE CONTRACT] '
                         f'unit={segment_index + 1}/{passes}; workflow={getattr(plan, "workflow_mode", "unknown")}; seed={int(effective_seed)}; '
-                        'model_lifecycle=reused; prepare_sampling=False; pre_run=False',
+                        'cfg_guider_sample=True; outer_sample_lifecycle=reused',
                         flush=True,
                     )
-                    # Stage 1: normal base sampling. This remains inside the already-open
-                    # prepare_sampling/pre_run lifecycle.
-                    sampled_packed = guider.inner_sample(
-                        packed_noise, packed_latent, device, sampler, local_sigmas,
-                        denoise_mask, callback, False, int(effective_seed),
-                        latent_shapes=latent_shapes,
+                    # Stage 1: preserve the complete official CFGGuider.sample() extension
+                    # contract while reusing the already-open model lifecycle.
+                    sampled_native = self._run_stock_sample_with_reused_lifecycle(
+                        guider, device, native_noise, native_latent, sampler, local_sigmas,
+                        native_mask, callback, False, int(effective_seed),
                     )
+                    if getattr(sampled_native, 'is_nested', False):
+                        sampled_packed, _ = comfy.utils.pack_latents(sampled_native.unbind())
+                    else:
+                        sampled_packed = sampled_native
 
                     # Stage 2: restore the proven KSampler-Advanced continuation semantics
                     # without opening a second model lifecycle. Zero noise + same seed,
                     # same sampler, same model/wrappers; only the tail sigmas are executed.
                     if bool(refine_enabled) and int(refine_steps_effective) > 0:
                         refine_sigmas_device = runtime_refine_sigmas.to(device)
-                        refine_noise = torch.zeros_like(sampled_packed, device=device, dtype=torch.float32)
-
-                        # inner_sample mutates guider.conds via process_conds(), so reset the
-                        # per-segment raw conditioning before the second stage exactly as a
-                        # second SamplerCustomAdvanced node would receive it.
-                        guider.conds = self._copy_conds(guider.original_conds)
 
                         refine_x0_output = {}
-                        refine_preview_cb = latent_preview.prepare_callback(
+                        refine_callback = latent_preview.prepare_callback(
                             model_patcher, max(0, int(refine_sigmas_device.shape[-1]) - 1), refine_x0_output
                         )
-                        if len(latent_shapes) > 1:
-                            def refine_callback(step, x0, x, total_steps, _cb=refine_preview_cb, _shapes=latent_shapes):
-                                import comfy.nested_tensor
-                                nx0 = comfy.nested_tensor.NestedTensor(comfy.utils.unpack_latents(x0, _shapes))
-                                nx = comfy.nested_tensor.NestedTensor(comfy.utils.unpack_latents(x, _shapes))
-                                return _cb(step, nx0, nx, total_steps)
+                        refine_latent = sampled_native
+                        if getattr(refine_latent, 'is_nested', False):
+                            refine_noise = comfy.nested_tensor.NestedTensor([
+                                torch.zeros_like(x) for x in refine_latent.unbind()
+                            ])
                         else:
-                            refine_callback = refine_preview_cb
+                            refine_noise = torch.zeros_like(refine_latent)
 
-                        sampled_packed = guider.inner_sample(
-                            refine_noise, sampled_packed, device, sampler, refine_sigmas_device,
-                            denoise_mask, refine_callback, False, int(effective_seed),
-                            latent_shapes=latent_shapes,
+                        sampled_native = self._run_stock_sample_with_reused_lifecycle(
+                            guider, device, refine_noise, refine_latent, sampler, refine_sigmas_device,
+                            native_mask, refine_callback, False, int(effective_seed),
                         )
+                        if getattr(sampled_native, 'is_nested', False):
+                            sampled_packed, _ = comfy.utils.pack_latents(sampled_native.unbind())
+                        else:
+                            sampled_packed = sampled_native
                         _lm_print(
                             '[MiniMaxH3 LongMedia][0.4.7 REFINER] '
                             f'unit={segment_index + 1}/{passes}; seed={int(effective_seed)}; '

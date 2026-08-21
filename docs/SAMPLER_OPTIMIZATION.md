@@ -1,6 +1,6 @@
 # Sampler, VRAM and Performance Rules
 
-This document describes the release policy for the Long Media Sampler in 0.4.0.
+This document describes the release policy for the Long Media Sampler in 0.4.2.
 
 ## First rule: use `sampler_mode=auto`
 
@@ -133,7 +133,7 @@ A smaller chunk does not remove the persistent cost of a large reference payload
 - MultiClip: duration is dictated by story/editing needs. Optimize individual long cards if one becomes a VRAM hotspot.
 - Segmentation: use equal 5–10 s visible chunks as the primary memory-control lever.
 
-Both use the same executor in 0.4.0, so performance differences come mainly from clip geometry and prompt/reference payload rather than separate sampler implementations.
+Both use the same executor in 0.4.2, so performance differences come mainly from clip geometry and prompt/reference payload rather than separate sampler implementations.
 
 ## Quality safeguards
 

@@ -53,7 +53,7 @@ def main():
         cls = class_node(tree, cls_name)
         schema = input_schema(cls)
         schemas[cls_name] = schema
-        inputs = list(schema.get("required", {})) + list(schema.get("optional", {}))
+        inputs = list(schema.get("required", {})) + list(schema.get("optional", {})) + list(schema.get("hidden", {}))
         method = func_node(cls, method_name)
         args = [a.arg for a in method.args.args if a.arg not in {"self", "cls"}]
         missing = [n for n in inputs if n not in args]
