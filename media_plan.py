@@ -75,6 +75,8 @@ class LongMediaPlan:
     # v0.4.6: explicit workflow ownership. Never infer segmentation from passes.
     workflow_mode: str = "hybrid_auto"
     segmentation_active: bool = False
+    # Production console guard. False enables full LongMedia diagnostics for profiling.
+    release_guard: bool = True
 
 
 def _align_up_frames(frame_count: int) -> int:

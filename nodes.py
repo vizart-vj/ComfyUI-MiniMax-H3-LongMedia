@@ -132,12 +132,20 @@ def _clone_model_options_safe(model_options):
         return cloned
 
 
-# Release console policy: routine LongMedia diagnostics are silent.
-# Only actionable runtime failures are surfaced; detailed diagnostics stay in code
-# for targeted development builds without exposing a workflow/user switch.
-_LONGMEDIA_ALWAYS_CONSOLE = ("cuda oom", "error", "exception", "terminal failure")
+# Release console policy.  release_guard=True keeps production output quiet;
+# release_guard=False restores the full development console so profiling and
+# execution-path diagnostics are visible without maintaining a separate build.
+_LONGMEDIA_ALWAYS_CONSOLE = ("cuda oom", "[error]", "exception", "terminal failure", "failed to")
+_LONGMEDIA_RELEASE_GUARD = True
+
+def _set_longmedia_release_guard(enabled: bool) -> bool:
+    global _LONGMEDIA_RELEASE_GUARD
+    _LONGMEDIA_RELEASE_GUARD = bool(enabled)
+    return _LONGMEDIA_RELEASE_GUARD
 
 def _lm_print(*args, **kwargs):
+    if not _LONGMEDIA_RELEASE_GUARD:
+        return builtins.print(*args, **kwargs)
     text = " ".join(str(a) for a in args).lower()
     if any(marker in text for marker in _LONGMEDIA_ALWAYS_CONSOLE):
         return builtins.print(*args, **kwargs)
@@ -679,7 +687,7 @@ def _aimdo_setup_boundary_reset(label: str):
             events.append(f'cuda_sync_post:{type(exc).__name__}')
 
     _lm_print(
-        '[MiniMaxH3 LongMedia][0.3.82 AIMDO SETUP BOUNDARY] '
+        '[MiniMaxH3 LongMedia][AIMDO SETUP BOUNDARY] '
         f'{label}: ' + ','.join(events),
         flush=True,
     )
@@ -704,7 +712,7 @@ def _setup_clip_encode_retry(fn, *, label: str):
         if not _is_aimdo_transient_fault(exc):
             raise
         _lm_print(
-            '[MiniMaxH3 LongMedia][0.3.82 AIMDO TE RETRY] '
+            '[MiniMaxH3 LongMedia][AIMDO TE RETRY] '
             f'{label}: transient AIMDO fault ({type(exc).__name__}: {exc}); resetting loader state and retrying once',
             flush=True,
         )
@@ -960,7 +968,22 @@ class MiniMaxH3LatentLabAttentionChunking:
         wrapped = copy.copy(guider)
         wrapped.model_options = _clone_model_options_safe(getattr(guider, 'model_options', {}) or {})
 
+        # v0.4.36: ModelPatcher-owned attention overrides (notably H3 SLA) can
+        # live only in guider.model_patcher.model_options.  Copying guider's
+        # lightweight model_options alone silently drops the hook, which is why
+        # H3Utils reported `patch installed but never invoked`.  Inherit the
+        # authoritative patcher override before LongMedia builds its block path.
+        _patcher_model_options = getattr(getattr(guider, 'model_patcher', None), 'model_options', {}) or {}
+        _patcher_to = (_patcher_model_options.get('transformer_options', {}) or {}) if isinstance(_patcher_model_options, dict) else {}
+        _patcher_attn_override = _patcher_to.get('optimized_attention_override') if isinstance(_patcher_to, dict) else None
         transformer_options = wrapped.model_options.setdefault('transformer_options', {})
+        if _patcher_attn_override is not None and transformer_options.get('optimized_attention_override') is None:
+            transformer_options['optimized_attention_override'] = _patcher_attn_override
+            _lm_print(
+                '[MiniMaxH3 LongMedia][ATTENTION HOOK FIX] inherited '
+                'ModelPatcher optimized_attention_override into LongMedia execution options',
+                flush=True,
+            )
         state = {
             'chunk_tokens': int(chunk_tokens),
             'calls': 0,
@@ -1368,6 +1391,54 @@ class MiniMaxH3LatentLabBlockMemoryTracer:
         return (traced, state)
 
 
+
+def _install_memory_safe_external_sla(transformer_options, state):
+    """Replace BetaDoggo H3 SLA's full-size output allocation with an in-place kernel.
+
+    The external SLA LoRA/selection policy is preserved.  Only the attention
+    output buffer strategy changes: after the block map is built, Q storage is
+    reused for O instead of allocating ``torch.empty_like(q)`` (~1.3 GiB at the
+    failing 1 MP/13 s geometry).  The block-map score matrix is also streamed in
+    query-block chunks so peak VRAM stays bounded.
+    """
+    existing = (transformer_options or {}).get('optimized_attention_override')
+    if existing is None:
+        return False, 'no external optimized_attention_override'
+    module_name = str(getattr(existing, '__module__', '') or '')
+    if not (module_name == 'sla.patch' or module_name.endswith('.sla.patch')):
+        return False, f'non-SLA override: {module_name or type(existing).__name__}'
+    try:
+        import inspect
+        closure = inspect.getclosurevars(existing).nonlocals
+        ext_state = closure.get('state')
+        topk_ratio = float(closure.get('topk_ratio', 0.10))
+        sparsity_ratio = float(1.0 - topk_ratio)
+        blkq = int(closure.get('blkq', 64))
+        blkk = int(closure.get('blkk', blkq))
+        min_seq_len = int(closure.get('min_seq_len', 8192))
+        protect_audio = bool(closure.get('protect_audio', True))
+        from .sla_memory_safe import make_memory_safe_sla_override
+        replacement = make_memory_safe_sla_override(
+            ext_state=ext_state,
+            sparsity_ratio=sparsity_ratio,
+            blkq=blkq,
+            blkk=blkk,
+            min_seq_len=min_seq_len,
+            protect_audio=protect_audio,
+        )
+        transformer_options['optimized_attention_override'] = replacement
+        state['external_sla_memory_safe'] = True
+        state['external_sla_original_module'] = module_name
+        state['external_sla_sparsity_ratio'] = sparsity_ratio
+        state['external_sla_block_q'] = blkq
+        state['external_sla_block_k'] = blkk
+        return True, 'memory-safe in-place SLA installed'
+    except Exception as exc:
+        state['external_sla_memory_safe'] = False
+        state['external_sla_memory_safe_error'] = f'{type(exc).__name__}: {exc}'
+        return False, state['external_sla_memory_safe_error']
+
+
 def _h3_sol_span_wrapper(executor, *args, **kwargs):
     """Publish H3's packed video span without altering APPLY_MODEL call semantics.
 
@@ -1525,18 +1596,155 @@ def _h3_segment_layout_guard_wrapper(executor, *args, **kwargs):
 
 
 
+
+class _H3LookaheadPrefetchQueue:
+    """Retained true-lookahead queue for AIMDO/VBAR H3 transformer blocks."""
+
+    def __init__(self, blocks, device, depth=2):
+        self.blocks = list(blocks)
+        self.device = device
+        self.depth = max(2, int(depth))
+        self.index = 0
+        self.entries = {}
+        self.closed = False
+
+
+def _h3_collect_vbar_modules(root):
+    return [m for m in root.modules() if hasattr(m, '_v')]
+
+
+def _h3_prefetch_one(queue, index):
+    """Enqueue one future H3 block transfer without joining compute."""
+    if index < 0 or index >= len(queue.blocks) or index in queue.entries:
+        return
+    import comfy.model_management as _mm
+    import comfy.memory_management as _mem
+    import comfy.ops as _ops
+
+    root = queue.blocks[index]
+    modules = _h3_collect_vbar_modules(root)
+    if not modules:
+        queue.entries[index] = (None, root, [])
+        return
+
+    registerable_size = 0
+    for m in modules:
+        registerable_size += _mem.vram_aligned_size([m.weight, m.bias])
+        for param_key in ('weight', 'bias'):
+            lowvram_fn = getattr(m, param_key + '_lowvram_function', None)
+            if lowvram_fn is not None:
+                registerable_size += lowvram_fn.memory_required()
+
+    stream, _fully_faulted = _ops.cast_modules_with_vbar(
+        modules, None, queue.device, None, True, return_faulted=True
+    )
+    if not _mm.args.fast_disk:
+        _mm.ensure_pin_registerable(registerable_size)
+    # No sync_stream here: transfer may overlap current block compute.
+    queue.entries[index] = (stream, root, modules)
+
+
+def _h3_cleanup_prefetch_entry(queue, index, guard_compute=False):
+    entry = queue.entries.pop(index, None)
+    if entry is None:
+        return
+    stream, root, modules = entry
+    if guard_compute and stream is not None:
+        # Match Comfy's stock lifetime rule: before unpinning the block that just
+        # executed, make its transfer stream wait behind all compute already
+        # queued on the current stream.  This prevents AIMDO from recycling a
+        # VBAR page while the preceding block may still be using it asynchronously.
+        import comfy.model_management as _mm
+        current = _mm.current_stream(queue.device)
+        if current is not None:
+            stream.wait_stream(current)
+    if modules:
+        import comfy.model_prefetch as _mp
+        _mp.cleanup_prefetched_modules(root, modules)
+
+
+def _h3_close_lookahead_queue(queue):
+    if queue.closed:
+        return
+    try:
+        for stream, _root, _modules in list(queue.entries.values()):
+            if stream is not None:
+                stream.synchronize()
+        for idx in list(queue.entries):
+            _h3_cleanup_prefetch_entry(queue, idx)
+    finally:
+        queue.closed = True
+
+
+def _h3_install_lookahead_prefetch(depth, registry):
+    """Patch Comfy prefetch only during this H3 forward; always restore later."""
+    import comfy.model_prefetch as _mp
+    original_make = _mp.make_prefetch_queue
+    original_pop = _mp.prefetch_queue_pop
+
+    def make_prefetch_queue(blocks, device, transformer_options):
+        if not bool(transformer_options.get('latentlab_h3_true_lookahead', False)):
+            return original_make(blocks, device, transformer_options)
+        try:
+            import comfy.model_management as _mm
+            if (_mm.NUM_STREAMS <= 0 or _mm.is_device_cpu(device)
+                    or not _mm.device_supports_non_blocking(device)):
+                return original_make(blocks, device, transformer_options)
+        except Exception:
+            return original_make(blocks, device, transformer_options)
+        q = _H3LookaheadPrefetchQueue(blocks, device, depth=depth)
+        registry.append(q)
+        return q
+
+    def prefetch_queue_pop(queue, device, module, dtype=None, core=None, enable_graph=False, generator=None):
+        if not isinstance(queue, _H3LookaheadPrefetchQueue):
+            return original_pop(queue, device, module, dtype=dtype, core=core,
+                                enable_graph=enable_graph, generator=generator)
+        if module is None:
+            _h3_close_lookahead_queue(queue)
+            return
+
+        i = int(queue.index)
+        if i > 0:
+            _h3_cleanup_prefetch_entry(queue, i - 1, guard_compute=True)
+
+        _h3_prefetch_one(queue, i)
+        stream, _root, _modules = queue.entries[i]
+        if stream is not None:
+            import comfy.model_management as _mm
+            _mm.sync_stream(device, stream)
+
+        # True one-ahead for depth=2: enqueue i+1 before block i computes.
+        end = min(len(queue.blocks), i + queue.depth)
+        for j in range(i + 1, end):
+            _h3_prefetch_one(queue, j)
+
+        queue.index = i + 1
+        if core is not None:
+            core()
+
+    _mp.make_prefetch_queue = make_prefetch_queue
+    _mp.prefetch_queue_pop = prefetch_queue_pop
+    return _mp, original_make, original_pop
+
 def _h3_runtime_prefetch_wrapper(executor, *args, _bound_residency_state=None, _bound_residency_patcher=None, **kwargs):
-    """Disable Comfy dynamic-VBAR prefetch at the DIFFUSION_MODEL boundary.
+    """Own H3/AIMDO runtime residency policy at the DIFFUSION_MODEL boundary.
 
-    Comfy BaseModel._apply_model() overwrites prefetch_dynamic_vbars from
-    current_patcher.is_dynamic() immediately before invoking diffusion_model.
-    Therefore sampler-side transformer_options alone are insufficient. This
-    wrapper runs after that overwrite and is the authoritative out-of-core gate.
+    v0.4.40 adds a persistent resident-window policy for recent AIMDO + W4A8
+    on 15-18.5 GB NVIDIA cards.  The important invariant is *monotonic* VBAR
+    state across denoise forwards: we set a conservative watermark_limit once
+    and never call ``prioritize()`` again on every denoise step.  AIMDO itself
+    documents that ``prioritize()`` resets the offload watermark to the end of
+    the VBAR; doing that repeatedly causes exactly the fault-in/evict sawtooth
+    seen on oversized H3 checkpoints.
 
-    Do not assume a fixed positional index for transformer_options. WrapperExecutor
-    call shapes can differ between ComfyUI revisions. Find the actual options dict
-    by our LongMedia runtime marker / known transformer-option keys.
+    The watermark limit protects only the low-address prefix (AIMDO's intended
+    high-priority region).  Remaining weights still stream normally, so model
+    sizes above physical VRAM remain supported.  No tensor math is changed.
+
+    The legacy hard-gate path is retained for older/unsafe runtimes.
     """
+
     call_args = list(args)
 
     candidates = []
@@ -1607,7 +1815,7 @@ def _h3_runtime_prefetch_wrapper(executor, *args, _bound_residency_state=None, _
             'latentlab_prefetch_disable_announced_v8', False
         ):
             _lm_print(
-                '[MiniMaxH3 LongMedia][0.3.52 PREFETCH HARD-GATE] '
+                '[MiniMaxH3 LongMedia][PREFETCH HARD-GATE] '
                 f'located transformer_options at {location}; '
                 f'prefetch_dynamic_vbars {before!r}->False AFTER BaseModel override; '
                 f'backend={backend}; synchronous one-block demand loading active',
@@ -1615,68 +1823,62 @@ def _h3_runtime_prefetch_wrapper(executor, *args, _bound_residency_state=None, _
             )
             transformer_options['latentlab_prefetch_disable_announced_v8'] = True
 
-    # v0.3.63: reopen AIMDO VBAR residency at the authoritative diffusion-forward
-    # boundary, not in the sampler callback.  The first forward is deliberately
-    # left untouched (proven safe in v0.3.61); subsequent forwards may reset the
-    # model VBAR watermark only when real CUDA driver-free memory is above the
-    # mode-specific floor.  This changes residency policy only, never H3 math.
+    # v0.4.40: persistent resident window.  Repeated vbar.prioritize() is
+    # explicitly forbidden here: AIMDO's prioritize resets the watermark to the
+    # end of the VBAR, making each denoise forward re-attempt the whole model and
+    # recreating the regular PCIe/VBAR churn pattern.  Instead, protect a bounded
+    # low-address prefix with watermark_limit and let the tail stream.
     residency_state = transformer_options.get('latentlab_h3_residency_state') or _bound_residency_state
     residency_patcher = transformer_options.get('latentlab_h3_residency_patcher') or _bound_residency_patcher
-    if disable_requested and isinstance(residency_state, dict) and residency_patcher is not None:
+    if isinstance(residency_state, dict) and residency_patcher is not None:
         fwd = int(residency_state.get('vbar_forward_count', 0)) + 1
         residency_state['vbar_forward_count'] = fwd
-        if fwd <= 3:
-            _lm_print('[MiniMaxH3 LongMedia][0.3.64 VBAR BOUND] ' f'forward={fwd} state_bound={_bound_residency_state is not None} patcher_bound={_bound_residency_patcher is not None}', flush=True)
-        mode = str(residency_state.get('memory_policy_mode', residency_state.get('memory_mode', 'normal')))
-        floors = {
-            'normal': 2304.0,
-            'low_vram': 3072.0,
-            'ultra_low_vram': 4096.0,
-        }
-        floor_mb = float(floors.get(mode, floors['low_vram']))
-        # Never promote before the first complete H3 forward.  This preserves the
-        # exact startup behaviour that made the 32.4 GB checkpoint stable on 16 GB.
-        if fwd > 1 and residency_state.get('vbar_first_forward_complete', False):
-            try:
-                free_b, total_b = torch.cuda.mem_get_info(torch.cuda.current_device())
-                free_mb = float(free_b) / (1024.0 ** 2)
-                residency_state['vbar_forward_free_mb'] = free_mb
-                vbar_get = getattr(residency_patcher, '_vbar_get', None)
-                vbar = vbar_get(create=False) if callable(vbar_get) else None
-                loaded_before = int(vbar.loaded_size()) if vbar is not None and hasattr(vbar, 'loaded_size') else 0
+        persistent_window = bool(residency_state.get('vbar_persistent_window_enabled', False))
+        try:
+            vbar_get = getattr(residency_patcher, '_vbar_get', None)
+            vbar = vbar_get(create=False) if callable(vbar_get) else None
+            if vbar is not None:
+                loaded_before = int(vbar.loaded_size()) if hasattr(vbar, 'loaded_size') else 0
                 residency_state['vbar_forward_loaded_before'] = loaded_before
-                if vbar is not None and free_mb >= floor_mb:
-                    # One prioritize per diffusion forward is enough. AIMDO will
-                    # naturally lower the watermark again if this forward creates
-                    # pressure, so we never pin or force-load weights ourselves.
-                    vbar.prioritize()
-                    residency_state['vbar_forward_promote_count'] = int(residency_state.get('vbar_forward_promote_count', 0)) + 1
-                    residency_state['vbar_last_promote_free_mb'] = free_mb
-                    _lm_print(
-                        '[MiniMaxH3 LongMedia][0.3.64 VBAR FORWARD PROMOTE] '
-                        f'forward={fwd} mode={mode} free={free_mb:.0f}MB '
-                        f'floor={floor_mb:.0f}MB loaded_before={loaded_before/(1024.0**2):.0f}MB; '
-                        'watermark reopened before H3 forward',
-                        flush=True,
-                    )
-                else:
-                    residency_state['vbar_forward_skip_pressure'] = int(residency_state.get('vbar_forward_skip_pressure', 0)) + 1
-                    # Announce pressure skips sparsely so the console remains usable.
-                    if fwd <= 3 or fwd % 4 == 0:
+                if persistent_window and not residency_state.get('vbar_window_armed', False):
+                    target_b = int(residency_state.get('vbar_window_target_bytes', 0) or 0)
+                    if target_b > 0 and hasattr(vbar, 'set_watermark_limit'):
+                        # Arm once.  set_watermark_limit does not fault data in; it
+                        # only prevents the protected prefix from being evicted
+                        # when those pages are subsequently touched.
+                        vbar.set_watermark_limit(target_b)
+                        residency_state['vbar_window_armed'] = True
+                        residency_state['vbar_window_armed_forward'] = fwd
+                        residency_state['vbar_window_loaded_at_arm'] = loaded_before
                         _lm_print(
-                            '[MiniMaxH3 LongMedia][0.3.64 VBAR FORWARD HOLD] '
-                            f'forward={fwd} mode={mode} free={free_mb:.0f}MB '
-                            f'floor={floor_mb:.0f}MB loaded={loaded_before/(1024.0**2):.0f}MB',
+                            '[MiniMaxH3 LongMedia][AIMDO PERSISTENT WINDOW] '
+                            f'ARMED forward={fwd} target={target_b/(1024.0**2):.0f}MB '
+                            f'loaded={loaded_before/(1024.0**2):.0f}MB; '
+                            'watermark_limit fixed; per-forward prioritize DISABLED',
                             flush=True,
                         )
-            except Exception as exc:
-                residency_state['vbar_forward_error'] = f'{type(exc).__name__}: {exc}'
-                if not residency_state.get('vbar_forward_error_announced'):
-                    residency_state['vbar_forward_error_announced'] = True
+                elif persistent_window and fwd <= 3:
                     _lm_print(
-                        '[MiniMaxH3 LongMedia][0.3.64 VBAR FORWARD] disabled: ' + residency_state['vbar_forward_error'],
+                        '[MiniMaxH3 LongMedia][AIMDO PERSISTENT WINDOW] '
+                        f'HOLD forward={fwd} loaded={loaded_before/(1024.0**2):.0f}MB; '
+                        'no watermark reset',
                         flush=True,
                     )
+                elif disable_requested and fwd <= 3:
+                    _lm_print(
+                        '[MiniMaxH3 LongMedia][AIMDO GUARDED STREAM] '
+                        f'forward={fwd} loaded={loaded_before/(1024.0**2):.0f}MB; '
+                        'prefetch hard-gated; no forced prioritize',
+                        flush=True,
+                    )
+        except Exception as exc:
+            residency_state['vbar_forward_error'] = f'{type(exc).__name__}: {exc}'
+            if not residency_state.get('vbar_forward_error_announced'):
+                residency_state['vbar_forward_error_announced'] = True
+                _lm_print(
+                    '[MiniMaxH3 LongMedia][AIMDO WINDOW] disabled: ' + residency_state['vbar_forward_error'],
+                    flush=True,
+                )
 
     # Diagnostic invariant: when out-of-core streaming requested this MUST be
     # False immediately before MiniMaxH3Model._forward calls make_prefetch_queue().
@@ -1684,14 +1886,44 @@ def _h3_runtime_prefetch_wrapper(executor, *args, _bound_residency_state=None, _
         effective = transformer_options.get('prefetch_dynamic_vbars', '<missing>')
         if not transformer_options.get('latentlab_prefetch_effective_announced_v8', False):
             _lm_print(
-                '[MiniMaxH3 LongMedia][0.3.52 PREFETCH HARD-GATE CHECK] '
+                '[MiniMaxH3 LongMedia][PREFETCH HARD-GATE CHECK] '
                 f'effective prefetch_dynamic_vbars={effective!r} '
                 f'at DIFFUSION_MODEL boundary ({location})',
                 flush=True,
             )
             transformer_options['latentlab_prefetch_effective_announced_v8'] = True
 
-    _h3_result = executor(*call_args, **kwargs)
+    # v0.4.42: Comfy's stock H3 queue faults the same block immediately
+    # before it executes and then joins the transfer stream.  For resident-window
+    # W4A8, install a retained depth-2 ring so block i+1 transfers while block i
+    # computes.  Restore global Comfy functions in finally.
+    lookahead = bool(transformer_options.get('latentlab_h3_true_lookahead', False))
+    prefetch_registry = []
+    patch_tuple = None
+    if lookahead:
+        depth = max(2, int(transformer_options.get('latentlab_h3_prefetch_depth', 2) or 2))
+        patch_tuple = _h3_install_lookahead_prefetch(depth, prefetch_registry)
+        if isinstance(residency_state, dict) and not residency_state.get('lookahead_announced', False):
+            residency_state['lookahead_announced'] = True
+            _lm_print(
+                '[MiniMaxH3 LongMedia][TRUE LOOKAHEAD] '
+                f'ACTIVE depth={depth} (current + {depth-1} future); '
+                'future VBAR transfer overlaps current compute; retained-pin ring enabled',
+                flush=True,
+            )
+    try:
+        _h3_result = executor(*call_args, **kwargs)
+    finally:
+        for q in list(prefetch_registry):
+            try:
+                _h3_close_lookahead_queue(q)
+            except Exception:
+                pass
+        if patch_tuple is not None:
+            _mp, _orig_make, _orig_pop = patch_tuple
+            _mp.make_prefetch_queue = _orig_make
+            _mp.prefetch_queue_pop = _orig_pop
+
     if disable_requested and isinstance(residency_state, dict):
         residency_state['vbar_first_forward_complete'] = True
     return _h3_result
@@ -2043,7 +2275,7 @@ def _h3_runtime_auto_policy(
             # math, but permit larger streamed projection chunks when headroom allows.
             policy['name'] = 'w4a8-cuda-throughput'
             policy['vram_activation_reserve_mb'] = max(
-                int(vram_activation_reserve_mb), 5120
+                1536, min(int(vram_activation_reserve_mb), 2304)
             )
             policy['chunk_tokens'] = min(int(chunk_tokens), 8192)
         else:
@@ -2092,29 +2324,349 @@ def _h3_runtime_auto_policy(
 
 
 
-def _auto_select_h3_attention_mode(token_count, state):
-    """Choose full-token existing/Sage vs embedded Sol. No token compression."""
-    s = int(token_count)
+
+def _closure_bindings(fn):
+    """Return closure freevars without depending on the external node package name."""
     try:
-        total_gb = float(torch.cuda.get_device_properties(
-            torch.cuda.current_device()
-        ).total_memory) / (1024.0 ** 3)
+        names = tuple(getattr(fn.__code__, 'co_freevars', ()) or ())
+        cells = tuple(getattr(fn, '__closure__', ()) or ())
+        return {name: cell.cell_contents for name, cell in zip(names, cells)}
     except Exception:
-        total_gb = 16.0
+        return {}
 
-    if total_gb <= 18.5:
-        threshold = 120000
-    elif total_gb <= 26.0:
-        threshold = 180000
-    elif total_gb <= 36.0:
-        threshold = 260000
-    else:
-        threshold = 360000
 
-    mode = 'existing' if s < threshold else 'sol'
+def _extract_external_sla_config(override):
+    """Read Comfy H3 SLA settings from its override closure when available."""
+    cfg = {
+        'sparsity_ratio': 0.90,
+        'block_q': 64,
+        'block_k': 64,
+        'protect_audio': True,
+        'plugin_state': None,
+    }
+    if override is None:
+        return cfg
+    b = _closure_bindings(override)
+    try:
+        cfg['sparsity_ratio'] = float(b.get('sparsity_ratio', cfg['sparsity_ratio']))
+        cfg['block_q'] = int(b.get('blkq', cfg['block_q']))
+        cfg['block_k'] = int(b.get('blkk', cfg['block_k']))
+        cfg['protect_audio'] = bool(b.get('protect_audio', cfg['protect_audio']))
+        st = b.get('state')
+        if isinstance(st, dict):
+            cfg['plugin_state'] = st
+    except Exception:
+        pass
+    return cfg
+
+
+def _execute_h3_sla_zero_copy(attn, h, rope_freqs, transformer_options, state, measure=None):
+    """Run SLA directly inside the LongMedia H3 block without Comfy hook loss.
+
+    The fused QKV projection is kept as one strided allocation.  The sparse
+    kernel reads Q/K/V through their native strides and writes into ``h`` after
+    QKV projection has consumed it.  The output projection is streamed and
+    copied back into the same buffer, removing the fatal full-size ``o_s``
+    allocation from the external SLA implementation.
+    """
+    from .sla_fastpath import SLAConfig, build_lut, sparse_attention_into
+    import comfy.quant_ops
+
+    meas = measure or (lambda _name, fn: fn())
+    s = int(h.shape[0])
+    heads = int(attn.heads)
+    head_dim = int(attn.head_dim)
+    inner = heads * head_dim
+    cfg_raw = dict(state.get('external_sla_config') or {})
+    _cfg_block_q = int(cfg_raw.get('block_q', 64))
+    _cfg_block_k = int(cfg_raw.get('block_k', 64))
+    # v0.4.45: external SLA geometry is authoritative.  The 0.4.44 hidden
+    # 64x64 -> 128x64 SM120 override made A/B tests impossible and, more
+    # importantly, the release-guard trace proved that the 128x64 run fell out
+    # of SLA after block 0 because a transient CUDA OOM switched the whole
+    # forward to embedded Sol.  Never silently rewrite the user's SLA node.
+    _sm = None
+    try:
+        _sm = tuple(torch.cuda.get_device_capability(h.device)) if h.is_cuda else None
+    except Exception:
+        _sm = None
+    _sla_geom_reason = 'external_authoritative'
+
+    cfg = SLAConfig(
+        sparsity_ratio=float(cfg_raw.get('sparsity_ratio', 0.90)),
+        block_q=_cfg_block_q,
+        block_k=_cfg_block_k,
+        protect_audio=bool(cfg_raw.get('protect_audio', True)),
+        plugin_state=cfg_raw.get('plugin_state'),
+    )
+    if cfg.block_q not in (64, 128) or cfg.block_k not in (64, 128):
+        raise RuntimeError(f'unsupported external SLA block geometry {cfg.block_q}x{cfg.block_k}')
+    state['sla_effective_geometry'] = f'{cfg.block_q}x{cfg.block_k}'
+    state['sla_effective_geometry_reason'] = _sla_geom_reason
+    if not state.get('sla_geometry_announced'):
+        state['sla_geometry_announced'] = True
+        _lm_print(
+            '[MiniMaxH3 LongMedia][SLA GEOMETRY] '
+            f'external={int(cfg_raw.get("block_q", 64))}x{int(cfg_raw.get("block_k", 64))} '
+            f'-> effective={cfg.block_q}x{cfg.block_k}; sm={_sm}; S={s}; '
+            'user-selected geometry preserved exactly',
+            flush=True,
+        )
+
+    state['sla_zero_copy_h_overwritten'] = False
+    state['sla_zero_copy_phase'] = 'qkv_proj'
+    qkv = meas('sla_qkv_proj', lambda: attn.qkv_proj(h))
+    q, k, v = qkv.split(inner, dim=-1)
+    q = q.view(1, s, heads, head_dim)
+    k = k.view(1, s, heads, head_dim)
+    v = v.view(1, s, heads, head_dim)
+
+    def _norm_rope():
+        nonlocal q, k
+        if rope_freqs is not None:
+            qw = comfy.model_management.cast_to(attn.q_norm.weight, device=h.device)
+            kw = comfy.model_management.cast_to(attn.k_norm.weight, device=h.device)
+            rot = int(rope_freqs.shape[-3] * 2)
+            if comfy.model_management.in_training:
+                q, k = comfy.quant_ops.ck.rms_rope_split_half(
+                    q, k, rope_freqs, qw, kw, epsilon=attn.q_norm.eps, rot_dim=rot
+                )
+            else:
+                comfy.quant_ops.ck.rms_rope_split_half_(
+                    q, k, rope_freqs, qw, kw, epsilon=attn.q_norm.eps, rot_dim=rot
+                )
+            return q, k
+        # Non-RoPE path is rare for H3; avoid assuming in-place RMS support.
+        return attn.q_norm(q), attn.k_norm(k)
+
+    state['sla_zero_copy_phase'] = 'rms_rope'
+    q, k = meas('sla_rms_rope', _norm_rope)
+
+    prefix = 0
+    if cfg.protect_audio:
+        try:
+            prefix = int((transformer_options or {}).get('_h3sla_prefix', 0) or 0)
+        except Exception:
+            prefix = 0
+        if prefix <= 0:
+            span = (transformer_options or {}).get('latentlab_sol_h3_video_span')
+            if span is not None:
+                try:
+                    prefix = max(0, int(span[0]))
+                except Exception:
+                    prefix = 0
+        if prefix >= s:
+            prefix = 0
+
+    state['sla_zero_copy_phase'] = 'block_map'
+    lut, topk, pinned = meas(
+        'sla_block_map',
+        lambda: build_lut(
+            q, k,
+            sparsity_ratio=cfg.sparsity_ratio,
+            block_q=cfg.block_q,
+            block_k=cfg.block_k,
+            protect_upto=prefix,
+        ),
+    )
+
+    # H3's residual width is NOT the attention inner width (e.g. 5376 vs
+    # 56*128=7168 on the current model), so ``h`` cannot be reinterpreted as
+    # BLHD attention output storage.  Reuse the Q slice of the fused QKV buffer
+    # instead: each Triton program loads its own Q block completely before it
+    # stores the corresponding output block, and no other program reads those Q
+    # rows. K/V live in disjoint slices, so this is safe and still allocates no
+    # full-size ``o_s`` tensor.
+    state['sla_zero_copy_h_overwritten'] = False
+    raw_out = q
+    state['sla_zero_copy_phase'] = 'sparse_kernel'
+    meas(
+        'sla_kernel_zero_copy',
+        lambda: sparse_attention_into(
+            q, k, v, raw_out, lut, topk, cfg.block_q, cfg.block_k
+        ),
+    )
+    del k, v, lut
+
+    # Attention output now occupies the Q slice of qkv as [1,S,H,D]. Stream the
+    # 7168->hidden out-projection directly into the original residual-width h.
+    # Keep q/qkv alive until projection is complete because q aliases qkv.
+    attn_flat = raw_out.view(s, inner)
+    state['sla_zero_copy_phase'] = 'out_proj'
+    proj_chunk = int(state.get('sol_out_proj_chunk_tokens', 0) or 0)
+    if proj_chunk <= 0:
+        proj_chunk = 8192
+    proj_chunk = max(256, int(proj_chunk))
+    for start in range(0, s, proj_chunk):
+        end = min(s, start + proj_chunk)
+        projected = attn.out_proj(attn_flat[start:end])
+        h[start:end].copy_(projected)
+        del projected
+    del attn_flat, raw_out, q, qkv
+
+    pst = cfg.plugin_state
+    if isinstance(pst, dict):
+        # Keep the external node's end-of-run diagnostic truthful even though
+        # LongMedia executes its SLA math directly rather than through the hook.
+        pst['calls'] = int(pst.get('calls', 0) or 0) + 1
+        pst['seq'] = s
+        pst['kept'] = int(topk)
+        pst['blocks'] = (s + cfg.block_k - 1) // cfg.block_k
+        pst['pinned'] = int(pinned)
+        pst['backend'] = 'LongMedia zero-copy SLA'
+
+    state['sla_zero_copy_phase'] = 'done'
+    state['sla_zero_copy_calls'] = int(state.get('sla_zero_copy_calls', 0) or 0) + 1
+    if not state.get('sla_zero_copy_announced'):
+        _lm_print(
+            '[MiniMaxH3 LongMedia][ZERO-COPY SLA] ACTIVE: '
+            f'S={s} sparsity={cfg.sparsity_ratio:.2f} BLK={cfg.block_q}x{cfg.block_k} geom={_sla_geom_reason} '
+            f'topk={topk} pinned={pinned}; bounded_fp32_pool+head_chunked_lut, fused-QKV strided, attention->norm1 buffer, '
+            f'out-proj streamed <= {proj_chunk}; no full-size SLA o_s allocation',
+            flush=True,
+        )
+        state['sla_zero_copy_announced'] = True
+    return h
+
+
+def _detect_external_h3_sla(transformer_options=None):
+    """Detect ComfyUI-H3-SLA-Attention even when it patches attention globally.
+
+    The SLA plugin does not necessarily expose its override through the current
+    ``transformer_options`` object.  In that case v0.4.34 incorrectly classified
+    the backend as stock/existing and underestimated peak activation memory.
+    """
+    import sys
+
+    opts = transformer_options or {}
+    candidates = [
+        opts.get('optimized_attention_override'),
+        opts.get('attention_override'),
+    ]
+    for fn in candidates:
+        if fn is None:
+            continue
+        mod = str(getattr(fn, '__module__', '') or '').lower()
+        qual = str(getattr(fn, '__qualname__', '') or '').lower()
+        if mod == 'sla.patch' or mod.endswith('.sla.patch') or ('sla' in mod and 'patch' in mod):
+            return True, mod or qual
+
+    # The plugin installs a process-global optimized-attention wrapper.  Detect
+    # the loaded module as a second source of truth instead of assuming that the
+    # wrapper is serialized into transformer_options.
+    for name, module in tuple(sys.modules.items()):
+        lname = str(name).lower()
+        if lname == 'sla.patch' or lname.endswith('.sla.patch'):
+            path = str(getattr(module, '__file__', '') or '')
+            return True, path or name
+    return False, None
+
+
+def _h3_sequence_tokens(x):
+    """Return packed H3 sequence length for either [S,D] or [B,S,D] layouts."""
+    try:
+        if int(x.ndim) >= 3:
+            return int(x.shape[-2])
+        return int(x.shape[0])
+    except Exception:
+        return 1
+
+def _estimate_existing_attention_peak_bytes(token_count, hidden_dim, element_size, *, external_sla=False):
+    """Conservative pre-QKV activation estimate for full-sequence attention.
+
+    H3 self-attention materializes Q/K/V at hidden width.  The external SLA
+    implementation additionally materializes a full-size output tensor with
+    ``torch.empty_like(q)`` before projection.  Account for norm/rotary/routing
+    slack as another full-width tensor rather than relying on a token threshold.
+    This is intentionally allocator-facing: weights/reserved CUDA memory are
+    handled separately via ``mem_get_info``.
+    """
+    s = max(1, int(token_count))
+    d = max(1, int(hidden_dim))
+    e = max(1, int(element_size))
+    one = s * d * e
+    # Q + K + V + normalized input. External SLA needs another O ~= Q.
+    full_tensors = 5 if external_sla else 4
+    # LUT/top-k, rope temporaries, allocator granularity and projection overlap.
+    workspace = max(256 * 1024**2, int(one * (0.35 if external_sla else 0.20)))
+    return int(one * full_tensors + workspace), int(one)
+
+
+def _auto_select_h3_attention_mode(token_count, state, *, hidden_dim=None, element_size=None):
+    """Choose existing vs bounded Sol before QKV allocation using real VRAM budget.
+
+    v0.4.35 keeps the old 120k/180k token guess.  AUTO compares the estimated
+    full-sequence attention peak against CUDA driver-free memory, with an explicit
+    safety reserve.  The result is latched for segmented LongMedia consistency.
+    """
+    latched = state.get('auto_attention_selected_mode')
+    if latched in ('existing', 'sol'):
+        return str(latched), f'latched from first pass -> {latched}'
+
+    s = max(1, int(token_count))
+    d = int(hidden_dim or state.get('current_hidden_dim', 7168) or 7168)
+    e = int(element_size or state.get('current_element_size', 2) or 2)
+    external_sla = bool(state.get('external_sla_detected', False))
+    try:
+        free_b, total_b = torch.cuda.mem_get_info(torch.cuda.current_device())
+    except Exception:
+        total_b = int(16 * 1024**3)
+        free_b = int(total_b * 0.25)
+
+    estimated_b, one_b = _estimate_existing_attention_peak_bytes(
+        s, d, e, external_sla=external_sla
+    )
+    reserve_mb = max(768, int(state.get('vram_activation_reserve_mb', 2048) or 2048))
+    # The configured activation reserve can be very large for quantized models;
+    # only the portion relevant to the imminent attention allocation is held back.
+    reserve_b = min(int(reserve_mb * 1024**2), int(total_b * 0.18))
+    usable_b = max(0, int(free_b) - reserve_b)
+
+    # External SLA's o_s allocation is known from the crash trace to be fatal
+    # when it consumes most remaining headroom. Require the whole estimated
+    # attention working set to fit before allowing that backend.
+    safe = estimated_b <= usable_b
+
+    # v0.4.35 deterministic 16-GB guard.  Driver-free memory sampled before a
+    # block is optimistic because later Q/K/V, output and quantized-weight
+    # staging overlap.  The observed SLA crash requests a 1.36-GiB full-width
+    # output tensor at block 3.  Do not permit a backend that materializes such
+    # a tensor on <=18.5-GB GPUs even if mem_get_info() looks temporarily roomy.
+    geometry_unsafe = bool(
+        int(total_b) <= int(18.5 * 1024**3)
+        and int(one_b) >= int(768 * 1024**2)
+    )
+    if external_sla and geometry_unsafe and not bool(state.get('external_sla_direct_fastpath', False)):
+        safe = False
+    if external_sla and bool(state.get('external_sla_direct_fastpath', False)):
+        # v0.4.36: mem_get_info() is sampled after the block input is already
+        # resident, so only *additional* zero-copy SLA allocations belong in
+        # this decision. The fast path needs fused QKV (3x width) plus a small
+        # routing workspace; it does not allocate contiguous Q/K/V copies or O.
+        one = int(one_b)
+        direct_estimated_b = int(3 * one + max(256 * 1024**2, int(one * 0.15)))
+        direct_usable_b = max(0, int(free_b) - 512 * 1024**2)
+        safe = direct_estimated_b <= direct_usable_b
+        # The previous external SLA run proved the fused H3 QKV projection itself
+        # fits at ~1.36 GiB/tensor; its OOM came from later Q/K/V copies + o_s.
+        # Prefer the zero-copy path for this 16-GB geometry and let only a
+        # pre-kernel allocation OOM fall back to bounded Sol.
+        if int(total_b) <= int(18.5 * 1024**3) and one <= int(1.60 * 1024**3):
+            safe = True
+        estimated_b = direct_estimated_b
+        usable_b = direct_usable_b
+        geometry_unsafe = False
+    mode = 'existing' if safe else 'sol'
+    state['auto_attention_estimated_peak_mb'] = estimated_b / 1024**2
+    state['auto_attention_one_tensor_mb'] = one_b / 1024**2
+    state['auto_attention_driver_free_mb'] = int(free_b) / 1024**2
+    state['auto_attention_usable_mb'] = usable_b / 1024**2
     return mode, (
-        f'{s} tokens, VRAM={total_gb:.1f} GB, '
-        f'threshold={threshold} -> {mode}'
+        f'{s} tokens x hidden={d} x {e}B; '
+        f'existing_peak~{estimated_b/1024**2:.0f}MB '
+        f'(single tensor={one_b/1024**2:.0f}MB), '
+        f'driver_free={int(free_b)/1024**2:.0f}MB, reserve={reserve_b/1024**2:.0f}MB, '
+        f'external_SLA={external_sla}, geometry_unsafe={geometry_unsafe} -> {mode}'
     )
 
 
@@ -3456,7 +4008,7 @@ def _execute_h3_sol_attention(attn, x, rope_freqs, transformer_options, state, t
         )
         if _ultra_streaming and _v12_is_int8_family(state) and not state.get('v354_ultra_mlp_stream_announced'):
             _lm_print(
-                '[MiniMaxH3 LongMedia][0.3.54 ULTRA MLP STREAM] '
+                '[MiniMaxH3 LongMedia][ULTRA MLP STREAM] '
                 'cached fc1+fc2 residency disabled; stock Comfy MLP streams linear weights sequentially per token chunk',
                 flush=True,
             )
@@ -4405,12 +4957,13 @@ class _H3MLPChunkPatch:
             total_mb = float(total_b) / (1024.0 ** 2)
         except Exception as exc:
             if not state.get('adaptive_memory_probe_error_announced'):
-                _lm_print('[MiniMaxH3 LongMedia][0.3.60 GOVERNOR V3] memory probe failed: '
+                _lm_print('[MiniMaxH3 LongMedia][GOVERNOR V3] memory probe failed: '
                           f'{type(exc).__name__}: {exc}', flush=True)
                 state['adaptive_memory_probe_error_announced'] = True
             return
 
         mode = str(state.get('memory_policy_mode', state.get('memory_mode', 'normal')))
+        _backend = str(state.get('model_runtime_backend', 'unknown')).lower()
         tokens = int(state.get('current_token_count', state.get('last_token_count', 0)) or 0)
         model_b = int(state.get('model_size_bytes', 0) or 0)
         gpu_b = int(state.get('gpu_size_bytes', 0) or 0)
@@ -4432,7 +4985,7 @@ class _H3MLPChunkPatch:
         if geometry_mode != mode:
             if not state.get('v110_geometry_mode_announced'):
                 _lm_print(
-                    '[MiniMaxH3 LongMedia][0.3.110 GOVERNOR V4] '
+                    '[MiniMaxH3 LongMedia][GOVERNOR V4] '
                     f'geometry safety envelope {mode}->{geometry_mode}; '
                     f'tokens={tokens} VRAM={total_mb/1024.0:.1f}GB',
                     flush=True,
@@ -4505,6 +5058,26 @@ class _H3MLPChunkPatch:
         if target_idx > ci + 1:
             target_idx = ci + 1
         selected = int(ladder[target_idx])
+
+        # v0.4.49: the post-block AUTO controller is authoritative once the
+        # real-shape resident INT8 MLP has passed exact parity.  V4's generic
+        # geometry cap was written for the stock/re-faulting MLP path and was
+        # immediately undoing the measured-safe 4096->8192 uplift on the very
+        # next governor call.  Keep the verified floor while we remain outside
+        # true memory-pressure zones; HARD_SAFE/CAUTION may still demote instantly.
+        _verified_floor = int(state.get('resident_int8_exact_mlp_floor', 0) or 0)
+        _verified_exact = (
+            str(state.get('int8_cached_mlp_parity', 'unknown')).lower() == 'verified'
+            and _verified_floor > 0
+            and _backend in ('int8', 'int8-convrot-w4a4')
+        )
+        if _verified_exact and zone not in ('HARD_SAFE', 'CAUTION'):
+            selected = max(selected, _verified_floor)
+            if selected > int(ladder[-1]):
+                selected = int(ladder[-1])
+            if selected >= 8192 and zone.endswith('_GEOMETRY'):
+                zone = 'VERIFIED_RESIDENT_INT8'
+
         old_zone = str(state.get('adaptive_memory_zone', 'CALIBRATION_SAFE'))
         old_chunk = current
         old_barrier = bool(state.get('ultra_stage_barrier_required', True))
@@ -4518,7 +5091,7 @@ class _H3MLPChunkPatch:
         state['adaptive_memory_adjustments'] = int(state.get('adaptive_memory_adjustments', 0)) + 1
         if (old_zone, old_chunk, old_barrier) != (zone, selected, barrier):
             _lm_print(
-                '[MiniMaxH3 LongMedia][0.3.60 GOVERNOR V3] '
+                '[MiniMaxH3 LongMedia][GOVERNOR V3] '
                 f'mode={mode} block={self.index:02d} free={free_mb:.0f}MB '
                 f'hard={hard_floor:.0f}MB soft={soft_floor:.0f}MB tokens={tokens} '
                 f'zone={zone}; MLP {old_chunk}->{selected}; barrier={barrier}',
@@ -4574,8 +5147,6 @@ class _H3MLPChunkPatch:
         # management when there is enough free + allocator-reclaimable memory.
         if recoverable_mb >= 6144.0 or headroom_ratio >= 0.38:
             mode = 'FAST'
-            # TEST AUTO memory-only: preserve the user's proven chunk sizes.
-            # Only tune memory-management policy.
             state['chunk_tokens'] = before['mlp']
             state['sol_qkv_chunk_tokens'] = before['qkv']
             state['sol_out_proj_chunk_tokens'] = before['out']
@@ -4586,7 +5157,6 @@ class _H3MLPChunkPatch:
             state['step_boundary_cleanup_mb'] = min(before['step_cleanup'], 1024) if before['step_cleanup'] > 0 else 0
         elif recoverable_mb >= 3584.0 or headroom_ratio >= 0.24:
             mode = 'BALANCED'
-            # TEST AUTO memory-only: preserve chunk sizes in BALANCED too.
             state['chunk_tokens'] = before['mlp']
             state['sol_qkv_chunk_tokens'] = before['qkv']
             state['sol_out_proj_chunk_tokens'] = before['out']
@@ -4597,7 +5167,6 @@ class _H3MLPChunkPatch:
             state['step_boundary_cleanup_mb'] = min(before['step_cleanup'], 1536) if before['step_cleanup'] > 0 else 0
         else:
             mode = 'SAFE'
-            # Preserve every user-supplied SAFE value.
             state['chunk_tokens'] = before['mlp']
             state['sol_qkv_chunk_tokens'] = before['qkv']
             state['sol_out_proj_chunk_tokens'] = before['out']
@@ -4606,6 +5175,40 @@ class _H3MLPChunkPatch:
             state['late_block_guard_start'] = before['late_start']
             state['late_block_guard_target_mb'] = before['late_target']
             state['step_boundary_cleanup_mb'] = before['step_cleanup']
+
+        # v0.4.48: after resident INT8 MLP parity is verified, chunking becomes a
+        # compute-throughput problem rather than a safety problem.  Larger chunks
+        # reduce kernel-launch, loop, and per-chunk norm/gate overhead while the
+        # exact stock INT8 math is preserved by the verified resident path.
+        _resident_int8_exact = (
+            _backend in ('int8', 'int8-convrot-w4a4')
+            and str(state.get('int8_cached_mlp_parity', 'unknown')).lower() == 'verified'
+        )
+        if _resident_int8_exact:
+            _base_mlp = int(before['mlp'])
+            _target_mlp = _base_mlp
+            if recoverable_mb >= 8192.0 or headroom_ratio >= 0.50:
+                _target_mlp = max(_target_mlp, 8192)
+            elif recoverable_mb >= 5632.0 or headroom_ratio >= 0.34:
+                _target_mlp = max(_target_mlp, 6144)
+            state['chunk_tokens'] = _target_mlp
+            state['resident_int8_exact_mlp_floor'] = int(_target_mlp)
+            state['resident_int8_exact_chunk_uplift'] = {
+                'enabled': True,
+                'recoverable_mb': round(recoverable_mb, 1),
+                'headroom_ratio': round(headroom_ratio, 4),
+                'before': _base_mlp,
+                'after': int(_target_mlp),
+            }
+        else:
+            state['resident_int8_exact_mlp_floor'] = 0
+            state['resident_int8_exact_chunk_uplift'] = {
+                'enabled': False,
+                'recoverable_mb': round(recoverable_mb, 1),
+                'headroom_ratio': round(headroom_ratio, 4),
+                'before': int(before['mlp']),
+                'after': int(state.get('chunk_tokens', before['mlp'])),
+            }
 
         # Backend safety caps.  NVFP4 is intentionally uncapped here because
         # its current settings are the measured reference baseline.
@@ -4685,6 +5288,16 @@ class _H3MLPChunkPatch:
             f"step-cleanup {before['step_cleanup']}->{after['step_cleanup']} MB",
             flush=True,
         )
+
+        _uplift = state.get('resident_int8_exact_chunk_uplift') or {}
+        if _uplift.get('enabled'):
+            _lm_print(
+                '[MiniMaxH3 LongMedia][RESIDENT INT8 CHUNK UPLIFT] '
+                f"verified_exact_mlp=True recoverable={_uplift.get('recoverable_mb', 0):.1f}MB "
+                f"headroom={float(_uplift.get('headroom_ratio', 0.0))*100.0:.1f}% "
+                f"MLP {int(_uplift.get('before', before['mlp']))}->{int(_uplift.get('after', after['mlp']))}",
+                flush=True,
+            )
 
     def _int8_prefetch_guard(self):
         """V321 oversubscription-aware emergency safety net for native Comfy INT8.
@@ -5266,7 +5879,7 @@ class _H3MLPChunkPatch:
                             _ok, _rel, _cos = False, float('inf'), -1.0
                         state['int8_cached_mlp_parity'] = 'verified' if _ok else 'failed'
                         _lm_print(
-                            '[MiniMaxH3 LongMedia][0.3.60 MLP PARITY] '
+                            '[MiniMaxH3 LongMedia][MLP PARITY] '
                             f"{'PASS' if _ok else 'FAIL'} rel_rms={_rel:.3e} cosine={_cos:.8f}; "
                             + ('block-resident fc1/fc2 enabled' if _ok else 'falling back to stock MLP'),
                             flush=True,
@@ -5281,28 +5894,27 @@ class _H3MLPChunkPatch:
 
                     if _fc1_handle is not None and not state.get('int8_block_mlp_weights_announced'):
                         _lm_print(
-                            '[MiniMaxH3 LongMedia][0.3.61 BLOCK-RESIDENT SAFE MLP] '
-                            'fc1+fc2 prepared once per H3 block and reused across all token chunks',
+                            '[MiniMaxH3 LongMedia][BLOCK-RESIDENT EXACT MLP] '
+                            'fc1+fc2 prepared once per H3 block; fc2 uses stock fused SwiGLU INT8 semantics',
                             flush=True,
                         )
                         state['int8_block_mlp_weights_announced'] = True
 
                 if _fc1_handle is not None and _fc2_handle is not None:
-                    # v0.3.61: keep block-resident weights for throughput, but do
-                    # NOT use the custom fused int8_linear(input_act='swiglu')
-                    # shortcut.  Tiny 4-token probes could pass while a real
-                    # thousands-token chunk produced catastrophic latent corruption.
-                    # Use QuantizedTensor/F.linear dispatch for both projections and
-                    # apply SwiGLU explicitly, matching stock H3 math ordering.
-                    _ff = torch.nn.functional.linear(
-                        h_chunk, _fc1_handle['weight'], _fc1_handle['bias']
+                    # v0.4.47: resident MLP must mirror stock Comfy H3 *kernel
+                    # semantics*, not merely the mathematical expression.  Stock H3
+                    # calls comfy.ops.linear_input_act(fc2, fc1(x), "swiglu").  For
+                    # TensorWise INT8 this folds SwiGLU into the activation quantizer
+                    # inside ck.int8_linear.  The previous resident path materialized
+                    # BF16 SwiGLU first and then quantized it for fc2; that changes the
+                    # quantization point and produced the measured ~5e-3 rel-RMS drift.
+                    # Reuse the already-resident cast weights while dispatching through
+                    # the exact same fused INT8 input_act contract as stock Comfy.
+                    _ff = _int8_cached_linear(_fc1_handle, h_chunk)
+                    chunk_out = _int8_cached_linear(
+                        _fc2_handle, _ff, input_act='swiglu'
                     )
-                    _gate, _up = _ff.chunk(2, dim=-1)
-                    _ff_act = torch.nn.functional.silu(_gate).mul_(_up)
-                    chunk_out = torch.nn.functional.linear(
-                        _ff_act, _fc2_handle['weight'], _fc2_handle['bias']
-                    )
-                    del _gate, _up, _ff_act, _ff
+                    del _ff
                 else:
                     chunk_out = block.mlp(h_chunk)
 
@@ -5337,10 +5949,10 @@ class _H3MLPChunkPatch:
                         _stock_chunk = None
                     state['int8_cached_mlp_parity'] = 'verified' if _ok else 'failed'
                     _lm_print(
-                        '[MiniMaxH3 LongMedia][0.3.61 REAL-CHUNK MLP PARITY] '
+                        '[MiniMaxH3 LongMedia][REAL-CHUNK MLP PARITY] '
                         f"{'PASS' if _ok else 'FAIL'} rows={int(h_chunk.shape[0])} "
                         f"rel_rms={_rel:.3e} cosine={_cos:.8f}; "
-                        + ('resident F.linear path enabled' if _ok else 'resident path DISABLED -> stock MLP'),
+                        + ('resident stock-fused INT8 path enabled' if _ok else 'resident path DISABLED -> stock MLP'),
                         flush=True,
                     )
                     if not _ok:
@@ -5478,6 +6090,7 @@ class _H3MLPChunkPatch:
             # V12-A/B2 is gated inside this helper. INT8 and W4A8 participate;
             # NVFP4 and floating-point backends do not mutate V11 state.
             _v12_begin_int8_sol_forward(state)
+            state['sla_failed_blocks_this_forward'] = 0
         state['active_block_index'] = int(self.index)
 
         # V40 production baseline: keep the proven V39 execution path but remove
@@ -5498,15 +6111,19 @@ class _H3MLPChunkPatch:
         # `x` is assigned later in this wrapper, so use args['img'] directly.
         # This is still before any norm/attention/QKV allocation.
         _preblock_img = args['img']
-        _preblock_tokens = int(_preblock_img.shape[0])
+        _preblock_tokens = _h3_sequence_tokens(_preblock_img)
         state['current_token_count'] = _preblock_tokens
 
         _requested_mode = str(
             state.get('requested_attention_mode', state.get('sol_mode', 'existing'))
         )
         if _requested_mode == 'auto':
+            state['current_hidden_dim'] = int(_preblock_img.shape[-1])
+            state['current_element_size'] = int(_preblock_img.element_size())
             _effective_mode, _auto_reason = _auto_select_h3_attention_mode(
-                _preblock_tokens, state
+                _preblock_tokens, state,
+                hidden_dim=int(_preblock_img.shape[-1]),
+                element_size=int(_preblock_img.element_size()),
             )
             state['sol_mode'] = _effective_mode
             state['auto_attention_selected_mode'] = _effective_mode
@@ -5522,36 +6139,59 @@ class _H3MLPChunkPatch:
         else:
             state['sol_mode'] = _requested_mode
 
-        # v0.3.110 OOM Governor V4: attention-workspace preflight.
-        # KJ SageAttention materializes full-sequence quantization buffers (for
-        # example V_fp8 ~= tokens * hidden_dim bytes) and cannot be rescued by
-        # MLP chunking. On constrained GPUs, geometry that is known to exceed the
-        # safe full-Sage envelope is routed to LongMedia's bounded QKV/Sol path
-        # *before* block.attn allocates Q/K/V. This is a safety fallback, never an
-        # after-OOM retry, so the CUDA allocator remains healthy.
-        try:
-            _v110_total_gb = float(torch.cuda.get_device_properties(
-                torch.cuda.current_device()).total_memory) / (1024.0 ** 3)
-        except Exception:
-            _v110_total_gb = 0.0
-        _v110_existing_unsafe = bool(
-            state.get('sol_mode') == 'existing' and (
-                (_v110_total_gb and _v110_total_gb <= 18.5 and _preblock_tokens >= 120000)
-                or (_v110_total_gb and _v110_total_gb <= 26.0 and _preblock_tokens >= 180000)
-            )
-        )
-        if _v110_existing_unsafe:
-            state['sol_mode'] = 'sol'
-            state['v110_attention_safety_fallback'] = True
-            if not state.get('v110_attention_safety_announced'):
-                _lm_print(
-                    '[MiniMaxH3 LongMedia][0.3.110 ATTENTION PREFLIGHT] '
-                    f'existing/Sage rejected before QKV allocation: tokens={_preblock_tokens}, '
-                    f'VRAM={_v110_total_gb:.1f}GB; emergency route=SOL bounded-QKV; '
-                    'reason=full-sequence Sage FP8 workspace unsafe',
-                    flush=True,
+        # v0.4.35: explicit `existing` receives the same allocator-aware hard
+        # safety guard.  This prevents the external SLA failure mode observed in
+        # production: block_sparse_attention allocates o_s ~= Q, OOMs, then its
+        # own exception path retries dense SDPA and OOMs again.  Route before QKV.
+        if state.get('sol_mode') == 'existing':
+            try:
+                _est_b, _one_b = _estimate_existing_attention_peak_bytes(
+                    _preblock_tokens, int(_preblock_img.shape[-1]),
+                    int(_preblock_img.element_size()),
+                    external_sla=bool(state.get('external_sla_detected', False)),
                 )
-                state['v110_attention_safety_announced'] = True
+                _free_b, _total_b = torch.cuda.mem_get_info(torch.cuda.current_device())
+                _reserve_mb = max(768, int(state.get('vram_activation_reserve_mb', 2048) or 2048))
+                _reserve_b = min(int(_reserve_mb * 1024**2), int(_total_b * 0.18))
+                _usable_b = max(0, int(_free_b) - _reserve_b)
+                _geom_unsafe = bool(
+                    bool(state.get('external_sla_detected', False))
+                    and not bool(state.get('external_sla_direct_fastpath', False))
+                    and int(_total_b) <= int(18.5 * 1024**3)
+                    and int(_one_b) >= int(768 * 1024**2)
+                )
+                if bool(state.get('external_sla_direct_fastpath', False)):
+                    _one_b = (
+                        int(_preblock_tokens) * int(_preblock_img.shape[-1])
+                        * int(_preblock_img.element_size())
+                    )
+                    _est_b = int(3 * _one_b + max(256 * 1024**2, int(_one_b * 0.15)))
+                    _usable_b = max(0, int(_free_b) - 512 * 1024**2)
+                    if int(_total_b) <= int(18.5 * 1024**3) and _one_b <= int(1.60 * 1024**3):
+                        _est_b = min(_est_b, _usable_b)
+                _unsafe = (_est_b > _usable_b) or _geom_unsafe
+            except Exception:
+                _unsafe = False
+                _est_b = _one_b = _free_b = _usable_b = 0
+            if _unsafe:
+                state['sol_mode'] = 'sol'
+                state['v434_attention_safety_fallback'] = True
+                # If AUTO was latched as existing before a later pass sees lower
+                # driver headroom, update the latch to the safer family for all
+                # remaining passes rather than oscillating.
+                if str(state.get('requested_attention_mode', '')).lower() == 'auto':
+                    state['auto_attention_selected_mode'] = 'sol'
+                if not state.get('v434_attention_safety_announced'):
+                    _lm_print(
+                        '[MiniMaxH3 LongMedia][VRAM PREFLIGHT] '
+                        f'existing attention rejected BEFORE QKV: tokens={_preblock_tokens}, '
+                        f'single_tensor={_one_b/1024**2:.0f}MB, '
+                        f'peak_est={_est_b/1024**2:.0f}MB, '
+                        f'driver_usable={_usable_b/1024**2:.0f}MB; '
+                        'route=embedded SOL bounded-QKV; no post-OOM dense retry',
+                        flush=True,
+                    )
+                    state['v434_attention_safety_announced'] = True
 
         block = self._extract_block(original_block)
         if block is None:
@@ -5662,6 +6302,82 @@ class _H3MLPChunkPatch:
                     block.attn, h, rope_freqs, transformer_options, state,
                     measure=measure if trace_this else None,
                 )
+            elif bool(state.get('external_sla_direct_fastpath', False)):
+                attn_out = None
+                _sla_oom = None
+                for _sla_attempt in range(2):
+                    try:
+                        attn_out = _execute_h3_sla_zero_copy(
+                            block.attn, h, rope_freqs, transformer_options, state,
+                            measure=measure if trace_this else None,
+                        )
+                        if _sla_attempt:
+                            _lm_print(
+                                '[MiniMaxH3 LongMedia][SLA OOM RECOVERY] '
+                                f'block={self.index} recovered after allocator trim; '
+                                f'phase={state.get("sla_zero_copy_phase", "unknown")}; '
+                                'SLA remains active',
+                                flush=True,
+                            )
+                        break
+                    except torch.cuda.OutOfMemoryError as _exc:
+                        _sla_oom = _exc
+                        _phase = str(state.get('sla_zero_copy_phase', 'unknown'))
+                        state['sla_zero_copy_oom_count'] = int(state.get('sla_zero_copy_oom_count', 0) or 0) + 1
+                        try:
+                            import comfy.model_management as _mm
+                            _mm.soft_empty_cache()
+                        except Exception:
+                            torch.cuda.empty_cache()
+                        if _sla_attempt == 0:
+                            _lm_print(
+                                '[MiniMaxH3 LongMedia][SLA OOM RECOVERY] '
+                                f'block={self.index} phase={_phase}; trimmed allocator cache; '
+                                'retrying SAME SLA geometry once (no sticky Sol switch)',
+                                flush=True,
+                            )
+                            continue
+
+                if attn_out is None:
+                    # A single transient block must not poison the entire denoise
+                    # forward.  Fall back only for this block, release the Sol
+                    # workspace immediately, and probe SLA again on the next
+                    # block.  Two distinct block failures in one forward are the
+                    # circuit breaker: after that, stay on bounded Sol for safety.
+                    _failed_blocks = int(state.get('sla_failed_blocks_this_forward', 0) or 0) + 1
+                    state['sla_failed_blocks_this_forward'] = _failed_blocks
+                    _phase = str(state.get('sla_zero_copy_phase', 'unknown'))
+                    if _failed_blocks >= 2:
+                        state['sol_mode'] = 'sol'
+                        state['auto_attention_selected_mode'] = 'sol'
+                        _scope = 'sticky_after_second_failed_block'
+                    else:
+                        _scope = 'current_block_only'
+                    _lm_print(
+                        '[MiniMaxH3 LongMedia][SLA FALLBACK] '
+                        f'block={self.index} phase={_phase} retries_exhausted=2; '
+                        f'fallback={_scope}; next_block_sla={_failed_blocks < 2}',
+                        flush=True,
+                    )
+                    # v0.4.46: force the bounded embedded-Sol implementation for
+                    # this emergency block.  Calling _run_h3_sol_attention while
+                    # state.sol_mode == "existing" returns to stock H3 attention,
+                    # whose v.clone() allocates another ~1.5 GiB at S~=112k and
+                    # immediately OOMs.  Temporarily select Sol, then restore the
+                    # user's/AUTO mode if the circuit breaker is not sticky.
+                    _saved_sol_mode = str(state.get('sol_mode', 'existing'))
+                    if _failed_blocks < 2:
+                        state['sol_mode'] = 'sol'
+                    try:
+                        attn_out = _run_h3_sol_attention(
+                            block.attn, h, rope_freqs, transformer_options, state,
+                            measure=measure if trace_this else None,
+                        )
+                    finally:
+                        if _failed_blocks < 2:
+                            state['sol_mode'] = _saved_sol_mode
+                    if _failed_blocks < 2:
+                        _v12_release_int8_sol_forward(state, block_index=self.index)
             elif trace_this:
                 attn_out = self._trace_attention(
                     block.attn, h, rope_freqs, transformer_options, measure
@@ -5758,7 +6474,7 @@ class _H3MLPChunkPatch:
                         pass
                 if not state.get('v353_stage_barrier_announced', False):
                     _lm_print(
-                        '[MiniMaxH3 LongMedia][0.3.53 ULTRA STAGE BARRIER] '
+                        '[MiniMaxH3 LongMedia][ULTRA STAGE BARRIER] '
                         'attention activation retired before FFN; CUDA synchronized; cache trimmed',
                         flush=True,
                     )
@@ -6347,7 +7063,7 @@ class MiniMaxH3LatentLabMLPChunking:
                 min_ram_headroom_gb=10.0,
             )
             _lm_print(
-                '[MiniMaxH3 LongMedia][0.3.75 RAM FILE-CACHE PREWARM] '
+                '[MiniMaxH3 LongMedia][RAM FILE-CACHE PREWARM] '
                 f"status={_prewarm.get('status')} payloads={_prewarm.get('payloads',0)} "
                 f"payload={_prewarm.get('payload_bytes',0)/(1024**3):.1f}GB "
                 f"budget={_prewarm.get('budget_bytes',0)/(1024**3):.1f}GB "
@@ -6368,8 +7084,42 @@ class MiniMaxH3LatentLabMLPChunking:
             _recent_aimdo
             and _out_of_core_streaming
             and _runtime_backend in ('int8', 'int8-convrot-w4a4')
-            and _runtime_quant_variant != 'w4a8'
         )
+        # v0.4.41: decide the W4A8 resident-window candidate BEFORE the
+        # prefetch hard-gate.  v0.4.40 armed a persistent VBAR floor but then
+        # accidentally left W4A8 classified as the legacy guarded path, which
+        # forced prefetch_dynamic_vbars=False at the DIFFUSION_MODEL boundary.
+        # The result was exactly the observed ~regular GPU-util sawtooth: every
+        # H3 block had to synchronously fault its weights instead of overlapping
+        # the next block through Comfy's native threaded prefetch queue.
+        #
+        # The fixed policy is deliberately two-dimensional:
+        #   residency: persistent watermark floor keeps a hot low-address prefix
+        #   transport: native AIMDO threaded prefetch streams the unprotected tail
+        # This preserves exact model math and still leaves an activation reserve.
+        # v0.4.40: static AIMDO resident window for the exact problematic
+        # class: recent AIMDO, oversized W4A8 H3, 15-18.5 GB dedicated VRAM.
+        # AIMDO evicts from high VBAR addresses downward and honors
+        # watermark_limit as a non-evictable low-address floor.  Protect ~66%
+        # of physical VRAM, capped so 2.75-3+ GB remains for activations, sparse
+        # attention workspace, allocator fragmentation and the streamed tail.
+        _persistent_window_candidate = bool(
+            _recent_aimdo
+            and _out_of_core_streaming
+            and _runtime_quant_variant == 'w4a8'
+            and _device_vram_gb is not None
+            and 15.0 <= _device_vram_gb <= 18.5
+        )
+        _vbar_window_target_bytes = 0
+        if _persistent_window_candidate:
+            _total_mb = float(_device_vram_gb) * 1024.0
+            _target_mb = min(11264.0, max(8192.0, _total_mb * 0.66))
+            _reserve_floor_mb = 2816.0
+            _target_mb = min(_target_mb, max(0.0, _total_mb - _reserve_floor_mb))
+            _vbar_window_target_bytes = int(_target_mb * 1024.0 * 1024.0)
+
+        _w4a8_resident_fastpath = bool(_persistent_window_candidate)
+        _native_transport_fastpath = bool(_native_aimdo_fastpath or _w4a8_resident_fastpath)
         _disable_dynamic_vbar_prefetch = (
             (
                 _forced_streaming_mode or _out_of_core_streaming or (
@@ -6377,26 +7127,51 @@ class MiniMaxH3LatentLabMLPChunking:
                     and (_runtime_quant_variant == 'w4a8' or _int8_low_vram_streaming)
                 )
             )
-            and not _native_aimdo_fastpath
+            and not _native_transport_fastpath
         )
+
         _lm_print(
-            '[MiniMaxH3 LongMedia][0.3.77 NATIVE AIMDO FASTPATH] '
+            '[MiniMaxH3 LongMedia][NATIVE AIMDO FASTPATH] '
             f'aimdo={_aimdo_raw or "unknown"} kitchen={_kitchen_raw or "unknown"} '
             f'recent_aimdo={_recent_aimdo} native_int8_fastpath={_native_aimdo_fastpath} '
             f'out_of_core={_out_of_core_streaming} requested_mode={memory_mode}; '
-            f'prefetch={"NATIVE" if _native_aimdo_fastpath else "GUARDED"}; H3 math=UNCHANGED',
+            f'prefetch={"NATIVE_THREADED" if _native_transport_fastpath else "GUARDED_SYNC"}; '
+            f'persistent_window={_persistent_window_candidate} '
+            f'target={_vbar_window_target_bytes/(1024.0**2):.0f}MB; H3 math=UNCHANGED',
             flush=True,
         )
         transformer_options['latentlab_disable_dynamic_vbar_prefetch'] = bool(_disable_dynamic_vbar_prefetch)
         if _runtime_backend in ('int8', 'int8-convrot-w4a4') or _forced_streaming_mode:
             transformer_options['prefetch_dynamic_vbars'] = not bool(_disable_dynamic_vbar_prefetch)
+        if _w4a8_resident_fastpath:
+            # Hard invariant for the 16 GB W4A8 resident-window class: the
+            # watermark floor without asynchronous transport only reduces VRAM
+            # churn; it does not hide PCIe faults.  Never let the legacy hard
+            # gate silently override the pipelined resident policy again.
+            transformer_options['latentlab_disable_dynamic_vbar_prefetch'] = False
+            transformer_options['prefetch_dynamic_vbars'] = True
+            transformer_options['latentlab_h3_true_lookahead'] = False
+            transformer_options['latentlab_h3_prefetch_depth'] = 2
+            transformer_options['latentlab_h3_prefetch_pipeline'] = 'native_one_ahead'
+            transformer_options['latentlab_h3_residency_strategy'] = 'persistent_prefix_plus_prefetched_tail'
+            _lm_print(
+                '[MiniMaxH3 LongMedia][COMPUTE-FIRST POLICY] '
+                'W4A8 resident_window => prefetch_dynamic_vbars=True, hard_gate=False; '
+                'pipeline=persistent_prefix+native_one_ahead; custom lookahead disabled after no-gain A/B',
+                flush=True,
+            )
         if _forced_streaming_mode:
-            _lm_print('[MiniMaxH3 LongMedia][0.3.52 OUT-OF-CORE] '
+            _lm_print('[MiniMaxH3 LongMedia][OUT-OF-CORE] '
                 f'memory_mode={memory_mode}: speculative prefetch disabled; demand residency + activation reserve active', flush=True)
 
         if _runtime_backend in ('int8', 'int8-convrot-w4a4'):
-            if _runtime_quant_variant == 'w4a8':
-                _residency_message = 'W4A8 detected: dynamic-VBAR prefetch DISABLED; AUTO MLP owns activation headroom'
+            if _runtime_quant_variant == 'w4a8' and _w4a8_resident_fastpath:
+                _residency_message = (
+                    f'W4A8 on {_device_vram_gb:.1f} GB GPU: recent AIMDO DynamicVRAM/threaded prefetch ENABLED; '
+                    'resident-window policy keeps more weights hot and uses bounded activation reserve'
+                )
+            elif _runtime_quant_variant == 'w4a8':
+                _residency_message = 'W4A8 legacy AIMDO: guarded demand streaming retained for safety'
             elif _native_aimdo_fastpath:
                 _residency_message = (
                     f'native INT8 on {_device_vram_gb:.1f} GB GPU: recent AIMDO native DynamicVRAM/threaded prefetch ENABLED; '
@@ -6415,8 +7190,8 @@ class MiniMaxH3LatentLabMLPChunking:
             )
             if _runtime_quant_variant == 'w4a8':
                 _lm_print(
-                    '[MiniMaxH3 LongMedia][V30 W4A8 THROUGHPUT] AUTO MLP ceiling=8192; '
-                    'target is fewer native quantized dispatches per H3 block',
+                    '[MiniMaxH3 LongMedia][W4A8 PIPELINED RESIDENT WINDOW] persistent AIMDO watermark floor + native threaded VBAR prefetch + AUTO MLP ceiling=8192; '
+                    'resident prefix stays hot while streamed tail is prefetched one block ahead',
                     flush=True,
                 )
         if WrappersMP is not None:
@@ -6620,7 +7395,42 @@ class MiniMaxH3LatentLabMLPChunking:
             'vbar_last_promote_free_mb': 0.0,
             'vbar_governor_skip_pressure': 0,
             'vbar_governor_skip_hysteresis': 0,
+            # v0.4.40 persistent AIMDO window: runtime-only scheduling state.
+            'vbar_persistent_window_enabled': bool(_persistent_window_candidate),
+            'vbar_window_target_bytes': int(_vbar_window_target_bytes),
+            'vbar_window_armed': False,
+            'vbar_window_armed_forward': None,
         }
+        # v0.4.35: preserve external SLA only when allocator preflight proves it fits.
+        # The v0.4.32 in-place compatibility kernel removed the full-size output
+        # allocation, but its per-query-block Triton launch strategy is much slower
+        # on real H3 workloads (especially SM120 / RTX 50-series).  Preserve the
+        # external kernel as the fast existing-attention path. AUTO can still route
+        # large/unsafe geometries to LongMedia's bounded embedded Sol path before
+        # QKV allocation, so we keep both speed and the low-VRAM escape hatch.
+        _existing_attn = transformer_options.get('optimized_attention_override')
+        _existing_module = str(getattr(_existing_attn, '__module__', '') or '') if _existing_attn is not None else ''
+        _external_sla, _external_sla_source = _detect_external_h3_sla(transformer_options)
+        state['external_sla_detected'] = bool(_external_sla)
+        state['external_sla_original_module'] = _external_sla_source if _external_sla else None
+        state['external_sla_memory_safe'] = False
+        state['external_sla_config'] = _extract_external_sla_config(_existing_attn) if _external_sla else None
+        state['external_sla_direct_fastpath'] = bool(_external_sla and _existing_attn is not None)
+        state['sla_zero_copy_calls'] = 0
+        state['sla_zero_copy_announced'] = False
+        state['external_sla_memory_safe_reason'] = (
+            'v0.4.35 fast-path: external SLA preserved only inside allocator-safe envelope; unsafe geometry uses embedded Sol'
+            if _external_sla else
+            ('non-SLA override preserved' if _existing_attn is not None else 'no external optimized_attention_override')
+        )
+        if _external_sla:
+            _lm_print(
+                '[MiniMaxH3 LongMedia][SLA FAST PATH] external SLA detected; '
+                'native zero-copy SLA execution enabled; ModelPatcher hook loss bypassed; '
+                'fused-QKV strides preserved and full-size SLA o_s allocation eliminated',
+                flush=True,
+            )
+
         # v0.3.63 authoritative residency wiring. These are runtime-only object
         # references carried through shallow transformer_options copies.
         transformer_options['latentlab_h3_residency_state'] = state
@@ -6630,7 +7440,7 @@ class MiniMaxH3LatentLabMLPChunking:
         state['vbar_forward_promote_count'] = 0
         state['vbar_forward_skip_pressure'] = 0
 
-        if WrappersMP is not None and _disable_dynamic_vbar_prefetch:
+        if WrappersMP is not None and (_disable_dynamic_vbar_prefetch or _persistent_window_candidate):
             import functools
             wrappers = transformer_options.setdefault('wrappers', {})
             diffusion_model = wrappers.setdefault(WrappersMP.DIFFUSION_MODEL, {})
@@ -6641,7 +7451,7 @@ class MiniMaxH3LatentLabMLPChunking:
             )
             diffusion_model['MiniMaxH3LatentLabRuntimePrefetch'] = [_bound_runtime_wrapper]
             _lm_print(
-                '[MiniMaxH3 LongMedia][0.3.64 VBAR BIND] runtime wrapper bound directly to active ModelPatcher/state',
+                '[MiniMaxH3 LongMedia][VBAR BIND] persistent/guarded runtime wrapper bound directly to active ModelPatcher/state',
                 flush=True,
             )
 
@@ -6741,7 +7551,7 @@ def _h3_vbar_residency_step_governor(block_state, snapshot, step=None):
         block_state['vbar_hard_floor_mb'] = hard_mb
         block_state['vbar_promote_floor_mb'] = promote_mb
         _lm_print(
-            '[MiniMaxH3 LongMedia][0.3.62 VBAR RESIDENCY] '
+            '[MiniMaxH3 LongMedia][VBAR RESIDENCY] '
             f'step={step} mode={mode} free={free_mb:.0f}MB '
             f'loaded={loaded_before/(1024.0**2):.0f}MB; watermark reopened for next forward',
             flush=True,
@@ -6750,7 +7560,7 @@ def _h3_vbar_residency_step_governor(block_state, snapshot, step=None):
         block_state['vbar_governor_error'] = f'{type(exc).__name__}: {exc}'
         if not block_state.get('vbar_governor_error_announced'):
             block_state['vbar_governor_error_announced'] = True
-            _lm_print('[MiniMaxH3 LongMedia][0.3.62 VBAR RESIDENCY] disabled: ' + block_state['vbar_governor_error'], flush=True)
+            _lm_print('[MiniMaxH3 LongMedia][VBAR RESIDENCY] disabled: ' + block_state['vbar_governor_error'], flush=True)
 
 class _FirstStepMemoryProfilerSampler:
     """Transparent SAMPLER proxy that profiles allocator activity from before step 1."""
@@ -7743,7 +8553,7 @@ def _v57_build_segment_prompt(base_prompt, plan, segment_index):
         )
         selected = (str(selected).rstrip() + continuity_lock).strip()
         _lm_print(
-            '[MiniMaxH3 LongMedia][0.3.81 TWO-PASS CONTINUITY LOCK] '
+            '[MiniMaxH3 LongMedia][TWO-PASS CONTINUITY LOCK] '
             'pass=1 full-segment shot/identity lock active; AV carry restored to overlap-sized baseline',
             flush=True,
         )
@@ -8003,7 +8813,7 @@ def _v57_preencode_segment_conditionings(clip, base_prompt, positive, plan, v329
                 )
                 total_dropped_image_refs += int(dropped)
                 _lm_print(
-                    '[MiniMaxH3 LongMedia][0.3.84 IDENTITY RE-ANCHOR] '
+                    '[MiniMaxH3 LongMedia][IDENTITY RE-ANCHOR] '
                     f'pass=1 retained {sum(1 for b in identity_blocks if str(b.get("kind", "")).lower() == "image")} '
                     'still-image latent blocks WITHOUT Picture tokenizer items; native motion context owns shot/motion',
                     flush=True,
@@ -8044,7 +8854,7 @@ def _v57_preencode_segment_conditionings(clip, base_prompt, positive, plan, v329
         )
     if decouple_image_refs and total_dropped_image_refs > 0:
         _lm_print(
-            '[MiniMaxH3 LongMedia][0.3.43 REF DECOUPLING] '
+            '[MiniMaxH3 LongMedia][REF DECOUPLING] '
             f'pass>0 removed {int(total_dropped_image_refs)} original still-image ref blocks; '
             'later passes keep generated AV context and any non-image refs only',
             flush=True,
@@ -8270,7 +9080,7 @@ def _v83_attach_native_motion_context(positive_list, previous_av, plan, segment_
         overhang = float(prev_audio.shape[-1]) - frame_rescale * float(source_frames)
         if not (0.0 <= overhang < 1.0):
             _lm_print(
-                '[MiniMaxH3 LongMedia][0.3.105 AUDIO GRID] '
+                '[MiniMaxH3 LongMedia][AUDIO GRID] '
                 f'unexpected previous AV audio grid: audio_t={int(prev_audio.shape[-1])} '
                 f'video_frames={int(source_frames)} raw_overhang={overhang:.6f}; using 0.0',
                 flush=True,
@@ -8328,9 +9138,9 @@ def _v83_attach_native_motion_context(positive_list, previous_av, plan, segment_
 
     if attached:
         _lm_print(
-            '[MiniMaxH3 LongMedia][0.3.108 VIDEO MOTION CONTEXT + SOURCE AUDIO CLOCK] '
+            '[MiniMaxH3 LongMedia][VIDEO MOTION CONTEXT + SOURCE AUDIO CLOCK] '
             f'segment0->1 context={run}f hidden_overlap={overlap}f guide_shift={guide_shift}f video_steps={context_t} indices={offsets}; '
-            f'audio_steps={audio_t}; source_audio_clock={bool(getattr(plan, 'lip_sync_native_audio_guide', False))}; target head is FRESH and generated under native minimax_keyframes; '
+            f"audio_steps={audio_t}; source_audio_clock={bool(getattr(plan, 'lip_sync_native_audio_guide', False))}; target head is FRESH and generated under native minimax_keyframes; "
             'existing stitch trims the repeated guide span',
             flush=True,
         )
@@ -8450,7 +9260,7 @@ def _v0322_attach_native_av_context_ref(positive_list, previous_av, plan, segmen
         )
         if first_handoff_bridge:
             _lm_print(
-                '[MiniMaxH3 LongMedia][0.3.81 FIRST HANDOFF BRIDGE] '
+                '[MiniMaxH3 LongMedia][FIRST HANDOFF BRIDGE] '
                 f'segment0->1 uses {int(run)}f generated raw AV history while frozen overlap remains {int(overlap)}f; '
                 'original still-image refs remain decoupled; pass>=2 unchanged from 0.3.77',
                 flush=True,
@@ -9545,7 +10355,29 @@ def _v85_parse_multiclip_json(raw, fallback_prompt, fallback_duration):
 
 def _v85_multiclip_geometry(clips, overlap_frames):
     overlap = int(overlap_frames)
-    lengths = tuple(int(align_frame_count(max(5, round(float(c['duration']) * FPS)))) for c in clips)
+    # v0.4.56 continuity: MultiClip previously used the minimal 5-frame native
+    # H3 continuation head. That is enough to keep the temporal lattice valid,
+    # but too short to stabilize exposure/illumination across independently
+    # conditioned clips. Use a longer native context while preserving the
+    # *visible* duration contract of the old 5-frame path.
+    #
+    # H3 aligned clip lengths are 17*k+5. Replacing the hidden overlap 5 -> 22
+    # adds exactly one 17-frame H3 period to the hidden prefix, so extend every
+    # continuation clip by the same delta. After stripping the larger prefix at
+    # decode, each clip contributes exactly the same number of visible frames
+    # as before. No duration drift, no RGB blending, no frame duplication.
+    baseline_overlap = 5
+    base_lengths = [int(align_frame_count(max(5, round(float(c['duration']) * FPS)))) for c in clips]
+    extra_hidden = max(0, int(overlap) - int(baseline_overlap))
+    if extra_hidden % 17 != 0:
+        raise ValueError(
+            f'MultiClip internal overlap must differ from the 5-frame baseline by whole 17-frame H3 periods; '
+            f'got overlap_frames={overlap}.'
+        )
+    lengths = []
+    for i, n in enumerate(base_lengths):
+        lengths.append(int(n if i == 0 else n + extra_hidden))
+    lengths = tuple(lengths)
     if any(n <= overlap for n in lengths[1:]):
         raise ValueError(f'MultiClip every continuation clip must be longer than overlap_frames={overlap}.')
     starts = [0]
@@ -9609,7 +10441,7 @@ def _v113_lock_source_audio_in_target(target_av, audio_vae, source_audio, start_
     video, audio = unpack_av_samples(locked)
     locked = set_stream_denoise(locked, 1.0, 0.0, 'replace', NestedTensor)
     _lm_print(
-        '[MiniMaxH3 LongMedia][0.3.113 LOCKED TARGET AUDIO] '
+        '[MiniMaxH3 LongMedia][LOCKED TARGET AUDIO] '
         f'global={int(start_frame)}f length={int(length_frames)}f '
         f'samples={start_sample}..{end_sample} target_audio_t={int(audio.shape[-1])}; '
         'video_denoise=1 audio_denoise=0',
@@ -9664,7 +10496,7 @@ def _v104_attach_native_lipsync_guide(positive, audio_vae, source_audio, plan, s
     if not attached:
         raise RuntimeError('lip_sync: native H3 Audio Guide could not attach to conditioning metadata')
     _lm_print(
-        '[MiniMaxH3 LongMedia][0.3.104 LIP SYNC GUIDE] '
+        '[MiniMaxH3 LongMedia][LIP SYNC GUIDE] '
         f'clip={int(segment_index)+1} local=0f global={start_frame}f '
         f'visible={int(timeline["visible_start"])}f length={length_frames}f '
         f'samples={start_sample}..{end_sample} latent_t={int(audio_latent.shape[-1])}; '
@@ -9737,7 +10569,7 @@ def _v107_attach_visible_lipsync_guide(positive, audio_vae, source_audio, plan, 
     if not attached:
         raise RuntimeError('lip_sync: visible native H3 Audio Guide could not attach')
     _lm_print(
-        '[MiniMaxH3 LongMedia][0.3.107 VISIBLE LIP SYNC GUIDE] '
+        '[MiniMaxH3 LongMedia][VISIBLE LIP SYNC GUIDE] '
         f'clip={idx+1} local_start={local_in}f global_start={mark_in}f '
         f'visible_frames={visible_frames}f samples={start_sample}..{end_sample} '
         f'encoded_ref_t={int(encoded_t)} guide_t={int(audio_latent.shape[-1])} '
@@ -9770,7 +10602,7 @@ def _v85_preencode_multiclip_conditionings(clip, positive, plan, prompts, v329_n
         raw.append(encoded)
     converted = tuple(comfy.sampler_helpers.convert_cond(cond) for cond in raw)
     _lm_print(
-        '[MiniMaxH3 LongMedia][0.3.108 MULTICLIP LIP SYNC CONDITIONING] '
+        '[MiniMaxH3 LongMedia][MULTICLIP LIP SYNC CONDITIONING] '
         f'pre-encoded {len(converted)} clips; shared native refs preserved; lip_sync_guide={bool(lip_sync_audio is not None)}',
         flush=True,
     )
@@ -9935,7 +10767,7 @@ def _longmedia_native_reference_execute_safe(native_cls, *, clip, **kwargs):
                     unpinned += 1
                 except Exception as exc:
                     _lm_print(
-                        '[MiniMaxH3 LongMedia][0.4.11 TE PINNED-MEMORY GATE] '
+                        '[MiniMaxH3 LongMedia][TE PINNED-MEMORY GATE] '
                         f'unpin warning {type(exc).__name__}: {exc}',
                         flush=True,
                     )
@@ -9946,7 +10778,7 @@ def _longmedia_native_reference_execute_safe(native_cls, *, clip, **kwargs):
         except Exception:
             pass
         _lm_print(
-            '[MiniMaxH3 LongMedia][0.4.11 TE PINNED-MEMORY GATE] '
+            '[MiniMaxH3 LongMedia][TE PINNED-MEMORY GATE] '
             f'disable_pinned_memory {previous}->True for NativeReferenceToVideo; '
             f'unpinned_patchers={unpinned}; restore_after_encode=True',
             flush=True,
@@ -9958,13 +10790,13 @@ def _longmedia_native_reference_execute_safe(native_cls, *, clip, **kwargs):
                 from comfy.cli_args import args as _args
                 _args.disable_pinned_memory = previous
                 _lm_print(
-                    '[MiniMaxH3 LongMedia][0.4.11 TE PINNED-MEMORY RESTORE] '
+                    '[MiniMaxH3 LongMedia][TE PINNED-MEMORY RESTORE] '
                     f'disable_pinned_memory restored to {previous}',
                     flush=True,
                 )
             except Exception as exc:
                 _lm_print(
-                    '[MiniMaxH3 LongMedia][0.4.11 TE PINNED-MEMORY RESTORE] '
+                    '[MiniMaxH3 LongMedia][TE PINNED-MEMORY RESTORE] '
                     f'warning {type(exc).__name__}: {exc}',
                     flush=True,
                 )
@@ -10001,13 +10833,13 @@ class MiniMaxH3LatentLabLongMediaSetup:
                 ),
                 'manual_duration': (
                     'FLOAT',
-                    {'default': 5.0, 'min': 0.1, 'max': 600.0, 'step': 0.1},
+                    {'default': 10.0, 'min': 0.1, 'max': 600.0, 'step': 0.1},
                 ),
                 'duration_source': (['auto', 'manual', 'audio', 'video', 'longest_input'],),
                 'segment_seconds': (
                     'FLOAT',
                     {
-                        'default': 8.0, 'min': 1.0, 'max': 60.0, 'step': 0.5,
+                        'default': 5.0, 'min': 1.0, 'max': 60.0, 'step': 0.5,
                         'tooltip': 'New output timeline per segment. overlap_frames is added as continuation context and does not reduce this duration.',
                     },
                 ),
@@ -10039,6 +10871,16 @@ class MiniMaxH3LatentLabLongMediaSetup:
                 ),
             },
             'optional': {
+                'release_guard': (
+                    'BOOLEAN',
+                    {
+                        'default': True,
+                        'tooltip': (
+                            'Production console guard. ON suppresses routine LongMedia diagnostics and keeps only actionable failures. '
+                            'OFF prints the full internal execution/memory/attention diagnostics for profiling and A/B tests.'
+                        ),
+                    },
+                ),
                 'clip_plan': ('H3_LONGMEDIA_CLIP_PLAN', {
                     'tooltip': 'Connect MiniMax H3 LongMedia Planner. It is authoritative only when workflow_mode=multiclip; all other workflows ignore the connected Planner.',
                 }),
@@ -10104,7 +10946,7 @@ class MiniMaxH3LatentLabLongMediaSetup:
     def setup(self, clip, vae, audio_vae, prompt, width, height, manual_duration,
               duration_source, segment_seconds, overlap_frames, resolution_mode,
               reference_budget, video_fps, video_mode, audio_mode,
-              clip_plan=None, workflow_mode='hybrid_auto', generation_mode='auto', conditioning_mode='auto_refs',
+              release_guard=True, clip_plan=None, workflow_mode='hybrid_auto', generation_mode='auto', conditioning_mode='auto_refs',
               first_frame_mode='latent_inject',
               first_frame_denoise=0.25, first_frame_blend_frames=3,
               opening_frame=None, multiclip_json=None,
@@ -10113,6 +10955,13 @@ class MiniMaxH3LatentLabLongMediaSetup:
               video_1=None, video_2=None, video_3=None,
               audio_1=None, audio_2=None, audio_3=None, unique_id=None):
         global NativeReferenceToVideo
+
+        _set_longmedia_release_guard(bool(release_guard))
+        if not bool(release_guard):
+            builtins.print(
+                '[MiniMaxH3 LongMedia] full diagnostics enabled',
+                flush=True,
+            )
 
         setup_memory_events = []
         # Start Setup from a clean model residency state.  This is especially
@@ -10173,16 +11022,16 @@ class MiniMaxH3LatentLabLongMediaSetup:
             multiclip_json = json.dumps(clips_payload, ensure_ascii=False)
             planner_global_prompt = str(external_clip_plan.get('global_prompt') or '').strip()
             _lm_print(
-                f'[MiniMaxH3 LongMedia][0.3.91 PLANNER] workflow=multiclip; external clip_plan selected; clips={len(clips_payload)}',
+                f'[MiniMaxH3 LongMedia][PLANNER] workflow=multiclip; external clip_plan selected; clips={len(clips_payload)}',
                 flush=True,
             )
         elif external_clip_plan is not None:
             _lm_print(
-                f'[MiniMaxH3 LongMedia][0.3.91 PLANNER] clip_plan connected but workflow={workflow_mode}; planner is ignored',
+                f'[MiniMaxH3 LongMedia][PLANNER] clip_plan connected but workflow={workflow_mode}; planner is ignored',
                 flush=True,
             )
         _lm_print(
-            f'[MiniMaxH3 LongMedia][0.3.109 WORKFLOW OWNERSHIP] selected={workflow_mode}; '
+            f'[MiniMaxH3 LongMedia][WORKFLOW OWNERSHIP] selected={workflow_mode}; '
             f'planner_connected={external_clip_plan is not None}; '
             f'planner_active={bool(workflow_mode == "multiclip" and external_clip_plan is not None)}',
             flush=True,
@@ -10255,6 +11104,7 @@ class MiniMaxH3LatentLabLongMediaSetup:
             plan,
             workflow_mode=workflow_mode,
             segmentation_active=bool(segmentation_active),
+            release_guard=bool(release_guard),
         )
 
         # Strict isolation: all ordinary non-segmentation workflows are exactly one
@@ -10275,7 +11125,7 @@ class MiniMaxH3LatentLabLongMediaSetup:
                 timeline_policy='single',
             )
             _lm_print(
-                '[MiniMaxH3 LongMedia][0.4.6 SEGMENTATION ISOLATION] '
+                '[MiniMaxH3 LongMedia][SEGMENTATION ISOLATION] '
                 f'workflow={workflow_mode}; segmentation_active=False; passes=1; '
                 'segment_duration_ignored=True; overlap_ignored=True',
                 flush=True,
@@ -10297,7 +11147,7 @@ class MiniMaxH3LatentLabLongMediaSetup:
                 segment_seeds=tuple(None for _ in fixed_lengths), timeline_policy='fixed',
             )
             _lm_print(
-                '[MiniMaxH3 LongMedia][0.3.111 UNIFIED CLIP ENGINE] '
+                '[MiniMaxH3 LongMedia][UNIFIED CLIP ENGINE] '
                 f'workflow=segmented_continuation timeline=fixed clips={len(fixed_lengths)} '
                 f'length={int(fixed_lengths[0])}f starts={list(fixed_starts)} overlap={int(plan.overlap_frames)}f '
                 f'final={int(plan.output_frames)}f generated={int(fixed_generated)}f trim={int(plan.trim_frames)}f; '
@@ -10312,7 +11162,10 @@ class MiniMaxH3LatentLabLongMediaSetup:
             # carries that real continuation head; the head is removed in latent space
             # before the single continuous decode. This keeps the concatenated video
             # latent on T=5*k+2 and avoids resetting VideoVAE temporal state per clip.
-            multiclip_native_overlap = 5
+            # v0.4.56: 22f = one full native H3 continuation period beyond the
+            # minimal 5f head. The geometry helper compensates continuation clip
+            # lengths so final visible duration stays identical to the old 5f path.
+            multiclip_native_overlap = 22
             mc_lengths, mc_starts, mc_output_frames = _v85_multiclip_geometry(
                 multiclip_clips, multiclip_native_overlap
             )
@@ -10327,7 +11180,7 @@ class MiniMaxH3LatentLabLongMediaSetup:
                 segment_seeds=tuple(c['seed'] for c in multiclip_clips), timeline_policy='native_continuous_vae',
             )
             _lm_print(
-                '[MiniMaxH3 LongMedia][0.4.21 MULTICLIP NATIVE CONTINUOUS VAE] '
+                '[MiniMaxH3 LongMedia][MULTICLIP NATIVE CONTINUOUS VAE] '
                 f'clips={len(mc_lengths)} lengths={list(mc_lengths)} starts={list(mc_starts)} '
                 f'native_overlap={int(multiclip_native_overlap)}f latent_overlap={int(video_latent_t(multiclip_native_overlap))}t '
                 f'final={int(mc_output_frames)}f; video_decode=single_continuous',
@@ -10336,19 +11189,19 @@ class MiniMaxH3LatentLabLongMediaSetup:
         mode = plan.mode
         if workflow_mode != 'manual':
             _lm_print(
-                f'[MiniMaxH3 LongMedia][0.3.13 MODE] workflow={workflow_mode} conditioning={conditioning_mode} '
+                f'[MiniMaxH3 LongMedia][MODE] workflow={workflow_mode} conditioning={conditioning_mode} '
                 f'passes={int(plan.passes)} segment_duration={float(effective_segment_seconds):.3f}s '
                 f'overlap={int(plan.overlap_frames)}f',
                 flush=True,
             )
             if workflow_mode == 'segmented_continuation':
                 _lm_print(
-                    '[MiniMaxH3 LongMedia][0.3.111 FIXED TIMELINE] '
+                    '[MiniMaxH3 LongMedia][FIXED TIMELINE] '
                     'fixed segmentation uses the shared MultiClip executor; only clip-boundary math differs',
                     flush=True,
                 )
             if workflow_mode == 'video_ref_edit':
-                _lm_print('[MiniMaxH3 LongMedia][0.3.0 VIDEO EDIT] video_1 drives motion/camera/staging; image_1..9 stay as <Picture N> replacement refs; audio_1 may be the paired source soundtrack', flush=True)
+                _lm_print('[MiniMaxH3 LongMedia][VIDEO EDIT] video_1 drives motion/camera/staging; image_1..9 stay as <Picture N> replacement refs; audio_1 may be the paired source soundtrack', flush=True)
 
         # PR#3 compatibility fix: when image refs are connected together with
         # audio but there is no source video, keep the NativeReferenceToVideo
@@ -10376,7 +11229,7 @@ class MiniMaxH3LatentLabLongMediaSetup:
             )
             generation_mode = 'auto'
             _lm_print(
-                '[MiniMaxH3 LongMedia][0.3.95 LIP SYNC] audio_mode=lip_sync; '
+                '[MiniMaxH3 LongMedia][LIP SYNC] audio_mode=lip_sync; '
                 'workflow preserved; Audio 1 remains native Ref2VA content reference + native per-clip H3 Audio Guide timing',
                 flush=True,
             )
@@ -10423,7 +11276,7 @@ class MiniMaxH3LatentLabLongMediaSetup:
                 audio_vae=audio_vae, video_vae=vae,
             )
             _lm_print(
-                '[MiniMaxH3 LongMedia][0.3.92 EXTENDER REF2VA PARITY] '
+                '[MiniMaxH3 LongMedia][EXTENDER REF2VA PARITY] '
                 f'all {len(multiclip_ref_images)} image refs remain native Picture refs on every clip; '
                 'no first-frame anchor; fresh AV target per clip + native Motion Context for clip 2+',
                 flush=True,
@@ -10612,7 +11465,7 @@ class MiniMaxH3LatentLabLongMediaSetup:
                 _setup_memory_isolation('after_hybrid_conditioning_release', unload_models=True)
             )
             if workflow_mode == 'loop':
-                _lm_print('[MiniMaxH3 LongMedia][0.3.0 LOOP] hybrid parity: image_1 is internally used as both first+last frame; image_2 ignored; refs start at image_3', flush=True)
+                _lm_print('[MiniMaxH3 LongMedia][LOOP] hybrid parity: image_1 is internally used as both first+last frame; image_2 ignored; refs start at image_3', flush=True)
             # In hybrid mode connected video/audio sockets are conditioning references,
             # not source streams to inject into later long-media segments.
             plan = _dc_replace(
@@ -10838,7 +11691,7 @@ class MiniMaxH3LatentLabLongMediaSetup:
                 lip_sync_target_audio_locked=True,
             )
             _lm_print(
-                '[MiniMaxH3 LongMedia][0.3.108 AUTHORITATIVE LOCAL-0 LIP SYNC] '
+                '[MiniMaxH3 LongMedia][AUTHORITATIVE LOCAL-0 LIP SYNC] '
                 'Audio1=full native Ref2VA reference + native local-0 timing guide on every clip; continuation keeps VIDEO Motion Context while preserving the source-audio guide through hidden overlap; original Audio1 restored at output',
                 flush=True,
             )
@@ -11072,7 +11925,7 @@ class MiniMaxH3LatentLabLongMediaNextSegment:
             audio_mask[..., :overlap_audio_t] = float(audio_context_denoise)
         if native_motion_head:
             _lm_print(
-                '[MiniMaxH3 LongMedia][0.3.87 FRESH CONTINUATION HEAD] '
+                '[MiniMaxH3 LongMedia][FRESH CONTINUATION HEAD] '
                 f'segment=1 overlap={overlap}f target head is zero-init/full-denoise; '
                 'continuity is owned by native minimax_keyframes, not latent copying',
                 flush=True,
@@ -11192,7 +12045,7 @@ class MiniMaxH3LatentLabSeededDisableNoise:
 
     def build(self, seed=0):
         _lm_print(
-            '[MiniMaxH3 LongMedia][0.4.2 SEEDED DISABLE NOISE] '
+            '[MiniMaxH3 LongMedia][SEEDED DISABLE NOISE] '
             f'add_noise=False; forwarded_seed={int(seed) & 0xFFFFFFFFFFFFFFFF}',
             flush=True,
         )
@@ -11306,7 +12159,7 @@ class MiniMaxH3LatentLabUltraPinnedMemoryGate:
                     try:
                         patcher.unpin_all_weights()
                     except Exception as exc:
-                        _lm_print('[MiniMaxH3 LongMedia][0.3.59 PINNED-MEMORY GATE] unpin warning: '
+                        _lm_print('[MiniMaxH3 LongMedia][PINNED-MEMORY GATE] unpin warning: '
                                   f'{type(exc).__name__}: {exc}', flush=True)
                 try:
                     import comfy.model_management as _mm
@@ -11315,13 +12168,13 @@ class MiniMaxH3LatentLabUltraPinnedMemoryGate:
                 except Exception:
                     pass
                 _lm_print(
-                    '[MiniMaxH3 LongMedia][0.3.59 PINNED-MEMORY GATE] '
+                    '[MiniMaxH3 LongMedia][PINNED-MEMORY GATE] '
                     f'disable_pinned_memory {previous}->True for ultra_low_vram H3 sampling; '
                     'existing model pins released before first weight fault',
                     flush=True,
                 )
             except Exception as exc:
-                _lm_print('[MiniMaxH3 LongMedia][0.3.59 PINNED-MEMORY GATE] unavailable: '
+                _lm_print('[MiniMaxH3 LongMedia][PINNED-MEMORY GATE] unavailable: '
                           f'{type(exc).__name__}: {exc}', flush=True)
         return (guider, previous)
 
@@ -11345,12 +12198,12 @@ class MiniMaxH3LatentLabUltraPinnedMemoryRestore:
                 from comfy.cli_args import args as _args
                 _args.disable_pinned_memory = bool(previous_disable_pinned_memory)
                 _lm_print(
-                    '[MiniMaxH3 LongMedia][0.3.59 PINNED-MEMORY RESTORE] '
+                    '[MiniMaxH3 LongMedia][PINNED-MEMORY RESTORE] '
                     f'disable_pinned_memory restored to {bool(previous_disable_pinned_memory)}',
                     flush=True,
                 )
             except Exception as exc:
-                _lm_print('[MiniMaxH3 LongMedia][0.3.59 PINNED-MEMORY RESTORE] warning: '
+                _lm_print('[MiniMaxH3 LongMedia][PINNED-MEMORY RESTORE] warning: '
                           f'{type(exc).__name__}: {exc}', flush=True)
         return (final_av,)
 
@@ -11402,6 +12255,11 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                 'video_context_denoise': ('FLOAT', {'default': 0.0, 'min': 0.0, 'max': 1.0, 'step': 0.01}),
                 'audio_context_denoise': ('FLOAT', {'default': 0.0, 'min': 0.0, 'max': 1.0, 'step': 0.01}),
                 'offload_completed_segments': ('BOOLEAN', {'default': True}),
+                'latent_hires_enabled': ('BOOLEAN', {'default': False}),
+                'latent_hires_model': ('STRING', {'default': ''}),
+                'latent_hires_scale': ('FLOAT', {'default': 2.0, 'min': 1.0, 'max': 4.0, 'step': 0.1}),
+                'latent_hires_precision': (['fp16', 'bf16', 'fp32'], {'default': 'fp16'}),
+                'latent_hires_align': ('INT', {'default': 32, 'min': 16, 'max': 256, 'step': 16}),
                 'refine_enabled': ('BOOLEAN', {'default': False}),
                 'refine_steps': ('INT', {'default': 2, 'min': 1, 'max': 1000, 'step': 1}),
             }
@@ -11556,9 +12414,87 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
             copied['noise_mask'] = noise_mask.detach().cpu()
         return copied
 
+    @staticmethod
+    def _hires_second_pass_sigmas(full_sigmas, requested_steps: int):
+        """Build an independent hi-res schedule from the original scheduler.
+
+        The reference workflow does not continue the low-sigma tail.  It starts a
+        fresh pass from an upscaled x0 using every-other scheduler point beginning
+        after sigma_max (8-step simple -> indices 1,3,5 for a 3-step pass), then 0.
+        This preserves the user's scheduler curve without inventing linear sigmas.
+        """
+        if not torch.is_tensor(full_sigmas):
+            full_sigmas = torch.as_tensor(full_sigmas, dtype=torch.float32)
+        sig = full_sigmas.detach().flatten()
+        if sig.numel() < 2:
+            raise RuntimeError('Latent Hi-Res needs a sigma schedule with at least one denoise step.')
+        steps = max(1, int(requested_steps))
+        nonzero_last = int(sig.numel()) - 2 if float(sig[-1]) == 0.0 else int(sig.numel()) - 1
+        candidates = list(range(1, nonzero_last + 1, 2))
+        if not candidates:
+            candidates = [0]
+        if len(candidates) < steps:
+            for idx in range(1, nonzero_last + 1):
+                if idx not in candidates:
+                    candidates.append(idx)
+                if len(candidates) >= steps:
+                    break
+        chosen = sorted(candidates[:steps])
+        selected = sig[torch.tensor(chosen, device=sig.device, dtype=torch.long)]
+        zero = torch.zeros((1,), device=sig.device, dtype=sig.dtype)
+        return torch.cat((selected, zero)), chosen
+
+    @staticmethod
+    def _hires_conditioning_without_video_keyframes(original_conds):
+        """Clone conditioning shells and drop geometry-bound VIDEO keyframes.
+
+        Native H3 keyframe rows must use the target spatial grid.  After spatial
+        latent upscale, low-res keyframe latents cannot be inserted into the new
+        layout (the exact 2550->5610 row mismatch seen in 0.4.52).  Ref2VA refs are
+        allowed to keep their own geometry, and audio-only keyframes are geometry
+        independent, so both remain intact.  The upscaled x0 itself carries the
+        image/continuation structure into the independent second pass.
+        """
+        out = {}
+        dropped = 0
+        for cond_name, entries in (original_conds or {}).items():
+            cloned = []
+            for entry in entries or []:
+                if isinstance(entry, dict):
+                    meta = dict(entry)
+                    kfs = list(meta.get('minimax_keyframes', []) or [])
+                    if kfs:
+                        keep = [dict(kf) for kf in kfs if kf.get('latent') is None]
+                        dropped += len(kfs) - len(keep)
+                        if keep:
+                            meta['minimax_keyframes'] = keep
+                        else:
+                            meta.pop('minimax_keyframes', None)
+                    cloned.append(meta)
+                elif isinstance(entry, (list, tuple)) and len(entry) >= 2 and isinstance(entry[1], dict):
+                    new_entry = list(entry)
+                    meta = dict(entry[1])
+                    kfs = list(meta.get('minimax_keyframes', []) or [])
+                    if kfs:
+                        keep = [dict(kf) for kf in kfs if kf.get('latent') is None]
+                        dropped += len(kfs) - len(keep)
+                        if keep:
+                            meta['minimax_keyframes'] = keep
+                        else:
+                            meta.pop('minimax_keyframes', None)
+                    new_entry[1] = meta
+                    cloned.append(new_entry)
+                else:
+                    cloned.append(entry)
+            out[cond_name] = cloned
+        return out, dropped
+
     def run(self, initial_av, long_media_plan, guider, sampler, sigmas, seed,
             video_context_denoise=0.0, audio_context_denoise=0.0,
-            offload_completed_segments=True, refine_enabled=False, refine_steps=2):
+            offload_completed_segments=True,
+            latent_hires_enabled=False, latent_hires_model='', latent_hires_scale=2.0,
+            latent_hires_precision='fp16', latent_hires_align=32,
+            refine_enabled=False, refine_steps=2):
         import comfy.samplers
         import comfy.sampler_helpers
         import comfy.model_management
@@ -11583,10 +12519,15 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
             runtime_refine_sigmas = None
             refine_switch_step = total_steps
             refine_steps_effective = 0
+        hires_second_sigmas = None
+        hires_sigma_indices = []
+        if bool(latent_hires_enabled) and bool(refine_enabled) and int(refine_steps_effective) > 0:
+            hires_second_sigmas, hires_sigma_indices = self._hires_second_pass_sigmas(full_sigmas, int(refine_steps_effective))
         _lm_print(
-            '[MiniMaxH3 LongMedia][0.4.7 REFINER RESTORED] '
-            f'enabled={bool(refine_enabled)}; total_steps={int(total_steps)}; '
-            f'base_steps={int(refine_switch_step)}; refine_steps={int(refine_steps_effective)}; '
+            '[MiniMaxH3 LongMedia][TWO-PASS HIRES] '
+            f'hires={bool(latent_hires_enabled)} refine={bool(refine_enabled)}; total_steps={int(total_steps)}; '
+            f'lowres_steps={int(refine_switch_step)}; second_pass_steps={int(refine_steps_effective)}; '
+            f'second_sigma_indices={hires_sigma_indices if hires_second_sigmas is not None else None}; '
             'model_lifecycle=single; second_model_load=False',
             flush=True,
         )
@@ -11629,9 +12570,11 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
 
         inner_model = loaded_models = multigpu_patchers = None
         runtime_thread_pool = None
-        stitched = previous_segment = None
+        stitched = previous_segment = previous_segment_continuation = None
         completed = 0
-        store_per_clip_native_decode = str(getattr(plan, 'mode', '') or '') == 'multiclip'
+        store_per_clip_native_decode = (
+            str(getattr(plan, 'workflow_mode', '') or '') == 'multiclip'
+        )
         per_clip_segment_latents = []
         per_clip_segment_lengths = []
         per_clip_hidden_overlaps = []
@@ -11679,14 +12622,14 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                             # no RGB seam search, no per-clip VideoVAE reset. The repeated
                             # 5f/2t head is removed later in LATENT space before one decode.
                             segment_av = MiniMaxH3LatentLabLongMediaNextSegment().prepare(
-                                plan, previous_segment, segment_index, 1.0, 1.0
+                                plan, previous_segment_continuation, segment_index, 1.0, 1.0
                             )[0]
                             segment_guider = _clone_guider_with_segment_audio(
-                                runtime_template_guider, plan, segment_index, previous_av=previous_segment
+                                runtime_template_guider, plan, segment_index, previous_av=previous_segment_continuation
                             )
                         elif segmentation_active:
                             segment_av = MiniMaxH3LatentLabLongMediaNextSegment().prepare(
-                                plan, previous_segment, segment_index,
+                                plan, previous_segment_continuation, segment_index,
                                 float(video_context_denoise), float(audio_context_denoise)
                             )[0]
                             segment_guider = _clone_guider_with_segment_audio(
@@ -11745,13 +12688,14 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                         native_mask = denoise_mask
 
                     _lm_print(
-                        '[MiniMaxH3 LongMedia][DEV STOCK SAMPLE CONTRACT] '
+                        '[MiniMaxH3 LongMedia][STOCK SAMPLE CONTRACT] '
                         f'unit={segment_index + 1}/{passes}; workflow={getattr(plan, "workflow_mode", "unknown")}; seed={int(effective_seed)}; '
                         'cfg_guider_sample=True; outer_sample_lifecycle=reused',
                         flush=True,
                     )
-                    # Stage 1: preserve the complete official CFGGuider.sample() extension
-                    # contract while reusing the already-open model lifecycle.
+                    # Stage 1: low-resolution pass.  When Latent Hi-Res is enabled
+                    # the callback's denoised x0 is the authoritative bridge, matching
+                    # SamplerCustomAdvanced.denoised_output in the author's workflow.
                     sampled_native = self._run_stock_sample_with_reused_lifecycle(
                         guider, device, native_noise, native_latent, sampler, local_sigmas,
                         native_mask, callback, False, int(effective_seed),
@@ -11761,41 +12705,138 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                     else:
                         sampled_packed = sampled_native
 
-                    # Stage 2: restore the proven KSampler-Advanced continuation semantics
-                    # without opening a second model lifecycle. Zero noise + same seed,
-                    # same sampler, same model/wrappers; only the tail sigmas are executed.
-                    if bool(refine_enabled) and int(refine_steps_effective) > 0:
-                        refine_sigmas_device = runtime_refine_sigmas.to(device)
+                    lowres_x0 = x0_output.get('x0')
+                    if bool(latent_hires_enabled):
+                        if lowres_x0 is None:
+                            raise RuntimeError(
+                                'Latent Hi-Res requires the low-res denoised x0 callback output; '
+                                'refusing to upscale the noisy solver state.'
+                            )
+                        # SamplerCustomAdvanced.denoised_output applies process_latent_out
+                        # before exposing x0. Mirror that contract exactly: callback x0 is
+                        # still in model-internal latent space and must not be fed directly
+                        # to the learned upscaler.
+                        lowres_x0 = model_patcher.model.process_latent_out(lowres_x0.cpu())
+                        if not getattr(lowres_x0, 'is_nested', False):
+                            raise RuntimeError('Latent Hi-Res expected native H3 NestedTensor denoised x0.')
+                        x0_streams = list(lowres_x0.unbind())
+                        x0_shapes = [x.shape for x in x0_streams]
+                        x0_packed, _ = comfy.utils.pack_latents(x0_streams)
+                        # MultiClip/segmented continuation must stay low-resolution and clean.
+                        # Carry x0, never the partial noisy solver state, into the next unit.
+                        base_continuation_output = self._unpack_segment_output(local, x0_packed, x0_shapes)
+                    else:
+                        base_continuation_output = self._unpack_segment_output(local, sampled_packed, latent_shapes)
 
+                    if bool(latent_hires_enabled):
+                        streams = list(lowres_x0.unbind())
+                        if len(streams) != 2:
+                            raise RuntimeError(f'Latent Hi-Res expected 2 AV x0 streams, got {len(streams)}')
+                        hires_video, hires_audio = streams
+                        if not str(latent_hires_model or '').strip() or str(latent_hires_model).startswith('('):
+                            raise RuntimeError('Latent Hi-Res is enabled but no model is selected in models/latent_upscale_models.')
+                        from .latent_hires import upscale_video
+                        _lm_print(
+                            '[MiniMaxH3 LongMedia][LATENT HIRES X0] '
+                            f'unit={segment_index + 1}/{passes}; source=denoised_output(process_latent_out(x0)); model={latent_hires_model}; '
+                            f'scale={float(latent_hires_scale):.2f} precision={latent_hires_precision}; '
+                            f'video_before={tuple(hires_video.shape)}; audio_x0_preserved=True; audio_preserved=True',
+                            flush=True,
+                        )
+                        try:
+                            comfy.model_management.soft_empty_cache()
+                        except Exception:
+                            pass
+                        hires_video = upscale_video(
+                            hires_video, str(latent_hires_model), float(latent_hires_scale),
+                            str(latent_hires_precision), device, int(latent_hires_align),
+                        )
+                        sampled_native = comfy.nested_tensor.NestedTensor((hires_video, hires_audio))
+                        latent_shapes = [x.shape for x in sampled_native.unbind()]
+                        sampled_packed, _ = comfy.utils.pack_latents(sampled_native.unbind())
+                        _lm_print(
+                            '[MiniMaxH3 LongMedia][LATENT HIRES X0] '
+                            f'video_after={tuple(hires_video.shape)}; audio_shape={tuple(hires_audio.shape)}; '
+                            f'independent_second_pass={bool(refine_enabled and int(refine_steps_effective) > 0)}',
+                            flush=True,
+                        )
+                        try:
+                            comfy.model_management.soft_empty_cache()
+                        except Exception:
+                            pass
+
+                    # Stage 2. With Latent Hi-Res this is an INDEPENDENT pass: fresh
+                    # same-seed noise + a new high-sigma schedule over the upscaled x0.
+                    # Without Latent Hi-Res, retain the legacy continuous low-sigma tail.
+                    if bool(refine_enabled) and int(refine_steps_effective) > 0:
                         refine_x0_output = {}
+                        if bool(latent_hires_enabled):
+                            if hires_second_sigmas is None:
+                                raise RuntimeError('Latent Hi-Res second-pass sigmas were not constructed.')
+                            refine_sigmas_device = hires_second_sigmas.to(device)
+                            import comfy.sample
+                            refine_latent = sampled_native
+                            refine_noise = comfy.sample.prepare_noise(refine_latent, int(effective_seed)).to(device=device, dtype=torch.float32)
+                            refine_mask = None
+
+                            # Reprocess conditioning for the new target H/W. Native VIDEO
+                            # keyframes are target-grid bound and therefore cannot be reused
+                            # at low-res. Ref2VA refs and audio-only guides remain valid.
+                            hires_conds, dropped_keyframes = self._hires_conditioning_without_video_keyframes(
+                                getattr(segment_guider, 'original_conds', {}) or {}
+                            )
+                            guider.original_conds = hires_conds
+                            _lm_print(
+                                '[MiniMaxH3 LongMedia][HIRES CONDITIONING] '
+                                f'unit={segment_index + 1}/{passes}; dropped_lowres_video_keyframes={int(dropped_keyframes)}; '
+                                'refs_preserved=True; audio_keyframes_preserved=True; source=x0',
+                                flush=True,
+                            )
+                        else:
+                            refine_sigmas_device = runtime_refine_sigmas.to(device)
+                            refine_latent = sampled_native
+                            refine_mask = native_mask
+                            if getattr(refine_latent, 'is_nested', False):
+                                refine_noise = comfy.nested_tensor.NestedTensor([torch.zeros_like(x) for x in refine_latent.unbind()])
+                            else:
+                                refine_noise = torch.zeros_like(refine_latent)
+
                         refine_callback = latent_preview.prepare_callback(
                             model_patcher, max(0, int(refine_sigmas_device.shape[-1]) - 1), refine_x0_output
                         )
-                        refine_latent = sampled_native
-                        if getattr(refine_latent, 'is_nested', False):
-                            refine_noise = comfy.nested_tensor.NestedTensor([
-                                torch.zeros_like(x) for x in refine_latent.unbind()
-                            ])
-                        else:
-                            refine_noise = torch.zeros_like(refine_latent)
-
                         sampled_native = self._run_stock_sample_with_reused_lifecycle(
                             guider, device, refine_noise, refine_latent, sampler, refine_sigmas_device,
-                            native_mask, refine_callback, False, int(effective_seed),
+                            refine_mask, refine_callback, False, int(effective_seed),
                         )
                         if getattr(sampled_native, 'is_nested', False):
                             sampled_packed, _ = comfy.utils.pack_latents(sampled_native.unbind())
+                            latent_shapes = [x.shape for x in sampled_native.unbind()]
                         else:
                             sampled_packed = sampled_native
                         _lm_print(
-                            '[MiniMaxH3 LongMedia][0.4.7 REFINER] '
+                            '[MiniMaxH3 LongMedia][HIRES SECOND PASS] '
                             f'unit={segment_index + 1}/{passes}; seed={int(effective_seed)}; '
-                            f'base_steps={int(refine_switch_step)}; refine_steps={int(refine_steps_effective)}; '
-                            'add_noise=False; same_seed=True; same_sampler=True; same_model_lifecycle=True',
+                            f'steps={int(refine_steps_effective)}; fresh_noise={bool(latent_hires_enabled)}; '
+                            f'sigma_indices={hires_sigma_indices if bool(latent_hires_enabled) else None}; '
+                            f'mode={"independent_x0_hires" if bool(latent_hires_enabled) else "continuous_tail"}',
                             flush=True,
                         )
 
                     sampled_output = self._unpack_segment_output(local, sampled_packed, latent_shapes)
+                    # v0.4.55 continuity regression fix:
+                    # With Latent Hi-Res disabled, preserve the exact pre-0.4.53
+                    # MultiClip/segmented-continuation contract: the next clip must
+                    # inherit the SAME final (including low-sigma refine) latent that
+                    # is emitted/stored for the current clip.  Using the pre-refine
+                    # base here makes the visible clip and its continuation anchor
+                    # disagree in pose/exposure and produces boundary seams.
+                    #
+                    # With Latent Hi-Res enabled, the displayed result is a different
+                    # spatial geometry, so continuation intentionally stays on the
+                    # low-res branch.
+                    previous_segment_continuation = (
+                        base_continuation_output if bool(latent_hires_enabled) else sampled_output
+                    )
                     previous_segment = sampled_output
                     if store_per_clip_native_decode:
                         stored_segment = self._cpu_latent_copy(sampled_output) if bool(offload_completed_segments) else sampled_output
@@ -11828,7 +12869,7 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                     completed += 1
 
                 _lm_print(
-                    '[MiniMaxH3 LongMedia][0.4.6 UNIFIED RUNTIME] '
+                    '[MiniMaxH3 LongMedia][UNIFIED RUNTIME] '
                     f'completed_segments={completed}; one_prepare_sampling=True; one_pre_run=True; one_cleanup=True',
                     flush=True,
                 )
@@ -11887,6 +12928,15 @@ class MiniMaxH3LatentLabLongMediaSampler:
 
     @classmethod
     def INPUT_TYPES(cls):
+        try:
+            from .latent_hires import scan_models as _scan_hires_models
+        except Exception:
+            _scan_hires_models = lambda: ['(place model in models/latent_upscale_models)']
+        _scanned_hires_models = [
+            str(x) for x in _scan_hires_models()
+            if str(x).strip() and not str(x).startswith('(')
+        ]
+        _hires_models = ['(disabled)'] + _scanned_hires_models
         return {
             'required': {
                 'initial_av': ('LATENT',),
@@ -12051,9 +13101,29 @@ class MiniMaxH3LatentLabLongMediaSampler:
                         'tooltip': 'Minimum driver-free VRAM target after each completed denoise step. Dead allocator cache is returned before the next H3 forward. 0 disables.',
                     },
                 ),
+                'latent_hires_enabled': (
+                    'BOOLEAN',
+                    {'default': False, 'tooltip': 'Learned H3 latent hi-res stage between base sampling and refine. Video latent only; audio is preserved exactly.'},
+                ),
+                'latent_hires_model': (
+                    _hires_models,
+                    {'default': _hires_models[0], 'tooltip': 'Checkpoint from ComfyUI/models/latent_upscale_models.'},
+                ),
+                'latent_hires_scale': (
+                    'FLOAT',
+                    {'default': 2.0, 'min': 1.0, 'max': 4.0, 'step': 0.1, 'tooltip': 'Spatial latent upscale multiplier. Model supports continuous 1.0x-4.0x.'},
+                ),
+                'latent_hires_precision': (
+                    ['fp16', 'bf16', 'fp32'],
+                    {'default': 'fp16', 'tooltip': 'Upscaler inference precision. fp16 is the practical default.'},
+                ),
+                'latent_hires_align': (
+                    'INT',
+                    {'default': 32, 'min': 16, 'max': 256, 'step': 16, 'tooltip': 'Output pixel alignment. 32 is recommended by the upstream model to avoid edge/light-band artifacts.'},
+                ),
                 'refine_enabled': (
                     'BOOLEAN',
-                    {'default': False, 'tooltip': 'Run the full connected SIGMAS schedule, then add extra low-noise refine steps using the exact tail sigmas from the base schedule.'},
+                    {'default': True, 'tooltip': 'Split the connected SIGMAS schedule into the main pass plus the final low-noise refine tail. Recommended production default: ON with 2 refine steps.'},
                 ),
                 'refine_add_noise': (
                     'BOOLEAN',
@@ -12069,7 +13139,7 @@ class MiniMaxH3LatentLabLongMediaSampler:
                         'default': 2, 'min': 1, 'max': 1000, 'step': 1,
                         'tooltip': (
                             'How many extra low-noise steps to run after the complete base sampler. '
-                            'Example: steps=12, refine_steps=3 -> stage1 runs 9 steps, stage2 runs the final 3 steps of the same 12-step schedule.'
+                            'Without Latent Hi-Res: stage2 runs the final low-sigma tail. With Latent Hi-Res: stage1 stops early, the denoised x0 is learned-upscaled, then refine_steps runs as an independent same-seed fresh-noise hi-res pass.'
                         ),
                     },
                 ),
@@ -12081,7 +13151,7 @@ class MiniMaxH3LatentLabLongMediaSampler:
                     ['auto', 'manual'],
                     {
                         'default': 'auto',
-                        'tooltip': 'auto uses the validated 0.4.0 attention/VRAM policy. manual exposes all low-level tuning widgets.',
+                        'tooltip': 'auto uses the validated production attention/VRAM policy. manual exposes all low-level tuning widgets.',
                     },
                 ),
             }
@@ -12102,6 +13172,8 @@ class MiniMaxH3LatentLabLongMediaSampler:
                inter_block_guard_cooldown_blocks=4, inter_block_guard_emergency_mb=512, inter_block_guard_emergency_cooldown_blocks=3,
                late_block_guard_start=40, late_block_guard_target_mb=6144, late_block_guard_min_cached_mb=512,
                step_boundary_cleanup_mb=2048,
+               latent_hires_enabled=False, latent_hires_model='', latent_hires_scale=2.0,
+               latent_hires_precision='fp16', latent_hires_align=32,
                refine_enabled=False, refine_add_noise=False, refine_seed=0,
                refine_steps=2,
                memory_mode='auto',
@@ -12109,7 +13181,56 @@ class MiniMaxH3LatentLabLongMediaSampler:
         from comfy_execution.graph_utils import GraphBuilder
 
         plan = long_media_plan
+        _set_longmedia_release_guard(bool(getattr(plan, 'release_guard', True)))
+        if not bool(getattr(plan, 'release_guard', True)):
+            builtins.print(
+                '[MiniMaxH3 LongMedia] sampler verbose diagnostics active',
+                flush=True,
+            )
         graph = GraphBuilder()
+
+        # v0.4.59: runtime-side repair for a known positional serialization
+        # corruption introduced while decorative UI section widgets were being
+        # serialized into LiteGraph widgets_values.  The fingerprint is deliberately
+        # strict so legitimate manual tuning is never rewritten.
+        _v459_corrupt = (
+            abs(float(sol_tau_start) - 4.0) < 1e-6
+            and str(sol_curve) == 'exponential'
+            and int(sol_min_tokens) == 256
+            and int(sol_qkv_chunk_tokens) == 0
+            and int(vram_activation_reserve_mb) == 512
+            and int(inter_block_vram_guard_mb) == 8192
+            and int(inter_block_guard_emergency_mb) == 4096
+            and int(inter_block_guard_emergency_cooldown_blocks) == 32
+            and int(late_block_guard_start) == 4
+            and int(late_block_guard_target_mb) == 4096
+            and int(late_block_guard_min_cached_mb) == 32
+            and int(step_boundary_cleanup_mb) == 5
+        )
+        if _v459_corrupt:
+            sol_tau_start = 1.3
+            sol_tau_end = 0.8
+            sol_curve = 'linear'
+            sol_min_tokens = 4096
+            sol_dense_percent = 0.0
+            sol_sink_conditioning = 'exact_kv'
+            sol_qkv_chunk_tokens = 8192
+            sol_out_proj_chunk_tokens = 24576
+
+            vram_activation_reserve_mb = 4096
+            inter_block_vram_guard_mb = 2048
+            inter_block_guard_cooldown_blocks = 4
+            inter_block_guard_emergency_mb = 512
+            inter_block_guard_emergency_cooldown_blocks = 3
+            late_block_guard_start = 40
+            late_block_guard_target_mb = 6144
+            late_block_guard_min_cached_mb = 512
+            step_boundary_cleanup_mb = 2048
+            _lm_print(
+                '[MiniMaxH3 LongMedia] repaired legacy sampler widget serialization state',
+                flush=True,
+            )
+
         sampler_mode = str(sampler_mode or 'auto')
         requested_memory_mode = str(memory_mode or 'auto')
         memory_profile = _resolve_h3_memory_mode(guider, requested_memory_mode)
@@ -12147,25 +13268,24 @@ class MiniMaxH3LatentLabLongMediaSampler:
             inter_block_guard_cooldown_blocks = min(max(int(inter_block_guard_cooldown_blocks), 1), 3)
             mlp_chunk_tokens = min(max(int(mlp_chunk_tokens), 128), 2048)
 
-        _lm_print('[MiniMaxH3 LongMedia][0.3.60 MEMORY POLICY V3] '
+        _lm_print('[MiniMaxH3 LongMedia][MEMORY POLICY V3] '
             f"requested={memory_profile['requested']} effective={memory_mode}; model={(float(_ms)/(1024**3)) if _ms else 0.0:.1f}GB GPU={(float(_gs)/(1024**3)) if _gs else 0.0:.1f}GB; "
             f"reason={memory_profile['reason']}; MLP={int(mlp_chunk_tokens)} QKV={int(sol_qkv_chunk_tokens)} OUT={int(sol_out_proj_chunk_tokens)} reserve={int(vram_activation_reserve_mb)}MB", flush=True)
         requested_attention_mode = str(attention_mode or 'auto')
+        # v0.4.33 keeps AUTO alive for segmented jobs.  v0.4.32 forced every
+        # segmented AUTO run to `existing`, which in turn forced the external SLA
+        # compatibility path and could make each denoise step several minutes.
+        # AUTO is now resolved inside the first H3 block and latched in runtime
+        # state, so all later passes keep the same attention family without losing
+        # the large-geometry embedded-Sol safety/performance route.
         effective_attention_mode = requested_attention_mode
+        attention_mode = effective_attention_mode
         if int(getattr(plan, 'passes', 1)) > 1 and requested_attention_mode == 'auto':
-            # AUTO previously made an independent token-threshold decision inside
-            # every pass. H3 alignment and per-pass conditioning change sequence
-            # length, so one movie could silently use existing/Sage in pass 0 and
-            # approximate Sol in pass 1. V14-V17 established that this operator
-            # switch is not quality-neutral on INT8/W4A8. A segmented job therefore
-            # keeps one exact attention family unless the user explicitly forces Sol.
-            effective_attention_mode = 'existing'
             _lm_print(
-                '[MiniMaxH3 LongMedia][V327 ATTENTION CONTINUITY LOCK] '
-                'segmented AUTO -> existing for every pass; force sol/scheduled_sol explicitly to override',
+                '[MiniMaxH3 LongMedia][ATTENTION CONTINUITY] '
+                'segmented AUTO remains enabled; first resolved attention family is latched across passes',
                 flush=True,
             )
-        attention_mode = effective_attention_mode
         if sampler_mode == 'auto':
             # v0.3.22 A/B override mode: INPUT_TYPES defaults remain the validated
             # production AUTO policy, but explicit widget edits are honored. This
@@ -12252,7 +13372,7 @@ class MiniMaxH3LatentLabLongMediaSampler:
                 sigmas, int(refine_steps)
             )
             _lm_print(
-                '[MiniMaxH3 LongMedia][0.4.7 REFINER RESTORED] '
+                '[MiniMaxH3 LongMedia][REFINER RESTORED] '
                 f'total_steps={int(base_steps)}; main_steps={int(refine_tail_start)}; '
                 f'refine_steps={int(refine_steps_effective)}; switch_step={int(refine_tail_start)}; '
                 'true_refiner=True; same_model_lifecycle=True; second_model_load=False',
@@ -12270,12 +13390,17 @@ class MiniMaxH3LatentLabLongMediaSampler:
             video_context_denoise=float(video_context_denoise),
             audio_context_denoise=float(audio_context_denoise),
             offload_completed_segments=bool(offload_completed_segments),
+            latent_hires_enabled=bool(latent_hires_enabled),
+            latent_hires_model=str(latent_hires_model),
+            latent_hires_scale=float(latent_hires_scale),
+            latent_hires_precision=str(latent_hires_precision),
+            latent_hires_align=int(latent_hires_align),
             refine_enabled=bool(refine_enabled),
             refine_steps=int(refine_steps),
         )
         stitched = unified_runtime.out(0)
         _lm_print(
-            '[MiniMaxH3 LongMedia][0.4.4 UNIFIED EXECUTOR] '
+            '[MiniMaxH3 LongMedia][UNIFIED EXECUTOR] '
             f'passes={int(plan.passes)}; graph_level_sampler_nodes=0; '
             'runtime_sampler_lifecycle=1; model_reload_between_segments=False',
             flush=True,
@@ -12303,8 +13428,12 @@ class MiniMaxH3LatentLabLongMediaSampler:
             "segment_starts_frames": list(plan.segment_starts),
             "overlap_frames": int(plan.overlap_frames),
             "sequential_context_carry": bool(int(getattr(plan, "passes", 1) or 1) > 1),
+            "latent_hires_enabled": bool(latent_hires_enabled),
+            "latent_hires_model": str(latent_hires_model) if bool(latent_hires_enabled) else None,
+            "latent_hires_scale": float(latent_hires_scale) if bool(latent_hires_enabled) else 1.0,
+            "latent_hires_precision": str(latent_hires_precision) if bool(latent_hires_enabled) else None,
             "advanced_refine_enabled": bool(refine_enabled),
-            "advanced_refine_add_noise": False,
+            "advanced_refine_add_noise": bool(latent_hires_enabled),
             "advanced_refine_legacy_add_noise_input_ignored": bool(refine_add_noise),
             "advanced_refine_seed": None,
             "advanced_refine_legacy_seed_input_ignored": int(refine_seed) & 0xFFFFFFFFFFFFFFFF,
@@ -12313,12 +13442,12 @@ class MiniMaxH3LatentLabLongMediaSampler:
             "advanced_refine_base_steps": int(base_steps),
             "advanced_refine_total_model_steps": int(base_steps),
             "advanced_refine_tail_start": int(refine_tail_start),
-            "advanced_refine_interval_policy": "true_two_stage_split_inside_single_model_lifecycle",
-            "advanced_refine_latent_source": "stage1_in_progress_solver_state",
+            "advanced_refine_interval_policy": ("independent_hires_second_pass" if bool(latent_hires_enabled) else "true_two_stage_split_inside_single_model_lifecycle"),
+            "advanced_refine_latent_source": ("stage1_denoised_x0_then_learned_upscale" if bool(latent_hires_enabled) else "stage1_in_progress_solver_state"),
             "advanced_refine_latent_clone": False,
             "advanced_refine_latent_rebuild": False,
-            "advanced_refine_renoise": False,
-            "advanced_refine_scheduler_source": "unified_runtime_true_advanced_split",
+            "advanced_refine_renoise": bool(latent_hires_enabled),
+            "advanced_refine_scheduler_source": ("independent_every_other_full_schedule" if bool(latent_hires_enabled) else "unified_runtime_true_advanced_split"),
             "advanced_refine_audio_policy": "joint_AV_continues_through_refiner",
             "advanced_refine_overlap_policy": "unchanged_single_execution",
             "hybrid_keyframe_scope": (
@@ -12360,9 +13489,11 @@ class MiniMaxH3LatentLabLongMediaSampler:
             "attention": {
                 "mode": str(effective_attention_mode),
                 "requested_mode": str(requested_attention_mode),
-                "continuity_locked": bool(
-                    int(getattr(plan, 'passes', 1)) > 1
-                    and requested_attention_mode == 'auto'
+                "continuity_locked": False,
+                "continuity_policy": (
+                    "first_auto_resolution_latched_across_passes"
+                    if int(getattr(plan, 'passes', 1)) > 1 and requested_attention_mode == 'auto'
+                    else "explicit_or_single_pass"
                 ),
                 "embedded_sol": str(attention_mode) in ("sol", "scheduled_sol"),
                 "sol_tau_start": float(sol_tau_start),
@@ -12479,7 +13610,11 @@ class MiniMaxH3LatentLabLongMediaDecode:
         video, audio = unpack_av_samples(final_av)
         video_vae = plan.video_vae
         audio_vae = plan.audio_vae
-        use_per_clip_native_video_decode = bool(final_av.get('_lm_per_clip_native_video_decode')) and bool(final_av.get('_lm_segment_latents'))
+        use_per_clip_native_video_decode = (
+            str(getattr(plan, 'workflow_mode', '') or '') == 'multiclip'
+            and bool(final_av.get('_lm_per_clip_native_video_decode'))
+            and bool(final_av.get('_lm_segment_latents'))
+        )
         segment_latents = list(final_av.get('_lm_segment_latents') or []) if use_per_clip_native_video_decode else []
         segment_lengths = list(final_av.get('_lm_segment_lengths') or []) if use_per_clip_native_video_decode else []
         segment_hidden_overlaps = list(final_av.get('_lm_segment_hidden_overlaps') or []) if use_per_clip_native_video_decode else []
@@ -12557,7 +13692,7 @@ class MiniMaxH3LatentLabLongMediaDecode:
                 'clips': latent_reports,
             })
             _lm_print(
-                '[MiniMaxH3 LongMedia][0.4.21 NATIVE CONTINUOUS VIDEO VAE] '
+                '[MiniMaxH3 LongMedia][NATIVE CONTINUOUS VIDEO VAE] '
                 f'clips={len(segment_latents)} overlap={native_overlap_frames}f/{overlap_video_t}t '
                 f'assembled_t={int(continuous_video.shape[2])} frames={continuous_frames}; '
                 'single_decode=True rgb_seam_processing=False',

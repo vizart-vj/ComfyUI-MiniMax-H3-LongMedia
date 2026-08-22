@@ -4,10 +4,15 @@ Production-oriented ComfyUI nodes for **MiniMax H3** long-form video/audio gener
 
 ![screenshot](ex.png)
 
-**Current stable release: 0.4.30**
+**Current stable release: 0.4.40**
 
-## What 0.4.30 provides
+## What 0.4.40 provides
 
+- Hardened `segmented_continuation` decode routing: native per-clip continuous VideoVAE decode is gated to `multiclip` on both sampler and decoder sides.
+- 22-frame native H3 MultiClip continuation context with exact final-latent handoff for stronger pose and illumination continuity.
+- Sectioned Setup and Sampler interfaces with serialization-safe UI headers and legacy workflow migration.
+- Integrated optional MiniMax H3 latent hi-res path with learned video-latent upscale and independent second-pass refinement.
+- Memory-safe SLA routing, resident INT8 MLP execution and adaptive VRAM policy while preserving stock/fallback math.
 - Unified clip executor for **MultiClip** and **fixed segmentation**.
 - Per-clip prompt/duration/seed Planner for MultiClip.
 - Separate **Global Prompt** and **Multiple Clips Prompt** inputs in **MiniMax H3 • Long Media Planner**.
@@ -89,7 +94,7 @@ Exposes advanced conditioning/timeline controls for controlled diagnostics and A
 
 ## MultiClip vs fixed segmentation
 
-0.4.30 keeps one sequential generation engine for both policies, but MultiClip and fixed segmentation have different output assembly semantics.
+0.4.40 keeps one sequential generation engine for both policies, but MultiClip and fixed segmentation have different output assembly semantics.
 
 ```text
 LongMedia clip executor
@@ -109,7 +114,7 @@ The shared generation engine owns:
 
 Output assembly is intentionally different:
 
-- **MultiClip** keeps all sequential video clips on one valid native H3 temporal latent lattice and performs **one VideoVAE decode** for the assembled timeline. Each continuation drops only the repeated native 5-frame / 2-latent-token prefix before assembly. This avoids per-clip VideoVAE temporal-state resets and RGB seam repair.
+- **MultiClip** keeps all sequential video clips on one valid native H3 temporal latent lattice and performs **one VideoVAE decode** for the assembled timeline. Each continuation drops only the repeated native 22-frame continuation prefix before assembly. This avoids per-clip VideoVAE temporal-state resets and RGB seam repair.
 - **segmented_continuation/manual segmentation** retain their continuation/stitch policy and are the only workflows allowed to own segmentation overlap controls.
 
 See:
@@ -134,8 +139,8 @@ If `clip_plan` remains connected while another workflow is selected, Setup ignor
 Example:
 
 ```text
-final duration    = 30 s
-segment_duration  = 8 s
+final duration    = 10 s
+segment_duration  = 5 s
 ```
 
 LongMedia creates H3-aligned fixed clips internally and trims the final stitched result back to the requested duration.
@@ -158,7 +163,7 @@ Uses input audio as H3 reference conditioning while retaining generated output a
 Uses input audio as H3 reference/timing context and restores the untouched source track in the final result.
 
 ### `lip_sync`
-Uses `audio_1` as the authoritative performance source for audiovisual timing and restores the untouched source track at output. There is no public manual reference-strength control in 0.4.30; lip-sync behavior is fixed by the mode rather than a user weight.
+Uses `audio_1` as the authoritative performance source for audiovisual timing and restores the untouched source track at output. There is no public manual reference-strength control; lip-sync behavior is fixed by the mode rather than a user weight.
 
 For performance prompts, describe the semantic action (`speaks`, `sings`) but let the source audio own phonetic timing.
 
@@ -212,7 +217,7 @@ LongMedia can run H3 checkpoints larger than physical VRAM by coordinating activ
 
 ## OOM prevention
 
-0.4.30 includes geometry-aware Governor V4 behavior. The runtime does not classify a huge sequence as safe solely because VRAM is free before transformer workspaces become resident.
+0.4.40 includes geometry-aware adaptive VRAM behavior. The runtime does not classify a huge sequence as safe solely because VRAM is free before transformer workspaces become resident.
 
 For dangerous long sequences on constrained GPUs, LongMedia can reject a full-sequence Sage/existing attention path **before QKV allocation** and route into bounded streamed Sol attention.
 
@@ -244,6 +249,7 @@ A single 30 s pass can be technically possible with the streamed memory path, bu
 - [Fixed segmentation prompting rules](docs/PROMPTING_SEGMENTATION.md)
 - [Sampler / VRAM / performance rules](docs/SAMPLER_OPTIMIZATION.md)
 - [Architecture](docs/ARCHITECTURE.md)
+- [0.4.40 release notes](docs/RELEASE_NOTES_0.4.40.md)
 - [0.4.30 release notes](docs/RELEASE_NOTES_0.4.30.md)
 - [Release audit](docs/RELEASE_AUDIT.md)
 
@@ -277,7 +283,7 @@ See:
 
 ## Release quality
 
-The stable 0.4.30 release consolidates the validated 0.4.11 runtime baseline with native continuous MultiClip VideoVAE decode, modulation-row compatibility fixes, and a quieter release console.
+The 0.4.40 release consolidates the validated production runtime, MultiClip continuity fixes, segmented decode isolation, latent hi-res integration, and a quiet production console.
 
 Release audit and verification details are documented in [`docs/RELEASE_AUDIT.md`](docs/RELEASE_AUDIT.md).
 

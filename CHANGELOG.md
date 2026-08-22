@@ -1,3 +1,15 @@
+# 0.4.40
+
+- Production release consolidating current continuity, segmented decode isolation, latent hi-res, SLA/VRAM, UI serialization and console-cleanup fixes.
+- Issue #8 hardened with a decoder-side `plan.mode == "multiclip"` guard.
+- Release metadata synchronized to 0.4.40.
+
+# 0.4.31
+
+- Fixed `nodes.py` import failure on Python 3.10/3.11: `f-string: unmatched '('` in the motion-context diagnostic at line 8333.
+- No sampling, conditioning, memory, Planner, MultiClip, segmentation, audio, or UI behavior changed.
+- PyTorch `KernelPreference` / `ScaleCalculationMode` deprecation messages are unrelated warnings and are not caused by LongMedia.
+
 # 0.4.30
 
 - MultiClip prompt authoring belongs to **MiniMax H3 Long Media Planner**: separate Global Prompt and Multiple Clips Prompt, Auto Import, and manual Import Prompt.
@@ -617,3 +629,9 @@ Current SAFE / long-generation baseline.
 ### 0.3.0 hotfix — Manual sampler UI
 - Fixed `sampler_mode=manual` not restoring the hidden legacy sampler controls on some ComfyUI frontend builds.
 - Auto/Manual visibility now watches the actual mode value during node drawing, so it updates immediately even when the frontend does not invoke the combo widget callback.
+
+## 0.4.36-DEV
+- Fixed loss of ModelPatcher-owned H3 SLA attention override in LongMedia.
+- Added native zero-copy SLA execution inside the H3 block path.
+- Eliminated full-size SLA `o_s` and contiguous Q/K/V copies.
+- Added strided LightX2V-compatible routing/kernel and streamed out projection.

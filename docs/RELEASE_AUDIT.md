@@ -1,19 +1,17 @@
-# 0.4.2 Release Audit
-
-Release base: validated public `0.4.11` runtime plus the current MultiClip/native-decode and compatibility fixes.
+# 0.4.40 Release Audit
 
 ## Release checks
 
-- package metadata synchronized to `0.4.2`;
-- Long Media Setup schema audited against Python call signatures;
-- `release_guard` removed from runtime plan/report and no longer exists as a workflow policy;
-- routine LongMedia console diagnostics suppressed in release mode;
-- MultiClip native continuous latent assembly validated on the H3 temporal grid;
-- modulation-row compatibility checked for chunked MLP and final output heads;
-- continuity, first-handoff, lip-sync, refiner, resolution and frontend regression tests run;
-- Python sources compile cleanly;
-- release ZIP integrity verified.
+- Package metadata synchronized across `VERSION`, `__init__.py`, `pyproject.toml`, README and release notes.
+- `segmented_continuation` is excluded from MultiClip native per-clip VideoVAE decode on both sampler and decoder sides.
+- MultiClip final-latent continuation and 22-frame native hidden context are preserved.
+- Legacy sectioned-UI positional serialization repair remains runtime-safe and silent in production mode.
+- Routine LongMedia diagnostics are suppressed by default; actionable failures remain visible.
+- Full diagnostics are available when `release_guard = false`.
+- Python runtime sources compile successfully.
+- Frontend JavaScript passes syntax validation.
+- Release ZIP integrity is verified and bytecode/cache files are excluded.
 
 ## Packaging
 
-The distributable contains release runtime code, documentation, web extensions, tests, workflow examples and third-party notices. Python bytecode/cache files are excluded.
+The distributable contains runtime code, documentation, web extensions, workflow examples, license and third-party notices. Development-only tests and CI files are excluded from the release asset.
