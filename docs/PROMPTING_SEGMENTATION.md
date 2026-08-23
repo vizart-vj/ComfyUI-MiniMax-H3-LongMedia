@@ -1,6 +1,6 @@
 # Fixed Segmentation Prompting Rules
 
-These rules target `workflow_mode=segmented_continuation` in ComfyUI-MiniMax-H3-LongMedia 0.4.2.
+These rules target `workflow_mode=segmented_continuation` in ComfyUI-MiniMax-H3-LongMedia 0.4.40.
 
 ## Mental model
 
@@ -37,17 +37,40 @@ The model should not be told that internal segmentation exists.
 
 ## Timestamped events
 
-For planned events in a long prompt, use global timestamps or shot markers that refer to the final movie timeline:
+`segmented_continuation` is not currently a timeline scheduler.
+
+The same continuous prompt is used as semantic guidance for every internal continuation segment. Timestamp ranges such as:
 
 ```text
-00:00-00:08  Wide frontal tracking shot; she walks toward camera.
-00:08-00:16  Camera gradually moves to her left side without interrupting her walk.
-00:16-00:24  Push into a close-up while she continues singing.
-00:24-00:30  Camera falls behind her as she walks away.
+00:00-00:05  She starts walking.
+00:05-00:10  She raises both arms.
+00:10-00:15  She crouches near the water.
 ```
 
-LongMedia localizes the prompt against each segment window. Keep timestamps global and monotonic.
+are **not automatically split, remapped, or localized** to the corresponding internal segment.
 
+Because every continuation segment still receives the same overall prompt, strongly timestamped action sequences may be interpreted more than once.
+
+For `segmented_continuation`, describe the intended video as one continuous action or scene:
+
+```text
+A single continuous shot. The woman walks along the shoreline throughout the
+sequence. She occasionally looks toward the camera, smiles, plays with her hair,
+and later slows near the water before continuing forward. The camera remains
+beside her and maintains the same direction and distance throughout.
+```
+
+Use continuity-oriented language such as:
+
+- `continues walking`;
+- `keeps moving in the same direction`;
+- `maintains the same camera relationship`;
+- `without stopping`;
+- `throughout the sequence`.
+
+Avoid detailed timestamp schedules when specific actions must occur at exact moments of the final video.
+
+If you need explicit chronological control, different actions at specific times, or separate prompts for different parts of the movie, use `multiclip` instead.
 ## Choosing `segment_duration`
 
 `segment_duration` means **new visible output timeline per segment**. Overlap is additional hidden continuation context and does not subtract from it.
@@ -88,7 +111,7 @@ The camera begins in a wide frontal tracking shot, slowly arcs to her left over
 the middle of the sequence, pushes into a close-up, then falls behind her near the end.
 ```
 
-For intentional edits, make the global cut time explicit.
+For intentional edits or explicitly scheduled shot changes, use `multiclip` so each planned section can own its prompt and duration.
 
 ## Reference modes
 
@@ -120,20 +143,39 @@ When `audio_mode=lip_sync`:
 
 ## When to use segmentation instead of MultiClip
 
-Choose segmentation when:
+Choose `segmented_continuation` when:
 
-- the movie is fundamentally one continuous prompt/action;
-- equal clip sizes are desirable;
-- you are using segmentation primarily to cap per-pass VRAM;
-- you do not need separate prompts or durations for each clip.
+- the movie is fundamentally one continuous scene or action;
+- the same semantic prompt can remain valid throughout the whole video;
+- equal internal segment sizes are desirable;
+- segmentation is primarily being used to control VRAM or generation stability;
+- you do not require exact action timing per segment.
 
-Choose MultiClip when shot durations and prompts must differ clip by clip.
+Choose `multiclip` when:
 
+- different parts of the video require different prompts;
+- actions must happen in a specific chronological order;
+- shot durations must be controlled individually;
+- you need explicit per-clip seeds or timing;
+- the final video is better described as a sequence of planned shots or actions.
+
+A useful rule of thumb:
+
+```text
+One continuous action, split internally for VRAM
+→ segmented_continuation
+
+Explicit timeline / different actions / planned shots
+→ multiclip
+```
 ## Checklist
 
-- Prompt describes one final movie, not internal segments.
-- Global timestamps are used for scheduled events.
-- `segment_duration` is chosen for quality/VRAM, not storytelling.
-- No repeated `begins/starts/establishing` language at invisible boundaries.
+- Prompt describes one continuous final scene, not the internal segments.
+- The same prompt should remain semantically valid throughout the whole video.
+- Avoid detailed timestamp ranges for scheduled actions.
+- Use continuity language such as `continues`, `keeps`, `maintains`, `throughout`.
+- Do not describe repeated startup actions such as `begins walking` or `starts singing` unless repetition is actually intended.
+- `segment_duration` is chosen for quality / VRAM / stability, not storytelling.
 - Reference identity wording remains consistent.
 - Lip-sync source is connected to `audio_1` when required.
+- Use `multiclip` when exact chronological action control is required.
