@@ -66,9 +66,11 @@ Use this when the opening image must strongly define the shot.
 
 ### `segmented_continuation`
 
-Creates an automatic **fixed-duration timeline** from `segment_duration` and runs it through the same clip executor used by MultiClip.
+Creates automatic fixed-duration continuation segments from `segment_duration` and runs them through the shared LongMedia clip executor.
 
-Use this for a continuous long prompt when equal segment sizes are desirable or when segmenting primarily to control VRAM.
+Use this for a **single continuous prompt** when equal internal segment sizes are desirable or when segmentation is primarily being used to control VRAM and generation stability.
+
+`segmented_continuation` does not currently remap detailed timestamp ranges to individual internal segments. If different actions or prompts must occur at specific points in the final timeline, use `multiclip`.
 
 ### `multiclip`
 
@@ -104,7 +106,7 @@ LongMedia clip executor
 
 The shared generation engine owns:
 
-- global/local timeline conversion;
+- segment-window and continuation geometry;
 - per-clip conditioning;
 - reference handling;
 - Motion Context;
@@ -115,7 +117,7 @@ The shared generation engine owns:
 Output assembly is intentionally different:
 
 - **MultiClip** keeps all sequential video clips on one valid native H3 temporal latent lattice and performs **one VideoVAE decode** for the assembled timeline. Each continuation drops only the repeated native 22-frame continuation prefix before assembly. This avoids per-clip VideoVAE temporal-state resets and RGB seam repair.
-- **segmented_continuation/manual segmentation** retain their continuation/stitch policy and are the only workflows allowed to own segmentation overlap controls.
+- **segmented_continuation/manual segmentation** retain their continuation/stitch policy and are intended for one continuous semantic prompt split internally for VRAM/stability. They do not currently provide per-segment timestamp remapping or timeline scheduling.
 
 See:
 
