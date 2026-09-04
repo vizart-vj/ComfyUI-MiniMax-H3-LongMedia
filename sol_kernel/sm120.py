@@ -10,6 +10,13 @@ import torch
 import triton
 import triton.language as tl
 
+from ..triton_windows_compat import install_windows_triton_build_compat
+
+# Must run before the first Triton kernel launch: Windows initializes cuda_utils
+# lazily from driver.active on that first launch.  The shim only augments JIT
+# include/library search paths and is a no-op on non-Windows platforms.
+_TRITON_WINDOWS_BUILD_COMPAT = install_windows_triton_build_compat()
+
 BLOCK_SIZE = 64
 GROUP_SIZE = 32
 HEAD_DIM = 128

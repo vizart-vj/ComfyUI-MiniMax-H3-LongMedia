@@ -1,0 +1,4991 @@
+{
+  "id": "8d6c17ea-ca57-402a-b735-5d07a3805c78",
+  "revision": 0,
+  "last_node_id": 332,
+  "last_link_id": 487,
+  "nodes": [
+    {
+      "id": 105,
+      "type": "SetNode",
+      "pos": [
+        -440,
+        280
+      ],
+      "size": [
+        210,
+        60
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 43,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "link": 157
+        }
+      ],
+      "outputs": [
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "links": null
+        }
+      ],
+      "title": "Set_audio_vae",
+      "properties": {
+        "Node name for S&R": "SetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes",
+        "previousName": "audio_vae"
+      },
+      "widgets_values": [
+        "audio_vae"
+      ],
+      "widgets_values_named": {
+        "Constant": "audio_vae"
+      },
+      "color": "#af3535",
+      "bgcolor": "rgba(24,24,27,.9)"
+    },
+    {
+      "id": 104,
+      "type": "SetNode",
+      "pos": [
+        -440,
+        170
+      ],
+      "size": [
+        210,
+        60
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 42,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "link": 156
+        }
+      ],
+      "outputs": [
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "links": null
+        }
+      ],
+      "title": "Set_video_vae",
+      "properties": {
+        "Node name for S&R": "SetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes",
+        "previousName": "video_vae"
+      },
+      "widgets_values": [
+        "video_vae"
+      ],
+      "widgets_values_named": {
+        "Constant": "video_vae"
+      },
+      "color": "#af3535",
+      "bgcolor": "rgba(24,24,27,.9)"
+    },
+    {
+      "id": 68,
+      "type": "SetNode",
+      "pos": [
+        -1590,
+        -150
+      ],
+      "size": [
+        230,
+        40
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 59,
+      "mode": 4,
+      "inputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "link": 138
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "title": "Set_i3",
+      "properties": {
+        "Node name for S&R": "SetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes",
+        "previousName": "i3"
+      },
+      "widgets_values": [
+        "i3"
+      ],
+      "widgets_values_named": {
+        "Constant": "i3"
+      },
+      "color": "#006691",
+      "bgcolor": "rgba(24,24,27,.9)"
+    },
+    {
+      "id": 44,
+      "type": "GetImageSize",
+      "pos": [
+        -1050,
+        -200
+      ],
+      "size": [
+        230,
+        130
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 62,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 55
+        }
+      ],
+      "outputs": [
+        {
+          "name": "width",
+          "type": "INT",
+          "links": [
+            202
+          ]
+        },
+        {
+          "name": "height",
+          "type": "INT",
+          "links": [
+            203
+          ]
+        },
+        {
+          "name": "batch_size",
+          "type": "INT",
+          "links": null
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.29.2",
+        "Node name for S&R": "GetImageSize"
+      }
+    },
+    {
+      "id": 133,
+      "type": "SetNode",
+      "pos": [
+        -1040,
+        -150
+      ],
+      "size": [
+        210,
+        60
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 68,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "INT",
+          "type": "INT",
+          "link": 202
+        }
+      ],
+      "outputs": [
+        {
+          "name": "INT",
+          "type": "INT",
+          "links": null
+        }
+      ],
+      "title": "Set_width",
+      "properties": {
+        "Node name for S&R": "SetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes",
+        "previousName": "width"
+      },
+      "widgets_values": [
+        "width"
+      ],
+      "widgets_values_named": {
+        "Constant": "width"
+      },
+      "color": "#1b4669",
+      "bgcolor": "#29699c"
+    },
+    {
+      "id": 134,
+      "type": "SetNode",
+      "pos": [
+        -1040,
+        -100
+      ],
+      "size": [
+        210,
+        60
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 69,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "INT",
+          "type": "INT",
+          "link": 203
+        }
+      ],
+      "outputs": [
+        {
+          "name": "INT",
+          "type": "INT",
+          "links": null
+        }
+      ],
+      "title": "Set_height",
+      "properties": {
+        "Node name for S&R": "SetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes",
+        "previousName": "height"
+      },
+      "widgets_values": [
+        "height"
+      ],
+      "widgets_values_named": {
+        "Constant": "height"
+      },
+      "color": "#1b4669",
+      "bgcolor": "#29699c"
+    },
+    {
+      "id": 64,
+      "type": "LoadImage",
+      "pos": [
+        -2010,
+        -80
+      ],
+      "size": [
+        290,
+        330
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 4,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            135
+          ]
+        },
+        {
+          "name": "MASK",
+          "type": "MASK",
+          "links": []
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.30.1",
+        "Node name for S&R": "LoadImage"
+      },
+      "widgets_values": [
+        "REPLACE_ME_image_1.png",
+        "image"
+      ],
+      "widgets_values_named": {
+        "image": "REPLACE_ME_image_1.png",
+        "upload": "image"
+      }
+    },
+    {
+      "id": 65,
+      "type": "LoadImage",
+      "pos": [
+        -1690,
+        -80
+      ],
+      "size": [
+        290,
+        330
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 4,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            137
+          ]
+        },
+        {
+          "name": "MASK",
+          "type": "MASK",
+          "links": []
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.30.1",
+        "Node name for S&R": "LoadImage"
+      },
+      "widgets_values": [
+        "REPLACE_ME_image_2.png",
+        "image"
+      ],
+      "widgets_values_named": {
+        "image": "REPLACE_ME_image_2.png",
+        "upload": "image"
+      }
+    },
+    {
+      "id": 66,
+      "type": "LoadImage",
+      "pos": [
+        -1360,
+        -80
+      ],
+      "size": [
+        290,
+        330
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 4,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            207
+          ]
+        },
+        {
+          "name": "MASK",
+          "type": "MASK",
+          "links": []
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.30.1",
+        "Node name for S&R": "LoadImage"
+      },
+      "widgets_values": [
+        "REPLACE_ME_image_3.png",
+        "image"
+      ],
+      "widgets_values_named": {
+        "image": "REPLACE_ME_image_3.png",
+        "upload": "image"
+      }
+    },
+    {
+      "id": 92,
+      "type": "ImageScaleToTotalPixels",
+      "pos": [
+        -1980,
+        -200
+      ],
+      "size": [
+        420,
+        100
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 44,
+      "mode": 4,
+      "showAdvanced": true,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 135
+        },
+        {
+          "name": "megapixels",
+          "type": "FLOAT",
+          "widget": {
+            "name": "megapixels"
+          },
+          "link": 175
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            136
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.29.2",
+        "Node name for S&R": "ImageScaleToTotalPixels"
+      },
+      "widgets_values": [
+        "nearest-exact",
+        0.7,
+        32
+      ],
+      "widgets_values_named": {
+        "upscale_method": "nearest-exact",
+        "megapixels": 0.7,
+        "resolution_steps": 32
+      },
+      "color": "#c09430",
+      "bgcolor": "rgba(24,24,27,.9)"
+    },
+    {
+      "id": 91,
+      "type": "ImageScaleToTotalPixels",
+      "pos": [
+        -1660,
+        -200
+      ],
+      "size": [
+        420,
+        100
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 45,
+      "mode": 4,
+      "showAdvanced": true,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 137
+        },
+        {
+          "name": "megapixels",
+          "type": "FLOAT",
+          "widget": {
+            "name": "megapixels"
+          },
+          "link": 176
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            138
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.29.2",
+        "Node name for S&R": "ImageScaleToTotalPixels"
+      },
+      "widgets_values": [
+        "nearest-exact",
+        0.7,
+        32
+      ],
+      "widgets_values_named": {
+        "upscale_method": "nearest-exact",
+        "megapixels": 0.7,
+        "resolution_steps": 32
+      },
+      "color": "#c09430",
+      "bgcolor": "rgba(24,24,27,.9)"
+    },
+    {
+      "id": 122,
+      "type": "ImageScaleToTotalPixels",
+      "pos": [
+        -1310,
+        -200
+      ],
+      "size": [
+        420,
+        100
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 46,
+      "mode": 4,
+      "showAdvanced": true,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 207
+        },
+        {
+          "name": "megapixels",
+          "type": "FLOAT",
+          "widget": {
+            "name": "megapixels"
+          },
+          "link": 183
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            182
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.29.2",
+        "Node name for S&R": "ImageScaleToTotalPixels"
+      },
+      "widgets_values": [
+        "nearest-exact",
+        0.7,
+        32
+      ],
+      "widgets_values_named": {
+        "upscale_method": "nearest-exact",
+        "megapixels": 0.7,
+        "resolution_steps": 32
+      },
+      "color": "#c09430",
+      "bgcolor": "rgba(24,24,27,.9)"
+    },
+    {
+      "id": 146,
+      "type": "MarkdownNote",
+      "pos": [
+        -3860,
+        -250
+      ],
+      "size": [
+        710,
+        920
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "# Fixed Segmentation Prompting Rules",
+      "properties": {},
+      "widgets_values": [
+        "# Fixed Segmentation Prompting Rules\n\nUse fixed segmentation when:\n\n```text\ntimeline_mode = segmented\n```\n\nSegmentation is an internal execution strategy for one continuous semantic movie. It is not a storyboard scheduler.\n\n## Mental Model\n\nLongMedia creates fixed-duration internal units from `segment_duration` and carries H3 continuation context across them.\n\nThe prompt should describe the **final continuous movie**, not the hidden segmentation.\n\nGood:\n\n```text\nThe woman walks steadily through the corridor while the surrounding lights gradually become warmer.\nHer pace and direction remain consistent as the environment develops around her.\n```\n\nAvoid writing instructions such as \"segment 1 starts\" or \"each segment resets\". The model should not be asked to reenact LongMedia's internal bookkeeping.\n\n## Segment Duration\n\n`segment_duration` is the amount of new visible timeline produced by each fixed unit.\n\n`transition_frames` is hidden continuation context and does not subtract from that visible duration.\n\nShorter segments usually:\n\n- reduce peak sequence geometry;\n- improve control on constrained GPUs;\n- create more continuation boundaries.\n\nLonger segments usually:\n\n- reduce boundary count;\n- increase packed sequence/workspace size.\n\n## Continuous Actions\n\nUse temporal continuation language:\n\n```text\ncontinues walking\nkeeps singing\ngradually turns\nmaintains the same direction\nthe illumination develops steadily\n```\n\nDescribe starts only when an action really starts at that point in the final movie.\n\n## References\n\nThe conditioning family still comes from `h3_mode`.\n\nExamples:\n\n- `hybrid + segmented` — opening-keyframe-driven continuous movie;\n- `ref2va + segmented` — reference-driven continuous movie;\n- manual mode — advanced custom diagnostics.\n\n`video_ref_edit` normally uses a single source timeline; use the Video Reconstructor contract for source-video reconstruction/edit plans that require segmented source windows.\n\n## Audio\n\nWhen `audio_mode=lip_sync`, Audio1 owns the performance timing. LongMedia slices/aligns the active source timeline internally; do not manually split phonemes at segment boundaries.\n\nFor preserve-style modes, remember that a Video IMAGE input does not contain soundtrack data. Connect source audio separately.\n\n## When to Use MultiClip Instead\n\nChoose MultiClip when individual sections need their own:\n\n- prompt;\n- duration;\n- seed;\n- camera card;\n- explicit storyboard identity.\n\nChoose Segmented when the movie is fundamentally one continuous prompt and segmentation is primarily an execution/VRAM decision."
+      ],
+      "widgets_values_named": {
+        "text": "# Fixed Segmentation Prompting Rules\n\nUse fixed segmentation when:\n\n```text\ntimeline_mode = segmented\n```\n\nSegmentation is an internal execution strategy for one continuous semantic movie. It is not a storyboard scheduler.\n\n## Mental Model\n\nLongMedia creates fixed-duration internal units from `segment_duration` and carries H3 continuation context across them.\n\nThe prompt should describe the **final continuous movie**, not the hidden segmentation.\n\nGood:\n\n```text\nThe woman walks steadily through the corridor while the surrounding lights gradually become warmer.\nHer pace and direction remain consistent as the environment develops around her.\n```\n\nAvoid writing instructions such as \"segment 1 starts\" or \"each segment resets\". The model should not be asked to reenact LongMedia's internal bookkeeping.\n\n## Segment Duration\n\n`segment_duration` is the amount of new visible timeline produced by each fixed unit.\n\n`transition_frames` is hidden continuation context and does not subtract from that visible duration.\n\nShorter segments usually:\n\n- reduce peak sequence geometry;\n- improve control on constrained GPUs;\n- create more continuation boundaries.\n\nLonger segments usually:\n\n- reduce boundary count;\n- increase packed sequence/workspace size.\n\n## Continuous Actions\n\nUse temporal continuation language:\n\n```text\ncontinues walking\nkeeps singing\ngradually turns\nmaintains the same direction\nthe illumination develops steadily\n```\n\nDescribe starts only when an action really starts at that point in the final movie.\n\n## References\n\nThe conditioning family still comes from `h3_mode`.\n\nExamples:\n\n- `hybrid + segmented` — opening-keyframe-driven continuous movie;\n- `ref2va + segmented` — reference-driven continuous movie;\n- manual mode — advanced custom diagnostics.\n\n`video_ref_edit` normally uses a single source timeline; use the Video Reconstructor contract for source-video reconstruction/edit plans that require segmented source windows.\n\n## Audio\n\nWhen `audio_mode=lip_sync`, Audio1 owns the performance timing. LongMedia slices/aligns the active source timeline internally; do not manually split phonemes at segment boundaries.\n\nFor preserve-style modes, remember that a Video IMAGE input does not contain soundtrack data. Connect source audio separately.\n\n## When to Use MultiClip Instead\n\nChoose MultiClip when individual sections need their own:\n\n- prompt;\n- duration;\n- seed;\n- camera card;\n- explicit storyboard identity.\n\nChoose Segmented when the movie is fundamentally one continuous prompt and segmentation is primarily an execution/VRAM decision."
+      },
+      "color": "#222",
+      "bgcolor": "#000"
+    },
+    {
+      "id": 67,
+      "type": "SetNode",
+      "pos": [
+        -1890,
+        -150
+      ],
+      "size": [
+        230,
+        40
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 58,
+      "mode": 4,
+      "inputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "link": 136
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "title": "Set_i2",
+      "properties": {
+        "Node name for S&R": "SetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes",
+        "previousName": "i2"
+      },
+      "widgets_values": [
+        "i2"
+      ],
+      "widgets_values_named": {
+        "Constant": "i2"
+      },
+      "color": "#006691",
+      "bgcolor": "rgba(24,24,27,.9)"
+    },
+    {
+      "id": 69,
+      "type": "SetNode",
+      "pos": [
+        -1250,
+        -140
+      ],
+      "size": [
+        230,
+        50
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 60,
+      "mode": 4,
+      "inputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "link": 182
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "title": "Set_i4",
+      "properties": {
+        "Node name for S&R": "SetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes",
+        "previousName": "i4"
+      },
+      "widgets_values": [
+        "i4"
+      ],
+      "widgets_values_named": {
+        "Constant": "i4"
+      },
+      "color": "#006691",
+      "bgcolor": "rgba(24,24,27,.9)"
+    },
+    {
+      "id": 183,
+      "type": "SetNode",
+      "pos": [
+        -470,
+        0
+      ],
+      "size": [
+        210,
+        60
+      ],
+      "flags": {},
+      "order": 47,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "link": 265
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "links": null
+        }
+      ],
+      "title": "Set_clip",
+      "properties": {
+        "Node name for S&R": "SetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes",
+        "previousName": "clip"
+      },
+      "widgets_values": [
+        "clip"
+      ],
+      "widgets_values_named": {
+        "Constant": "clip"
+      },
+      "color": "#c09430",
+      "bgcolor": "rgba(24,24,27,.9)"
+    },
+    {
+      "id": 6,
+      "type": "VAELoader",
+      "pos": [
+        -800,
+        150
+      ],
+      "size": [
+        640,
+        60
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "links": [
+            28,
+            156
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.30.1",
+        "Node name for S&R": "VAELoader",
+        "models": [
+          {
+            "name": "minimax_h3_video_vae_fp16.safetensors",
+            "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_video_vae_fp16.safetensors",
+            "directory": "vae"
+          }
+        ]
+      },
+      "widgets_values": [
+        "Minimax\\minimax_h3_video_vae_fp16.safetensors"
+      ],
+      "widgets_values_named": {
+        "vae_name": "Minimax\\minimax_h3_video_vae_fp16.safetensors"
+      }
+    },
+    {
+      "id": 7,
+      "type": "VAELoader",
+      "pos": [
+        -800,
+        270
+      ],
+      "size": [
+        640,
+        60
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "links": [
+            39,
+            157
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.30.1",
+        "Node name for S&R": "VAELoader",
+        "models": [
+          {
+            "name": "minimax_h3_audio_vae_fp32.safetensors",
+            "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_audio_vae_fp32.safetensors",
+            "directory": "vae"
+          }
+        ]
+      },
+      "widgets_values": [
+        "Minimax\\minimax_h3_audio_vae_fp32.safetensors"
+      ],
+      "widgets_values_named": {
+        "vae_name": "Minimax\\minimax_h3_audio_vae_fp32.safetensors"
+      }
+    },
+    {
+      "id": 168,
+      "type": "SetNode",
+      "pos": [
+        40,
+        1230
+      ],
+      "size": [
+        210,
+        40
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 53,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "INT",
+          "type": "INT",
+          "link": 486
+        }
+      ],
+      "outputs": [
+        {
+          "name": "INT",
+          "type": "INT",
+          "links": null
+        }
+      ],
+      "title": "Set_seed",
+      "properties": {
+        "Node name for S&R": "SetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes",
+        "previousName": "seed"
+      },
+      "widgets_values": [
+        "seed"
+      ],
+      "widgets_values_named": {
+        "Constant": "seed"
+      },
+      "color": "#1b4669",
+      "bgcolor": "#29699c"
+    },
+    {
+      "id": 169,
+      "type": "GetNode",
+      "pos": [
+        870,
+        -110
+      ],
+      "size": [
+        210,
+        60
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 6,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "INT",
+          "type": "INT",
+          "links": [
+            245
+          ]
+        }
+      ],
+      "title": "Get_seed",
+      "properties": {
+        "Node name for S&R": "GetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes"
+      },
+      "widgets_values": [
+        "seed"
+      ],
+      "widgets_values_named": {
+        "Constant": "seed"
+      },
+      "color": "#1b4669",
+      "bgcolor": "#29699c"
+    },
+    {
+      "id": 118,
+      "type": "SetNode",
+      "pos": [
+        80,
+        1380
+      ],
+      "size": [
+        210,
+        60
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 52,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "FLOAT",
+          "type": "FLOAT",
+          "link": 174
+        }
+      ],
+      "outputs": [
+        {
+          "name": "FLOAT",
+          "type": "FLOAT",
+          "links": null
+        }
+      ],
+      "title": "Set_megapixel",
+      "properties": {
+        "Node name for S&R": "SetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes",
+        "previousName": "megapixel"
+      },
+      "widgets_values": [
+        "megapixel"
+      ],
+      "widgets_values_named": {
+        "Constant": "megapixel"
+      },
+      "color": "#346434",
+      "bgcolor": "rgba(24,24,27,.9)"
+    },
+    {
+      "id": 264,
+      "type": "DF_Int_to_Float",
+      "pos": [
+        0,
+        580
+      ],
+      "size": [
+        270,
+        60
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 48,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "Value",
+          "type": "INT",
+          "widget": {
+            "name": "Value"
+          },
+          "link": 385
+        }
+      ],
+      "outputs": [
+        {
+          "name": "FLOAT",
+          "type": "FLOAT",
+          "links": [
+            386
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "derfuu_comfyui_moddednodes",
+        "ver": "1.0.1",
+        "Node name for S&R": "DF_Int_to_Float"
+      },
+      "widgets_values": [
+        1
+      ],
+      "widgets_values_named": {
+        "Value": 1
+      }
+    },
+    {
+      "id": 263,
+      "type": "SetNode",
+      "pos": [
+        170,
+        580
+      ],
+      "size": [
+        210,
+        60
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 61,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "FLOAT",
+          "type": "FLOAT",
+          "link": 386
+        }
+      ],
+      "outputs": [
+        {
+          "name": "FLOAT",
+          "type": "FLOAT",
+          "links": null
+        }
+      ],
+      "title": "Set_fps",
+      "properties": {
+        "Node name for S&R": "SetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes",
+        "previousName": "fps"
+      },
+      "widgets_values": [
+        "fps"
+      ],
+      "widgets_values_named": {
+        "Constant": "fps"
+      },
+      "color": "#346434",
+      "bgcolor": "rgba(24,24,27,.9)"
+    },
+    {
+      "id": 119,
+      "type": "GetNode",
+      "pos": [
+        -2210,
+        -150
+      ],
+      "size": [
+        210,
+        60
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 7,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "FLOAT",
+          "type": "FLOAT",
+          "links": [
+            175,
+            176,
+            183,
+            413
+          ]
+        }
+      ],
+      "title": "Get_megapixel",
+      "properties": {
+        "Node name for S&R": "GetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes"
+      },
+      "widgets_values": [
+        "megapixel"
+      ],
+      "widgets_values_named": {
+        "Constant": "megapixel"
+      },
+      "color": "#346434",
+      "bgcolor": "rgba(24,24,27,.9)"
+    },
+    {
+      "id": 58,
+      "type": "SetNode",
+      "pos": [
+        -2320,
+        -150
+      ],
+      "size": [
+        230,
+        70
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 63,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "link": 94
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": []
+        }
+      ],
+      "title": "Set_i1",
+      "properties": {
+        "Node name for S&R": "SetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes",
+        "previousName": "i1"
+      },
+      "widgets_values": [
+        "i1"
+      ],
+      "widgets_values_named": {
+        "Constant": "i1"
+      },
+      "color": "#006691",
+      "bgcolor": "rgba(24,24,27,.9)"
+    },
+    {
+      "id": 43,
+      "type": "ImageScaleToTotalPixels",
+      "pos": [
+        -2320,
+        -200
+      ],
+      "size": [
+        420,
+        120
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 49,
+      "mode": 0,
+      "showAdvanced": true,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 153
+        },
+        {
+          "name": "megapixels",
+          "type": "FLOAT",
+          "widget": {
+            "name": "megapixels"
+          },
+          "link": 413
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            55,
+            94
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.29.2",
+        "Node name for S&R": "ImageScaleToTotalPixels"
+      },
+      "widgets_values": [
+        "nearest-exact",
+        0.8,
+        32
+      ],
+      "widgets_values_named": {
+        "upscale_method": "nearest-exact",
+        "megapixels": 0.8,
+        "resolution_steps": 32
+      },
+      "color": "#c09430",
+      "bgcolor": "rgba(24,24,27,.9)"
+    },
+    {
+      "id": 283,
+      "type": "GetNode",
+      "pos": [
+        3000,
+        -240
+      ],
+      "size": [
+        210,
+        60
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 8,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "*",
+          "type": "*",
+          "links": []
+        }
+      ],
+      "title": "Get_audio_final",
+      "properties": {
+        "Node name for S&R": "GetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes"
+      },
+      "widgets_values": [
+        "audio_final"
+      ],
+      "widgets_values_named": {
+        "Constant": "audio_final"
+      }
+    },
+    {
+      "id": 10,
+      "type": "KSamplerSelect",
+      "pos": [
+        420,
+        380
+      ],
+      "size": [
+        370,
+        60
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "SAMPLER",
+          "type": "SAMPLER",
+          "links": [
+            295,
+            311
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.30.1",
+        "Node name for S&R": "KSamplerSelect"
+      },
+      "widgets_values": [
+        "er_sde"
+      ],
+      "widgets_values_named": {
+        "sampler_name": "er_sde"
+      }
+    },
+    {
+      "id": 5,
+      "type": "CLIPLoader",
+      "pos": [
+        -800,
+        -30
+      ],
+      "size": [
+        640,
+        120
+      ],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "links": [
+            27,
+            265
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.30.1",
+        "Node name for S&R": "CLIPLoader",
+        "models": [
+          {
+            "name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+            "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+            "directory": "text_encoders"
+          }
+        ]
+      },
+      "widgets_values": [
+        "Minimax\\qwen3vl_32b_heretic_minimax_h3_nvfp4.safetensors",
+        "minimax",
+        "default"
+      ],
+      "widgets_values_named": {
+        "clip_name": "Minimax\\qwen3vl_32b_heretic_minimax_h3_nvfp4.safetensors",
+        "type": "minimax",
+        "device": "default"
+      }
+    },
+    {
+      "id": 31,
+      "type": "GetNode",
+      "pos": [
+        -420,
+        370
+      ],
+      "size": [
+        230,
+        50
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 11,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": [
+            149,
+            443
+          ]
+        }
+      ],
+      "title": "Get_prompt",
+      "properties": {
+        "Node name for S&R": "GetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes"
+      },
+      "widgets_values": [
+        "prompt"
+      ],
+      "widgets_values_named": {
+        "Constant": "prompt"
+      }
+    },
+    {
+      "id": 261,
+      "type": "GetNode",
+      "pos": [
+        -280,
+        370
+      ],
+      "size": [
+        210,
+        60
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 12,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "FLOAT",
+          "type": "FLOAT",
+          "links": [
+            387
+          ]
+        }
+      ],
+      "title": "Get_fps",
+      "properties": {
+        "Node name for S&R": "GetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes"
+      },
+      "widgets_values": [
+        "fps"
+      ],
+      "widgets_values_named": {
+        "Constant": "fps"
+      },
+      "color": "#346434",
+      "bgcolor": "rgba(24,24,27,.9)"
+    },
+    {
+      "id": 9,
+      "type": "BasicGuider",
+      "pos": [
+        420,
+        100
+      ],
+      "size": [
+        370,
+        50
+      ],
+      "flags": {},
+      "order": 75,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 313
+        },
+        {
+          "name": "conditioning",
+          "type": "CONDITIONING",
+          "link": 60
+        }
+      ],
+      "outputs": [
+        {
+          "name": "GUIDER",
+          "type": "GUIDER",
+          "links": [
+            16,
+            310
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.30.1",
+        "Node name for S&R": "BasicGuider"
+      }
+    },
+    {
+      "id": 73,
+      "type": "GetNode",
+      "pos": [
+        -80,
+        120
+      ],
+      "size": [
+        230,
+        50
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 13,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            464
+          ]
+        }
+      ],
+      "title": "Get_i3",
+      "properties": {
+        "Node name for S&R": "GetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes"
+      },
+      "widgets_values": [
+        "i3"
+      ],
+      "widgets_values_named": {
+        "Constant": "i3"
+      },
+      "color": "#006691",
+      "bgcolor": "rgba(24,24,27,.9)"
+    },
+    {
+      "id": 74,
+      "type": "GetNode",
+      "pos": [
+        -80,
+        170
+      ],
+      "size": [
+        230,
+        50
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 14,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            465
+          ]
+        }
+      ],
+      "title": "Get_i4",
+      "properties": {
+        "Node name for S&R": "GetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes"
+      },
+      "widgets_values": [
+        "i4"
+      ],
+      "widgets_values_named": {
+        "Constant": "i4"
+      },
+      "color": "#006691",
+      "bgcolor": "rgba(24,24,27,.9)"
+    },
+    {
+      "id": 213,
+      "type": "ManualSigmas",
+      "pos": [
+        1340,
+        -180
+      ],
+      "size": [
+        210,
+        60
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 15,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "sigmas",
+          "name": "sigmas",
+          "type": "STRING",
+          "widget": {
+            "name": "sigmas"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "SIGMAS",
+          "name": "SIGMAS",
+          "type": "SIGMAS",
+          "links": [
+            328
+          ]
+        }
+      ],
+      "title": "3 step Sigmas",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.5.1",
+        "Node name for S&R": "ManualSigmas",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "version": "7.5.2",
+          "input_ue_unconnectable": {}
+        },
+        "enableTabs": false,
+        "tabWidth": 65,
+        "tabXOffset": 10,
+        "hasSecondTab": false,
+        "secondTabText": "Send Back",
+        "secondTabOffset": 80,
+        "secondTabWidth": 65
+      },
+      "widgets_values": [
+        "0.8500, 0.6316, 0.3158, 0.0000"
+      ],
+      "widgets_values_named": {
+        "sigmas": "0.8500, 0.6316, 0.3158, 0.0000"
+      },
+      "color": "#101523",
+      "bgcolor": "#191e2e"
+    },
+    {
+      "id": 214,
+      "type": "ManualSigmas",
+      "pos": [
+        1680,
+        -180
+      ],
+      "size": [
+        270,
+        60
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 16,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "sigmas",
+          "name": "sigmas",
+          "type": "STRING",
+          "widget": {
+            "name": "sigmas"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "SIGMAS",
+          "name": "SIGMAS",
+          "type": "SIGMAS",
+          "links": []
+        }
+      ],
+      "title": "5 step Sigmas",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.5.1",
+        "Node name for S&R": "ManualSigmas",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "version": "7.5.2",
+          "input_ue_unconnectable": {}
+        },
+        "enableTabs": false,
+        "tabWidth": 65,
+        "tabXOffset": 10,
+        "hasSecondTab": false,
+        "secondTabText": "Send Back",
+        "secondTabOffset": 80,
+        "secondTabWidth": 65
+      },
+      "widgets_values": [
+        "0.9231, 0.8780, 0.8000, 0.6316, 0.3158, 0.0000"
+      ],
+      "widgets_values_named": {
+        "sigmas": "0.9231, 0.8780, 0.8000, 0.6316, 0.3158, 0.0000"
+      },
+      "color": "#101523",
+      "bgcolor": "#191e2e"
+    },
+    {
+      "id": 212,
+      "type": "ManualSigmas",
+      "pos": [
+        1510,
+        -180
+      ],
+      "size": [
+        210,
+        60
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 17,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "sigmas",
+          "name": "sigmas",
+          "type": "STRING",
+          "widget": {
+            "name": "sigmas"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "SIGMAS",
+          "name": "SIGMAS",
+          "type": "SIGMAS",
+          "links": []
+        }
+      ],
+      "title": "4 step Sigmas",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.5.1",
+        "Node name for S&R": "ManualSigmas",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "version": "7.5.2",
+          "input_ue_unconnectable": {}
+        },
+        "enableTabs": false,
+        "tabWidth": 65,
+        "tabXOffset": 10,
+        "hasSecondTab": false,
+        "secondTabText": "Send Back",
+        "secondTabOffset": 80,
+        "secondTabWidth": 65
+      },
+      "widgets_values": [
+        "0.9035, 0.8000, 0.6316, 0.3158, 0.0000"
+      ],
+      "widgets_values_named": {
+        "sigmas": "0.9035, 0.8000, 0.6316, 0.3158, 0.0000"
+      },
+      "color": "#101523",
+      "bgcolor": "#191e2e"
+    },
+    {
+      "id": 147,
+      "type": "MarkdownNote",
+      "pos": [
+        -3110,
+        -250
+      ],
+      "size": [
+        710,
+        920
+      ],
+      "flags": {},
+      "order": 18,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "# Sampler, VRAM and Performance Rules",
+      "properties": {},
+      "widgets_values": [
+        "# Sampler, VRAM and Performance Guide\n\nThese recommendations apply to the 0.5.40 release.\n\n## Production Default\n\nStart with:\n\n```text\nsampler_mode   = auto\nmemory_mode    = auto\nattention_mode = auto\n```\n\nKeep ComfyUI Dynamic VRAM enabled.\n\nDo not launch with:\n\n```text\n--disable-dynamic-vram\n```\n\nLongMedia's large-model execution relies on coordinated dynamic residency.\n\n## Memory Modes\n\n### `auto`\nRecommended. Chooses an effective profile from model size, quantization/backend, GPU VRAM, and packed sequence geometry.\n\n### `normal`\nUse only when the model and activation workspace fit comfortably.\n\n### `low_vram`\nUses tighter activation/residency limits and more aggressive chunking.\n\n### `ultra_low_vram`\nLast-resort execution for very constrained GPUs or extreme sequence geometry. Expect additional transfer overhead.\n\n## Attention Modes\n\n### `auto`\nRecommended. LongMedia selects a compatible exact/bounded path from the active backend and sequence geometry.\n\n### `existing`\nKeeps the installed/selected ComfyUI attention family.\n\nWith current Comfy Kitchen INT8, LongMedia can switch the projection lifetime to an **exact query-streaming** path when the fused full QKV tensor itself cannot fit on a 16 GB-class GPU. This preserves the existing Comfy Kitchen attention contract rather than silently replacing it with Sol.\n\n### `sol`\nUses the embedded H3 Sol path with bounded long-sequence execution.\n\n### `scheduled_sol`\nUses the Sol path with the explicit sigma/tau scheduling controls.\n\n## 16 GB-Class Native INT8\n\nCurrent LongMedia treats native INT8 H3 on <=18.5 GB GPUs as a constrained-residency case.\n\nIn this situation:\n\n- speculative `prefetch_dynamic_vbars` is disabled;\n- blocks are faulted on demand;\n- the next block does not reserve a competing VBAR/cast destination while the current activation set is still live;\n- full-model RAM pinning is rejected when it would consume too much physical memory or leave insufficient headroom.\n\nThis protects both VRAM and system RAM on Windows/portable ComfyUI builds.\n\n## Repeat Runs\n\nChanging only the seed can cause ComfyUI to reuse cached Setup output.\n\nLongMedia therefore applies a Sampler execution memory boundary on every invocation before `prepare_sampling()`:\n\n- synchronize active CUDA work;\n- cleanup stale prefetch queues;\n- reset cast buffers;\n- reset AIMDO/VBAR watermark state;\n- release prior registered model residency;\n- release dead allocator cache.\n\nA second or third seed run should therefore start from the same residency assumptions as the first run.\n\n## Manual VRAM Controls\n\nThe Sampler still exposes detailed controls for controlled tuning:\n\n```text\nmlp_chunk_tokens\nsol_qkv_chunk_tokens\nsol_out_proj_chunk_tokens\nvram_activation_reserve_mb\ninter_block_vram_guard_mb\ninter_block_guard_cooldown_blocks\ninter_block_guard_emergency_mb\nlate_block_guard_start\nlate_block_guard_target_mb\nstep_boundary_cleanup_mb\n```\n\nDo not shrink every chunk pre-emptively. Start with Auto and change one pressure point at a time.\n\n## Latent Hi-Res\n\nSpatial latent upscaling increases token count quickly.\n\nFor 16 GB-class GPUs:\n\n- begin with `latent_hires_scale=1.2–1.5`;\n- keep `memory_mode=auto`;\n- keep reference payload reasonable;\n- increase toward 2× only after the smaller high-resolution pass is stable.\n\nSee [Two-Stage Sampling, Latent Hi-Res and Refiner](TWO_PASS_LATENT_HIRES_REFINER_GUIDE.md).\n\n## Reference Budget\n\nLarge Picture, Video, and Audio references add packed conditioning rows.\n\nStart with:\n\n```text\nreference_budget = low\n```\n\nfor long or memory-constrained runs. Increase only when the additional identity/style/reference fidelity is needed.\n\n## Segmentation vs One Giant Pass\n\nWhen the content is one continuous scene, shorter fixed segments often provide better throughput and stability than forcing an enormous single packed sequence through extreme streaming.\n\nStarting points:\n\n- 16 GB: 5–10 s segments depending on references and edit complexity;\n- 12 GB: 5–8 s with low reference budget;\n- 8 GB: 4–6 s and expect transfer-bound execution.\n\nThese are starting points, not model limits.\n\n## Windows Triton / RTX 50-Series\n\nLongMedia includes a process-local Triton TinyCC compatibility bootstrap for embedded Windows Python environments where Triton's bundled TCC fails to find its own WinAPI headers.\n\nIt does not patch `site-packages` permanently.\n\n## Preview Compatibility\n\nA broken external latent-preview hook should not terminate a successful H3 denoise pass. LongMedia isolates VideoHelperSuite animated-preview exceptions only when the traceback actually originates in VHS preview code; unrelated callback errors remain fatal.\n\n## Debugging OOM\n\nUseful facts to capture:\n\n```text\nGPU total/free\nPyTorch allocated/reserved\nAIMDO/VBAR residency\npinned RAM\nactive attention backend\npacked sequence geometry\nwhether failure happens before block 0, in QKV, MLP, or final output\n```\n\nA failure inside `prefetch_queue_pop` is different from a fused-QKV allocation failure and should be treated as a transport/residency issue, not \"fixed\" by changing attention math."
+      ],
+      "widgets_values_named": {
+        "text": "# Sampler, VRAM and Performance Guide\n\nThese recommendations apply to the 0.5.40 release.\n\n## Production Default\n\nStart with:\n\n```text\nsampler_mode   = auto\nmemory_mode    = auto\nattention_mode = auto\n```\n\nKeep ComfyUI Dynamic VRAM enabled.\n\nDo not launch with:\n\n```text\n--disable-dynamic-vram\n```\n\nLongMedia's large-model execution relies on coordinated dynamic residency.\n\n## Memory Modes\n\n### `auto`\nRecommended. Chooses an effective profile from model size, quantization/backend, GPU VRAM, and packed sequence geometry.\n\n### `normal`\nUse only when the model and activation workspace fit comfortably.\n\n### `low_vram`\nUses tighter activation/residency limits and more aggressive chunking.\n\n### `ultra_low_vram`\nLast-resort execution for very constrained GPUs or extreme sequence geometry. Expect additional transfer overhead.\n\n## Attention Modes\n\n### `auto`\nRecommended. LongMedia selects a compatible exact/bounded path from the active backend and sequence geometry.\n\n### `existing`\nKeeps the installed/selected ComfyUI attention family.\n\nWith current Comfy Kitchen INT8, LongMedia can switch the projection lifetime to an **exact query-streaming** path when the fused full QKV tensor itself cannot fit on a 16 GB-class GPU. This preserves the existing Comfy Kitchen attention contract rather than silently replacing it with Sol.\n\n### `sol`\nUses the embedded H3 Sol path with bounded long-sequence execution.\n\n### `scheduled_sol`\nUses the Sol path with the explicit sigma/tau scheduling controls.\n\n## 16 GB-Class Native INT8\n\nCurrent LongMedia treats native INT8 H3 on <=18.5 GB GPUs as a constrained-residency case.\n\nIn this situation:\n\n- speculative `prefetch_dynamic_vbars` is disabled;\n- blocks are faulted on demand;\n- the next block does not reserve a competing VBAR/cast destination while the current activation set is still live;\n- full-model RAM pinning is rejected when it would consume too much physical memory or leave insufficient headroom.\n\nThis protects both VRAM and system RAM on Windows/portable ComfyUI builds.\n\n## Repeat Runs\n\nChanging only the seed can cause ComfyUI to reuse cached Setup output.\n\nLongMedia therefore applies a Sampler execution memory boundary on every invocation before `prepare_sampling()`:\n\n- synchronize active CUDA work;\n- cleanup stale prefetch queues;\n- reset cast buffers;\n- reset AIMDO/VBAR watermark state;\n- release prior registered model residency;\n- release dead allocator cache.\n\nA second or third seed run should therefore start from the same residency assumptions as the first run.\n\n## Manual VRAM Controls\n\nThe Sampler still exposes detailed controls for controlled tuning:\n\n```text\nmlp_chunk_tokens\nsol_qkv_chunk_tokens\nsol_out_proj_chunk_tokens\nvram_activation_reserve_mb\ninter_block_vram_guard_mb\ninter_block_guard_cooldown_blocks\ninter_block_guard_emergency_mb\nlate_block_guard_start\nlate_block_guard_target_mb\nstep_boundary_cleanup_mb\n```\n\nDo not shrink every chunk pre-emptively. Start with Auto and change one pressure point at a time.\n\n## Latent Hi-Res\n\nSpatial latent upscaling increases token count quickly.\n\nFor 16 GB-class GPUs:\n\n- begin with `latent_hires_scale=1.2–1.5`;\n- keep `memory_mode=auto`;\n- keep reference payload reasonable;\n- increase toward 2× only after the smaller high-resolution pass is stable.\n\nSee [Two-Stage Sampling, Latent Hi-Res and Refiner](TWO_PASS_LATENT_HIRES_REFINER_GUIDE.md).\n\n## Reference Budget\n\nLarge Picture, Video, and Audio references add packed conditioning rows.\n\nStart with:\n\n```text\nreference_budget = low\n```\n\nfor long or memory-constrained runs. Increase only when the additional identity/style/reference fidelity is needed.\n\n## Segmentation vs One Giant Pass\n\nWhen the content is one continuous scene, shorter fixed segments often provide better throughput and stability than forcing an enormous single packed sequence through extreme streaming.\n\nStarting points:\n\n- 16 GB: 5–10 s segments depending on references and edit complexity;\n- 12 GB: 5–8 s with low reference budget;\n- 8 GB: 4–6 s and expect transfer-bound execution.\n\nThese are starting points, not model limits.\n\n## Windows Triton / RTX 50-Series\n\nLongMedia includes a process-local Triton TinyCC compatibility bootstrap for embedded Windows Python environments where Triton's bundled TCC fails to find its own WinAPI headers.\n\nIt does not patch `site-packages` permanently.\n\n## Preview Compatibility\n\nA broken external latent-preview hook should not terminate a successful H3 denoise pass. LongMedia isolates VideoHelperSuite animated-preview exceptions only when the traceback actually originates in VHS preview code; unrelated callback errors remain fatal.\n\n## Debugging OOM\n\nUseful facts to capture:\n\n```text\nGPU total/free\nPyTorch allocated/reserved\nAIMDO/VBAR residency\npinned RAM\nactive attention backend\npacked sequence geometry\nwhether failure happens before block 0, in QKV, MLP, or final output\n```\n\nA failure inside `prefetch_queue_pop` is different from a fused-QKV allocation failure and should be treated as a transport/residency issue, not \"fixed\" by changing attention math."
+      },
+      "color": "#222",
+      "bgcolor": "#000"
+    },
+    {
+      "id": 310,
+      "type": "MarkdownNote",
+      "pos": [
+        -3860,
+        730
+      ],
+      "size": [
+        710,
+        920
+      ],
+      "flags": {},
+      "order": 19,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "# Long Media MultiClip — Quick Guide",
+      "properties": {},
+      "widgets_values": [
+        "# Long Media MultiClip — Quick Guide\n\n**MultiClip** creates one long sequence from multiple individually controlled clips.\n\nEach Planner clip has its own:\n\n- Name\n- Prompt\n- Duration\n- optional Seed\n\nLongMedia manages temporal continuation and clip handoff between neighboring clips.\n\n## Basic connection\n\n```text\nLong Media Planner\n        ↓ clip_plan\nLong Media Setup\n```\n\nWith dedicated camera control:\n\n```text\nLong Media Planner\n        ↓ clip_plan\nLong Media Cameras\n        ↓ clip_plan\nLong Media Setup\n```\n\nIn Setup select:\n\n```text\nTimeline Mode: multiclip\n```\n\nA connected Planner becomes authoritative only while `timeline=multiclip`.\n\n## Global Prompt\n\nUse **Global Prompt** for properties that should remain consistent across the whole sequence:\n\n- characters and identity;\n- clothing and persistent props;\n- persistent environment;\n- visual style;\n- lighting logic;\n- atmosphere;\n- other global continuity constraints.\n\nClip cards then describe the local timeline changes rather than repeating the complete world description.\n\n## Clip cards\n\nEach clip prompt should describe what happens during that part of the timeline.\n\n```text\nClip 1\nDuration: 6s\nThe woman walks slowly through the ruined city.\n\nClip 2\nDuration: 5s\nShe continues walking and gradually raises her right hand.\n\nClip 3\nDuration: 7s\nHer raised hand reaches her face as she looks toward the burning buildings.\n```\n\nDurations may be different for every clip.\n\nA practical starting range:\n\n```text\n4–8 seconds   — high control\n7–12 seconds  — good general-purpose range\n12+ seconds   — fewer boundaries, with more opportunity for visual drift\n```\n\n## Seed\n\nAn empty clip Seed means:\n\n```text\nauto\n```\n\nLongMedia derives a per-clip seed from the sampler base seed and clip identity/order.\n\nUse a fixed clip seed when repeatable A/B testing is useful.\n\n## Reordering clips\n\nPlanner cards can be reordered by dragging them.\n\nThe card keeps its:\n\n- prompt;\n- duration;\n- seed;\n- name;\n- `clip_id`.\n\nWhen Cameras is connected with **Auto Sync Planner**, the corresponding camera card follows the same `clip_id`.\n\n## Importing multiple prompts\n\nPlanner supports structured prompt import.\n\n```text\nclip_1:\nThe woman enters the hall.\n\nclip_2:\nShe approaches the central altar.\n\nclip_3:\nShe slowly raises both hands.\n```\n\nThe `shot_N:` alias is also supported:\n\n```text\nshot_1:\n...\n\nshot_2:\n...\n```\n\nUse **Import Prompt** to convert the structured text into normal editable cards.\n\n**Auto Import Prompt** is useful when the structured text comes from another node or an external LLM.\n\n## Presets\n\nClip cards support reusable presets, including JSON import/export.\n\nPresets are useful for recurring action structures, transition patterns, or production templates.\n\n## Audio\n\nAudio behavior is controlled by `audio_mode` in Setup. For source-video editing, read [Audio Modes and video_ref_edit](AUDIO_MODES_GUIDE.md)."
+      ],
+      "widgets_values_named": {
+        "text": "# Long Media MultiClip — Quick Guide\n\n**MultiClip** creates one long sequence from multiple individually controlled clips.\n\nEach Planner clip has its own:\n\n- Name\n- Prompt\n- Duration\n- optional Seed\n\nLongMedia manages temporal continuation and clip handoff between neighboring clips.\n\n## Basic connection\n\n```text\nLong Media Planner\n        ↓ clip_plan\nLong Media Setup\n```\n\nWith dedicated camera control:\n\n```text\nLong Media Planner\n        ↓ clip_plan\nLong Media Cameras\n        ↓ clip_plan\nLong Media Setup\n```\n\nIn Setup select:\n\n```text\nTimeline Mode: multiclip\n```\n\nA connected Planner becomes authoritative only while `timeline=multiclip`.\n\n## Global Prompt\n\nUse **Global Prompt** for properties that should remain consistent across the whole sequence:\n\n- characters and identity;\n- clothing and persistent props;\n- persistent environment;\n- visual style;\n- lighting logic;\n- atmosphere;\n- other global continuity constraints.\n\nClip cards then describe the local timeline changes rather than repeating the complete world description.\n\n## Clip cards\n\nEach clip prompt should describe what happens during that part of the timeline.\n\n```text\nClip 1\nDuration: 6s\nThe woman walks slowly through the ruined city.\n\nClip 2\nDuration: 5s\nShe continues walking and gradually raises her right hand.\n\nClip 3\nDuration: 7s\nHer raised hand reaches her face as she looks toward the burning buildings.\n```\n\nDurations may be different for every clip.\n\nA practical starting range:\n\n```text\n4–8 seconds   — high control\n7–12 seconds  — good general-purpose range\n12+ seconds   — fewer boundaries, with more opportunity for visual drift\n```\n\n## Seed\n\nAn empty clip Seed means:\n\n```text\nauto\n```\n\nLongMedia derives a per-clip seed from the sampler base seed and clip identity/order.\n\nUse a fixed clip seed when repeatable A/B testing is useful.\n\n## Reordering clips\n\nPlanner cards can be reordered by dragging them.\n\nThe card keeps its:\n\n- prompt;\n- duration;\n- seed;\n- name;\n- `clip_id`.\n\nWhen Cameras is connected with **Auto Sync Planner**, the corresponding camera card follows the same `clip_id`.\n\n## Importing multiple prompts\n\nPlanner supports structured prompt import.\n\n```text\nclip_1:\nThe woman enters the hall.\n\nclip_2:\nShe approaches the central altar.\n\nclip_3:\nShe slowly raises both hands.\n```\n\nThe `shot_N:` alias is also supported:\n\n```text\nshot_1:\n...\n\nshot_2:\n...\n```\n\nUse **Import Prompt** to convert the structured text into normal editable cards.\n\n**Auto Import Prompt** is useful when the structured text comes from another node or an external LLM.\n\n## Presets\n\nClip cards support reusable presets, including JSON import/export.\n\nPresets are useful for recurring action structures, transition patterns, or production templates.\n\n## Audio\n\nAudio behavior is controlled by `audio_mode` in Setup. For source-video editing, read [Audio Modes and video_ref_edit](AUDIO_MODES_GUIDE.md)."
+      },
+      "color": "#222",
+      "bgcolor": "#000"
+    },
+    {
+      "id": 144,
+      "type": "MarkdownNote",
+      "pos": [
+        -3110,
+        730
+      ],
+      "size": [
+        710,
+        920
+      ],
+      "flags": {},
+      "order": 20,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "# MultiClip Prompting Rules",
+      "properties": {},
+      "widgets_values": [
+        "# MultiClip Prompting Rules\n\nFor the current quick-start guide, see [MultiClip Prompting Guide](MULTICLIP_PROMPTING_GUIDE.md).\n\n## Ownership\n\nUse MultiClip when:\n\n```text\ntimeline_mode = multiclip\n```\n\nThe Planner owns the clip timeline. A connected `clip_plan` is ignored by `single` and `segmented` timelines.\n\nRecommended camera workflow:\n\n```text\nPlanner → Cameras → Setup\n```\n\nWhen Cameras is connected, keep Planner prompts focused on diegetic content: subjects, actions, environment, lighting, atmosphere, continuity, and scene changes. Cameras owns framing, lens, rig, movement path, speed, and transition behavior.\n\n## Global Prompt vs Clip Prompt\n\n**Global Prompt** describes what should remain coherent across the sequence.\n\n**Clip Prompt** describes what changes during one clip.\n\nGlobal Prompt example:\n\n```text\nA monumental nocturnal city with wet black stone streets, deep blue atmosphere,\nconsistent architecture, realistic materials, and stable identity for the main subject.\n```\n\nClip prompts:\n\n```text\nclip_1:\nThe subject walks toward the central plaza while distant signs slowly illuminate.\n\nclip_2:\nThe same walk continues. The plaza lighting grows brighter and reflections spread across the wet road.\n\nclip_3:\nThe subject reaches the center while the surrounding architecture enters its fully illuminated state.\n```\n\n## Continue Actions Across Boundaries\n\nWhen an action crosses a clip boundary, continue it explicitly:\n\n```text\nclip_1:\nShe gradually raises her right hand toward the luminous surface.\n\nclip_2:\nHer right hand continues the same movement and gently touches the luminous surface.\n```\n\nThis gives H3 a temporal direction to carry through the continuation context.\n\n## Positive State Language\n\nDescribe the desired state directly:\n\n```text\nThe architecture preserves its proportions.\nThe same subjects remain in their established positions.\nThe movement continues smoothly at the same pace.\n```\n\nPositive state descriptions are preferable to long negative constraint lists.\n\n## Structured Import\n\nPlanner accepts contiguous sections beginning at 1:\n\n```text\nclip_1:\n...\n\nclip_2:\n...\n\nclip_3:\n...\n```\n\nor:\n\n```text\nshot_1:\n...\n\nshot_2:\n...\n```\n\nImport owns prompt text. Existing per-card duration/seed settings remain card-owned.\n\n## Audio-Reactive MultiClip\n\nConnected audio references can be addressed semantically:\n\n```text\n<Audio 2> defines the percussion timing.\nThe street lights brighten on the percussion accents.\nThe building surfaces develop short glitch pulses on the strongest hits.\n```\n\nTimeline duration, final-audio policy, and audio conditioning remain separate controls.\n\n## Camera Continuity\n\nFor a continuous shot across clips, use Cameras with `Continuous / Same Shot` and preserve the same-space/entity-continuity contract.\n\nFor intentional transitions, choose the transition in Cameras rather than describing competing camera edits inside each Planner prompt."
+      ],
+      "widgets_values_named": {
+        "text": "# MultiClip Prompting Rules\n\nFor the current quick-start guide, see [MultiClip Prompting Guide](MULTICLIP_PROMPTING_GUIDE.md).\n\n## Ownership\n\nUse MultiClip when:\n\n```text\ntimeline_mode = multiclip\n```\n\nThe Planner owns the clip timeline. A connected `clip_plan` is ignored by `single` and `segmented` timelines.\n\nRecommended camera workflow:\n\n```text\nPlanner → Cameras → Setup\n```\n\nWhen Cameras is connected, keep Planner prompts focused on diegetic content: subjects, actions, environment, lighting, atmosphere, continuity, and scene changes. Cameras owns framing, lens, rig, movement path, speed, and transition behavior.\n\n## Global Prompt vs Clip Prompt\n\n**Global Prompt** describes what should remain coherent across the sequence.\n\n**Clip Prompt** describes what changes during one clip.\n\nGlobal Prompt example:\n\n```text\nA monumental nocturnal city with wet black stone streets, deep blue atmosphere,\nconsistent architecture, realistic materials, and stable identity for the main subject.\n```\n\nClip prompts:\n\n```text\nclip_1:\nThe subject walks toward the central plaza while distant signs slowly illuminate.\n\nclip_2:\nThe same walk continues. The plaza lighting grows brighter and reflections spread across the wet road.\n\nclip_3:\nThe subject reaches the center while the surrounding architecture enters its fully illuminated state.\n```\n\n## Continue Actions Across Boundaries\n\nWhen an action crosses a clip boundary, continue it explicitly:\n\n```text\nclip_1:\nShe gradually raises her right hand toward the luminous surface.\n\nclip_2:\nHer right hand continues the same movement and gently touches the luminous surface.\n```\n\nThis gives H3 a temporal direction to carry through the continuation context.\n\n## Positive State Language\n\nDescribe the desired state directly:\n\n```text\nThe architecture preserves its proportions.\nThe same subjects remain in their established positions.\nThe movement continues smoothly at the same pace.\n```\n\nPositive state descriptions are preferable to long negative constraint lists.\n\n## Structured Import\n\nPlanner accepts contiguous sections beginning at 1:\n\n```text\nclip_1:\n...\n\nclip_2:\n...\n\nclip_3:\n...\n```\n\nor:\n\n```text\nshot_1:\n...\n\nshot_2:\n...\n```\n\nImport owns prompt text. Existing per-card duration/seed settings remain card-owned.\n\n## Audio-Reactive MultiClip\n\nConnected audio references can be addressed semantically:\n\n```text\n<Audio 2> defines the percussion timing.\nThe street lights brighten on the percussion accents.\nThe building surfaces develop short glitch pulses on the strongest hits.\n```\n\nTimeline duration, final-audio policy, and audio conditioning remain separate controls.\n\n## Camera Continuity\n\nFor a continuous shot across clips, use Cameras with `Continuous / Same Shot` and preserve the same-space/entity-continuity contract.\n\nFor intentional transitions, choose the transition in Cameras rather than describing competing camera edits inside each Planner prompt."
+      },
+      "color": "#222",
+      "bgcolor": "#000"
+    },
+    {
+      "id": 309,
+      "type": "MarkdownNote",
+      "pos": [
+        -4600,
+        -250
+      ],
+      "size": [
+        710,
+        920
+      ],
+      "flags": {},
+      "order": 21,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "# Long Media Cameras — Quick Guide",
+      "properties": {},
+      "widgets_values": [
+        "# Long Media Cameras — Quick Guide\n\n**Long Media Cameras** controls camera direction independently from scene content.\n\n## Recommended connection\n\n```text\nLong Media Planner\n        ↓ clip_plan\nLong Media Cameras\n        ↓ clip_plan\nLong Media Setup\n```\n\nIn **Long Media Setup**, select:\n\n```text\nTimeline Mode: multiclip\n```\n\nThe Cameras node can also be used standalone, but Planner → Cameras → Setup is the recommended MultiClip workflow.\n\n## Auto Sync Planner\n\nKeep **Auto Sync Planner = ON** when a Planner is connected.\n\nCameras then:\n\n- creates one camera card for each Planner clip;\n- keeps camera cards associated through the stable `clip_id`;\n- follows Planner clip reordering;\n- preserves camera settings when clips move;\n- disables `Transition to Next` automatically on the final clip.\n\n## Camera-card controls\n\nEach camera card controls one clip:\n\n- **Shot Size** — framing and camera distance.\n- **Rig / Support** — physical camera support or capture behavior.\n- **Camera Body** — camera / sensor character.\n- **Lens** — lens family and focal length.\n- **Stabilization** — stabilization character.\n- **Movement Path** — camera trajectory.\n- **Movement Intensity** — movement speed and strength.\n- **Transition Type** — relation to the following clip.\n- **Space Relation** — whether the next clip remains in the same, adjacent, or different space.\n- **Entity Continuity** — how strongly people and scene layout remain spatially consistent.\n- **Transition to Next** — enables the camera-transition contract for the next card.\n\n## Transition Type\n\n### Continuous / Same Shot\n\nUse this when the next clip should feel like the same uninterrupted camera shot.\n\nThis is the best default for long continuous sequences.\n\n### Threshold Entry\n\nUse when the camera moves through a physical boundary such as a doorway, arch, gate, corridor entrance, tunnel, or similar transition between adjacent spaces.\n\n### Occluded Hidden Cut\n\nUses visual occlusion as the transition boundary. This is useful when the sequence should feel continuous while allowing a hidden editorial transition.\n\n### Hard Cut\n\nCreates an intentional visible editorial cut. It is normally paired with **Different Space** when the next clip changes location.\n\n## Camera presets\n\nThe node includes sequence presets:\n\n- Continuous Push-In\n- Reveal Pull-Back\n- Ritual Orbit\n- Lateral Reveal\n- Descent Into Scene\n- Slow Cinematic Drift\n- Static Tension → Push\n- Approach → Threshold → Interior\n\nA preset fills the camera cards for the complete sequence. Every card remains editable afterward.\n\n## Prompt ownership\n\nWhen **Long Media Cameras** is connected, let Cameras own operator language.\n\nUse Planner prompts mainly for:\n\n- characters;\n- actions and body movement;\n- environment;\n- lighting;\n- atmosphere;\n- object interaction;\n- scene development.\n\nCameras compiles its own camera instructions into the Planner output and strips conflicting camera directives from Planner text. Keeping scene content and camera direction separate gives the cleanest control.\n\n## Example\n\nPlanner:\n\n```text\nclip_1:\nThe woman walks slowly through the empty ceremonial hall.\n\nclip_2:\nShe continues forward and gradually raises her right hand toward the altar.\n\nclip_3:\nHer hand reaches the glowing surface and the surrounding symbols activate.\n```\n\nCameras:\n\n```text\nClip 1: Wide Shot · Track Forward · Slow\nClip 2: Medium Shot · Track Forward · Slow\nClip 3: Medium Close-Up · Push-In · Ultra Slow\nTransition: Continuous / Same Shot\nSpace: Same Space\nEntity Continuity: Lock Population / Layout\n```"
+      ],
+      "widgets_values_named": {
+        "text": "# Long Media Cameras — Quick Guide\n\n**Long Media Cameras** controls camera direction independently from scene content.\n\n## Recommended connection\n\n```text\nLong Media Planner\n        ↓ clip_plan\nLong Media Cameras\n        ↓ clip_plan\nLong Media Setup\n```\n\nIn **Long Media Setup**, select:\n\n```text\nTimeline Mode: multiclip\n```\n\nThe Cameras node can also be used standalone, but Planner → Cameras → Setup is the recommended MultiClip workflow.\n\n## Auto Sync Planner\n\nKeep **Auto Sync Planner = ON** when a Planner is connected.\n\nCameras then:\n\n- creates one camera card for each Planner clip;\n- keeps camera cards associated through the stable `clip_id`;\n- follows Planner clip reordering;\n- preserves camera settings when clips move;\n- disables `Transition to Next` automatically on the final clip.\n\n## Camera-card controls\n\nEach camera card controls one clip:\n\n- **Shot Size** — framing and camera distance.\n- **Rig / Support** — physical camera support or capture behavior.\n- **Camera Body** — camera / sensor character.\n- **Lens** — lens family and focal length.\n- **Stabilization** — stabilization character.\n- **Movement Path** — camera trajectory.\n- **Movement Intensity** — movement speed and strength.\n- **Transition Type** — relation to the following clip.\n- **Space Relation** — whether the next clip remains in the same, adjacent, or different space.\n- **Entity Continuity** — how strongly people and scene layout remain spatially consistent.\n- **Transition to Next** — enables the camera-transition contract for the next card.\n\n## Transition Type\n\n### Continuous / Same Shot\n\nUse this when the next clip should feel like the same uninterrupted camera shot.\n\nThis is the best default for long continuous sequences.\n\n### Threshold Entry\n\nUse when the camera moves through a physical boundary such as a doorway, arch, gate, corridor entrance, tunnel, or similar transition between adjacent spaces.\n\n### Occluded Hidden Cut\n\nUses visual occlusion as the transition boundary. This is useful when the sequence should feel continuous while allowing a hidden editorial transition.\n\n### Hard Cut\n\nCreates an intentional visible editorial cut. It is normally paired with **Different Space** when the next clip changes location.\n\n## Camera presets\n\nThe node includes sequence presets:\n\n- Continuous Push-In\n- Reveal Pull-Back\n- Ritual Orbit\n- Lateral Reveal\n- Descent Into Scene\n- Slow Cinematic Drift\n- Static Tension → Push\n- Approach → Threshold → Interior\n\nA preset fills the camera cards for the complete sequence. Every card remains editable afterward.\n\n## Prompt ownership\n\nWhen **Long Media Cameras** is connected, let Cameras own operator language.\n\nUse Planner prompts mainly for:\n\n- characters;\n- actions and body movement;\n- environment;\n- lighting;\n- atmosphere;\n- object interaction;\n- scene development.\n\nCameras compiles its own camera instructions into the Planner output and strips conflicting camera directives from Planner text. Keeping scene content and camera direction separate gives the cleanest control.\n\n## Example\n\nPlanner:\n\n```text\nclip_1:\nThe woman walks slowly through the empty ceremonial hall.\n\nclip_2:\nShe continues forward and gradually raises her right hand toward the altar.\n\nclip_3:\nHer hand reaches the glowing surface and the surrounding symbols activate.\n```\n\nCameras:\n\n```text\nClip 1: Wide Shot · Track Forward · Slow\nClip 2: Medium Shot · Track Forward · Slow\nClip 3: Medium Close-Up · Push-In · Ultra Slow\nTransition: Continuous / Same Shot\nSpace: Same Space\nEntity Continuity: Lock Population / Layout\n```"
+      },
+      "color": "#222",
+      "bgcolor": "#000"
+    },
+    {
+      "id": 30,
+      "type": "SetNode",
+      "pos": [
+        -1730,
+        490
+      ],
+      "size": [
+        230,
+        40
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 56,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "link": 453
+        }
+      ],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "title": "Set_prompt",
+      "properties": {
+        "Node name for S&R": "SetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes",
+        "previousName": "prompt"
+      },
+      "widgets_values": [
+        "prompt"
+      ],
+      "widgets_values_named": {
+        "Constant": "prompt"
+      }
+    },
+    {
+      "id": 311,
+      "type": "MiniMaxH3LongMediaCameras",
+      "pos": [
+        -920,
+        500
+      ],
+      "size": [
+        770,
+        950
+      ],
+      "flags": {},
+      "order": 67,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip_plan",
+          "shape": 7,
+          "type": "H3_LONGMEDIA_CLIP_PLAN",
+          "link": 466
+        }
+      ],
+      "outputs": [
+        {
+          "name": "clip_plan",
+          "type": "H3_LONGMEDIA_CLIP_PLAN",
+          "links": [
+            467
+          ]
+        },
+        {
+          "name": "camera_plan",
+          "type": "H3_LONGMEDIA_CAMERA_PLAN",
+          "links": null
+        },
+        {
+          "name": "clip_count",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "name": "report",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "MiniMaxH3LongMediaCameras"
+      },
+      "widgets_values": [
+        true,
+        "[{\"clip_id\":\"clip-5b9855bb-58de-4edb-b428-2c094782a9da\",\"clip_name\":\"\",\"shot_size\":\"Medium Shot\",\"rig\":\"Tripod / Locked Head\",\"camera_body\":\"Cinematic Neutral\",\"lens\":\"Auto / Native Lens\",\"stabilization\":\"Rig Native\",\"movement\":\"Locked-Off / Static\",\"speed\":\"Static\",\"transition_type\":\"Continuous / Same Shot\",\"space_relation\":\"Same Space\",\"entity_continuity\":\"Lock Population / Layout\",\"transition_to_next\":false},{\"clip_id\":\"clip-0aa0799c-89b0-4afb-8161-1229b193e865\",\"clip_name\":\"\",\"shot_size\":\"Medium Shot\",\"rig\":\"Tripod / Locked Head\",\"camera_body\":\"Cinematic Neutral\",\"lens\":\"Auto / Native Lens\",\"stabilization\":\"Rig Native\",\"movement\":\"Locked-Off / Static\",\"speed\":\"Static\",\"transition_type\":\"Continuous / Same Shot\",\"space_relation\":\"Same Space\",\"entity_continuity\":\"Lock Population / Layout\",\"transition_to_next\":false},{\"clip_id\":\"clip-766556be-b8e1-4f1c-a84d-9138dad7536b\",\"clip_name\":\"\",\"shot_size\":\"Medium Shot\",\"rig\":\"Tripod / Locked Head\",\"camera_body\":\"Cinematic Neutral\",\"lens\":\"Auto / Native Lens\",\"stabilization\":\"Rig Native\",\"movement\":\"Locked-Off / Static\",\"speed\":\"Static\",\"transition_type\":\"Continuous / Same Shot\",\"space_relation\":\"Same Space\",\"entity_continuity\":\"Lock Population / Layout\",\"transition_to_next\":false}]",
+        false,
+        ""
+      ],
+      "widgets_values_named": {
+        "auto_sync_planner": true,
+        "cameras_json": "[{\"clip_id\":\"clip-5b9855bb-58de-4edb-b428-2c094782a9da\",\"clip_name\":\"\",\"shot_size\":\"Medium Shot\",\"rig\":\"Tripod / Locked Head\",\"camera_body\":\"Cinematic Neutral\",\"lens\":\"Auto / Native Lens\",\"stabilization\":\"Rig Native\",\"movement\":\"Locked-Off / Static\",\"speed\":\"Static\",\"transition_type\":\"Continuous / Same Shot\",\"space_relation\":\"Same Space\",\"entity_continuity\":\"Lock Population / Layout\",\"transition_to_next\":false},{\"clip_id\":\"clip-0aa0799c-89b0-4afb-8161-1229b193e865\",\"clip_name\":\"\",\"shot_size\":\"Medium Shot\",\"rig\":\"Tripod / Locked Head\",\"camera_body\":\"Cinematic Neutral\",\"lens\":\"Auto / Native Lens\",\"stabilization\":\"Rig Native\",\"movement\":\"Locked-Off / Static\",\"speed\":\"Static\",\"transition_type\":\"Continuous / Same Shot\",\"space_relation\":\"Same Space\",\"entity_continuity\":\"Lock Population / Layout\",\"transition_to_next\":false},{\"clip_id\":\"clip-766556be-b8e1-4f1c-a84d-9138dad7536b\",\"clip_name\":\"\",\"shot_size\":\"Medium Shot\",\"rig\":\"Tripod / Locked Head\",\"camera_body\":\"Cinematic Neutral\",\"lens\":\"Auto / Native Lens\",\"stabilization\":\"Rig Native\",\"movement\":\"Locked-Off / Static\",\"speed\":\"Static\",\"transition_type\":\"Continuous / Same Shot\",\"space_relation\":\"Same Space\",\"entity_continuity\":\"Lock Population / Layout\",\"transition_to_next\":false}]",
+        "sync_request": false,
+        "camera_editor": ""
+      }
+    },
+    {
+      "id": 80,
+      "type": "MarkdownNote",
+      "pos": [
+        450,
+        1030
+      ],
+      "size": [
+        250,
+        390
+      ],
+      "flags": {
+        "collapsed": false
+      },
+      "order": 22,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "Note: Size Settings Reference",
+      "properties": {},
+      "widgets_values": [
+        "| megapixels | Aspect | Output (multiple=32) |\n|---|---|---|\n| 0.2 | 16:9 | 608 x 352 |\n| 0.3 | 16:9 | 736 x 416 |\n| 0.4 | 16:9 | 864 x 480 |\n| 0.5 | 16:9 | 960 x 544 |\n| 0.6 | 16:9 | 1056 x 608 |\n| 0.7 | 16:9 | 1152 x 640 |\n| 0.8 | 16:9 | 1216 x 672 |\n| 0.9 | 16:9 | 1280 x 736 |\n| 0.98 | 16:9 | 1344 x 768 |\n| 1.0 | 16:9 | 1376 x 768 |\n| 1.2 | 16:9 | 1504 x 832 |\n| 1.5 | 16:9 | 1664 x 928 |\n| 1.8 | 16:9 | 1824 x 1024 |\n| 2.0 | 16:9 | 1920 x 1088 |\n"
+      ],
+      "widgets_values_named": {
+        "text": "| megapixels | Aspect | Output (multiple=32) |\n|---|---|---|\n| 0.2 | 16:9 | 608 x 352 |\n| 0.3 | 16:9 | 736 x 416 |\n| 0.4 | 16:9 | 864 x 480 |\n| 0.5 | 16:9 | 960 x 544 |\n| 0.6 | 16:9 | 1056 x 608 |\n| 0.7 | 16:9 | 1152 x 640 |\n| 0.8 | 16:9 | 1216 x 672 |\n| 0.9 | 16:9 | 1280 x 736 |\n| 0.98 | 16:9 | 1344 x 768 |\n| 1.0 | 16:9 | 1376 x 768 |\n| 1.2 | 16:9 | 1504 x 832 |\n| 1.5 | 16:9 | 1664 x 928 |\n| 1.8 | 16:9 | 1824 x 1024 |\n| 2.0 | 16:9 | 1920 x 1088 |\n"
+      },
+      "color": "#222",
+      "bgcolor": "#000"
+    },
+    {
+      "id": 258,
+      "type": "PrimitiveInt",
+      "pos": [
+        -10,
+        1030
+      ],
+      "size": [
+        310,
+        90
+      ],
+      "flags": {},
+      "order": 23,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "INT",
+          "type": "INT",
+          "links": [
+            385
+          ]
+        }
+      ],
+      "title": "FPS",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.33.3",
+        "Node name for S&R": "PrimitiveInt"
+      },
+      "widgets_values": [
+        24,
+        "fixed"
+      ],
+      "widgets_values_named": {
+        "value": 24,
+        "fixed": "fixed"
+      },
+      "color": "#c09430",
+      "bgcolor": "rgba(24,24,27,.9)"
+    },
+    {
+      "id": 11,
+      "type": "BasicScheduler",
+      "pos": [
+        420,
+        220
+      ],
+      "size": [
+        370,
+        110
+      ],
+      "flags": {},
+      "order": 70,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 67
+        }
+      ],
+      "outputs": [
+        {
+          "name": "SIGMAS",
+          "type": "SIGMAS",
+          "links": [
+            18
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.30.1",
+        "Node name for S&R": "BasicScheduler"
+      },
+      "widgets_values": [
+        "beta",
+        8,
+        1
+      ],
+      "widgets_values_named": {
+        "scheduler": "beta",
+        "steps": 8,
+        "denoise": 1
+      }
+    },
+    {
+      "id": 47,
+      "type": "MiniMaxH3SigmaShift",
+      "pos": [
+        490,
+        -40
+      ],
+      "size": [
+        230,
+        90
+      ],
+      "flags": {
+        "collapsed": false
+      },
+      "order": 64,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 460
+        }
+      ],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            67,
+            313
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.30.0",
+        "Node name for S&R": "MiniMaxH3SigmaShift",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "input_ue_unconnectable": {}
+        }
+      },
+      "widgets_values": [
+        12,
+        3
+      ],
+      "widgets_values_named": {
+        "shift_video": 12,
+        "shift_audio": 3
+      },
+      "color": "#c09430",
+      "bgcolor": "rgba(24,24,27,.9)"
+    },
+    {
+      "id": 216,
+      "type": "ModelAttentionBackend",
+      "pos": [
+        460,
+        -170
+      ],
+      "size": [
+        290,
+        60
+      ],
+      "flags": {},
+      "order": 50,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 461
+        }
+      ],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            460
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.33.3",
+        "Node name for S&R": "ModelAttentionBackend"
+      },
+      "widgets_values": [
+        "comfy kitchen attention"
+      ],
+      "widgets_values_named": {
+        "attention": "comfy kitchen attention"
+      },
+      "color": "#c09430",
+      "bgcolor": "rgba(24,24,27,.9)"
+    },
+    {
+      "id": 318,
+      "type": "GetNode",
+      "pos": [
+        -80,
+        220
+      ],
+      "size": [
+        210,
+        60
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 24,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            471
+          ]
+        }
+      ],
+      "title": "Get_video",
+      "properties": {
+        "Node name for S&R": "GetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes"
+      },
+      "widgets_values": [
+        "video"
+      ],
+      "widgets_values_named": {
+        "Constant": "video"
+      },
+      "color": "#006691",
+      "bgcolor": "rgba(24,24,27,.9)"
+    },
+    {
+      "id": 135,
+      "type": "GetNode",
+      "pos": [
+        -80,
+        320
+      ],
+      "size": [
+        210,
+        60
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 25,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "INT",
+          "type": "INT",
+          "links": [
+            378
+          ]
+        }
+      ],
+      "title": "Get_width",
+      "properties": {
+        "Node name for S&R": "GetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes"
+      },
+      "widgets_values": [
+        "width"
+      ],
+      "widgets_values_named": {
+        "Constant": "width"
+      },
+      "color": "#1b4669",
+      "bgcolor": "#29699c"
+    },
+    {
+      "id": 136,
+      "type": "GetNode",
+      "pos": [
+        -80,
+        380
+      ],
+      "size": [
+        210,
+        60
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 26,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "INT",
+          "type": "INT",
+          "links": [
+            379
+          ]
+        }
+      ],
+      "title": "Get_height",
+      "properties": {
+        "Node name for S&R": "GetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes"
+      },
+      "widgets_values": [
+        "height"
+      ],
+      "widgets_values_named": {
+        "Constant": "height"
+      },
+      "color": "#1b4669",
+      "bgcolor": "#29699c"
+    },
+    {
+      "id": 70,
+      "type": "GetNode",
+      "pos": [
+        -80,
+        70
+      ],
+      "size": [
+        230,
+        50
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 27,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            462
+          ]
+        }
+      ],
+      "title": "Get_i2",
+      "properties": {
+        "Node name for S&R": "GetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes"
+      },
+      "widgets_values": [
+        "i2"
+      ],
+      "widgets_values_named": {
+        "Constant": "i2"
+      },
+      "color": "#006691",
+      "bgcolor": "rgba(24,24,27,.9)"
+    },
+    {
+      "id": 101,
+      "type": "GetNode",
+      "pos": [
+        -80,
+        20
+      ],
+      "size": [
+        210,
+        60
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 28,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            389
+          ]
+        }
+      ],
+      "title": "Get_i1",
+      "properties": {
+        "Node name for S&R": "GetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes"
+      },
+      "widgets_values": [
+        "i1"
+      ],
+      "widgets_values_named": {
+        "Constant": "i1"
+      },
+      "color": "#006691",
+      "bgcolor": "rgba(24,24,27,.9)"
+    },
+    {
+      "id": 215,
+      "type": "MiniMaxH3LatentLabLongMediaSampler",
+      "pos": [
+        1370,
+        -80
+      ],
+      "size": [
+        440,
+        954
+      ],
+      "flags": {},
+      "order": 79,
+      "mode": 4,
+      "inputs": [
+        {
+          "name": "initial_av",
+          "type": "LATENT",
+          "link": 308
+        },
+        {
+          "name": "long_media_plan",
+          "type": "LONG_MEDIA_PLAN",
+          "link": 312
+        },
+        {
+          "name": "guider",
+          "type": "GUIDER",
+          "link": 310
+        },
+        {
+          "name": "sampler",
+          "type": "SAMPLER",
+          "link": 311
+        },
+        {
+          "name": "sigmas",
+          "type": "SIGMAS",
+          "link": 328
+        }
+      ],
+      "outputs": [
+        {
+          "name": "final_av",
+          "type": "LATENT",
+          "links": [
+            309
+          ]
+        },
+        {
+          "name": "total_frames",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "name": "trim_frames",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "name": "passes",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "name": "report",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "MiniMaxH3LatentLabLongMediaSampler",
+        "cnr_id": "minimax-h3-longmedia",
+        "ver": "4a31874addc3d1b632589ac0454eb990a2736547",
+        "__lm_named_widget_state_v040": {
+          "seed": 42,
+          "control_after_generate": "fixed",
+          "video_context_denoise": 0,
+          "audio_context_denoise": 0,
+          "offload_completed_segments": true,
+          "mlp_chunk_tokens": 8192,
+          "attention_mode": "sol",
+          "sol_tau_start": 1.3,
+          "sol_tau_end": 0.8,
+          "sol_curve": "linear",
+          "sol_min_tokens": 4096,
+          "sol_dense_percent": 0,
+          "sol_sink_conditioning": "exact_kv",
+          "sol_qkv_chunk_tokens": 16384,
+          "sol_out_proj_chunk_tokens": 24576,
+          "vram_activation_reserve_mb": 4096,
+          "inter_block_vram_guard_mb": 2048,
+          "inter_block_guard_cooldown_blocks": 4,
+          "inter_block_guard_emergency_mb": 512,
+          "inter_block_guard_emergency_cooldown_blocks": 3,
+          "late_block_guard_start": 40,
+          "late_block_guard_target_mb": 6144,
+          "late_block_guard_min_cached_mb": 512,
+          "step_boundary_cleanup_mb": 2048,
+          "latent_hires_enabled": false,
+          "latent_hires_model": "(disabled)",
+          "latent_hires_scale": 2,
+          "latent_hires_precision": "bf16",
+          "latent_hires_align": 32,
+          "refine_enabled": false,
+          "refine_add_noise": false,
+          "refine_seed": 0,
+          "refine_steps": 1,
+          "memory_mode": "auto",
+          "sampler_mode": "auto"
+        },
+        "__lm_hires_model_last_v040": "minimax_h3_latent_upscaler_3d_bf16.safetensors"
+      },
+      "widgets_values": [
+        42,
+        "fixed",
+        0,
+        0,
+        true,
+        8192,
+        "sol",
+        1.3,
+        0.8,
+        "linear",
+        4096,
+        0,
+        "exact_kv",
+        16384,
+        24576,
+        4096,
+        2048,
+        4,
+        512,
+        3,
+        40,
+        6144,
+        512,
+        2048,
+        false,
+        "(disabled)",
+        2,
+        "bf16",
+        32,
+        false,
+        false,
+        0,
+        1,
+        "auto",
+        "auto"
+      ],
+      "widgets_values_named": {
+        "seed": 42,
+        "control_after_generate": "fixed",
+        "video_context_denoise": 0,
+        "audio_context_denoise": 0,
+        "offload_completed_segments": true,
+        "mlp_chunk_tokens": 8192,
+        "attention_mode": "sol",
+        "sol_tau_start": 1.3,
+        "sol_tau_end": 0.8,
+        "sol_curve": "linear",
+        "sol_min_tokens": 4096,
+        "sol_dense_percent": 0,
+        "sol_sink_conditioning": "exact_kv",
+        "sol_qkv_chunk_tokens": 16384,
+        "sol_out_proj_chunk_tokens": 24576,
+        "vram_activation_reserve_mb": 4096,
+        "inter_block_vram_guard_mb": 2048,
+        "inter_block_guard_cooldown_blocks": 4,
+        "inter_block_guard_emergency_mb": 512,
+        "inter_block_guard_emergency_cooldown_blocks": 3,
+        "late_block_guard_start": 40,
+        "late_block_guard_target_mb": 6144,
+        "late_block_guard_min_cached_mb": 512,
+        "step_boundary_cleanup_mb": 2048,
+        "latent_hires_enabled": false,
+        "latent_hires_model": "(disabled)",
+        "latent_hires_scale": 2,
+        "latent_hires_precision": "bf16",
+        "latent_hires_align": 32,
+        "refine_enabled": false,
+        "refine_add_noise": false,
+        "refine_seed": 0,
+        "refine_steps": 1,
+        "memory_mode": "auto",
+        "sampler_mode": "auto"
+      }
+    },
+    {
+      "id": 320,
+      "type": "MelBandRoFormerModelLoader",
+      "pos": [
+        -2270,
+        -1020
+      ],
+      "size": [
+        300,
+        60
+      ],
+      "flags": {},
+      "order": 29,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "model",
+          "type": "MELROFORMERMODEL",
+          "links": [
+            478
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "ComfyUI-MelBandRoFormer",
+        "ver": "b40e263224778ec417114d91d8b3b39934e30de5",
+        "Node name for S&R": "MelBandRoFormerModelLoader",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "version": "7.5.2",
+          "input_ue_unconnectable": {}
+        }
+      },
+      "widgets_values": [
+        "MelBand\\MelBandRoformer_fp16.safetensors"
+      ],
+      "widgets_values_named": {
+        "model_name": "MelBand\\MelBandRoformer_fp16.safetensors"
+      }
+    },
+    {
+      "id": 321,
+      "type": "NormalizeAudioLoudness",
+      "pos": [
+        -2260,
+        -890
+      ],
+      "size": [
+        280,
+        60
+      ],
+      "flags": {
+        "collapsed": false
+      },
+      "order": 65,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "link": 473
+        }
+      ],
+      "outputs": [
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "links": [
+            475,
+            479
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "ComfyUI-WanVideoWrapper",
+        "ver": "088128b224242e110d3906c6750e9a3a348a659b",
+        "Node name for S&R": "NormalizeAudioLoudness",
+        "aux_id": "kijai/ComfyUI-WanVideoWrapper"
+      },
+      "widgets_values": [
+        -13
+      ],
+      "widgets_values_named": {
+        "lufs": -13
+      }
+    },
+    {
+      "id": 328,
+      "type": "SetNode",
+      "pos": [
+        -1430,
+        -970
+      ],
+      "size": [
+        210,
+        40
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 77,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "AUDIO",
+          "type": "AUDIO",
+          "link": 481
+        }
+      ],
+      "outputs": [
+        {
+          "name": "AUDIO",
+          "type": "AUDIO",
+          "links": null
+        }
+      ],
+      "title": "Set_audio_0",
+      "properties": {
+        "Node name for S&R": "SetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes",
+        "previousName": "audio_0"
+      },
+      "widgets_values": [
+        "audio_0"
+      ],
+      "widgets_values_named": {
+        "Constant": "audio_0"
+      }
+    },
+    {
+      "id": 2,
+      "type": "MiniMaxH3LatentLabLongMediaSampler",
+      "pos": [
+        830,
+        -170
+      ],
+      "size": [
+        450,
+        954
+      ],
+      "flags": {},
+      "order": 78,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "initial_av",
+          "type": "LATENT",
+          "link": 210
+        },
+        {
+          "name": "long_media_plan",
+          "type": "LONG_MEDIA_PLAN",
+          "link": 2
+        },
+        {
+          "name": "guider",
+          "type": "GUIDER",
+          "link": 16
+        },
+        {
+          "name": "sampler",
+          "type": "SAMPLER",
+          "link": 295
+        },
+        {
+          "name": "sigmas",
+          "type": "SIGMAS",
+          "link": 18
+        },
+        {
+          "name": "seed",
+          "type": "INT",
+          "widget": {
+            "name": "seed"
+          },
+          "link": 245
+        }
+      ],
+      "outputs": [
+        {
+          "name": "final_av",
+          "type": "LATENT",
+          "slot_index": 0,
+          "links": [
+            308
+          ]
+        },
+        {
+          "name": "total_frames",
+          "type": "INT",
+          "slot_index": 1,
+          "links": null
+        },
+        {
+          "name": "trim_frames",
+          "type": "INT",
+          "slot_index": 2,
+          "links": null
+        },
+        {
+          "name": "passes",
+          "type": "INT",
+          "slot_index": 3,
+          "links": null
+        },
+        {
+          "name": "report",
+          "type": "STRING",
+          "slot_index": 4,
+          "links": null
+        }
+      ],
+      "properties": {
+        "aux_id": "vizart-vj/ComfyUI-MiniMax-H3-LongMedia",
+        "Node name for S&R": "MiniMaxH3LatentLabLongMediaSampler",
+        "cnr_id": "minimax-h3-longmedia",
+        "ver": "eb931f1c4ce118229ab8bdfdbfebcf0e37e25284",
+        "__lm_named_widget_state_v040": {
+          "seed": 603620304248137,
+          "control_after_generate": "randomize",
+          "video_context_denoise": 0,
+          "audio_context_denoise": 0,
+          "offload_completed_segments": true,
+          "mlp_chunk_tokens": 8192,
+          "attention_mode": "existing",
+          "sol_tau_start": 1.3,
+          "sol_tau_end": 0.8,
+          "sol_curve": "linear",
+          "sol_min_tokens": 4096,
+          "sol_dense_percent": 0,
+          "sol_sink_conditioning": "exact_kv",
+          "sol_qkv_chunk_tokens": 8192,
+          "sol_out_proj_chunk_tokens": 24576,
+          "vram_activation_reserve_mb": 4096,
+          "inter_block_vram_guard_mb": 2048,
+          "inter_block_guard_cooldown_blocks": 4,
+          "inter_block_guard_emergency_mb": 512,
+          "inter_block_guard_emergency_cooldown_blocks": 3,
+          "late_block_guard_start": 40,
+          "late_block_guard_target_mb": 6144,
+          "late_block_guard_min_cached_mb": 512,
+          "step_boundary_cleanup_mb": 2048,
+          "latent_hires_enabled": false,
+          "latent_hires_model": "(disabled)",
+          "latent_hires_scale": 1.2,
+          "latent_hires_precision": "bf16",
+          "latent_hires_align": 32,
+          "refine_enabled": false,
+          "refine_add_noise": false,
+          "refine_seed": 0,
+          "refine_steps": 3,
+          "memory_mode": "auto",
+          "sampler_mode": "auto"
+        },
+        "__lm_hires_model_last_v040": "minimax_h3_latent_upscaler_3d_bf16.safetensors"
+      },
+      "widgets_values": [
+        603620304248137,
+        "randomize",
+        0,
+        0,
+        true,
+        8192,
+        "existing",
+        1.3,
+        0.8,
+        "linear",
+        4096,
+        0,
+        "exact_kv",
+        8192,
+        24576,
+        4096,
+        2048,
+        4,
+        512,
+        3,
+        40,
+        6144,
+        512,
+        2048,
+        false,
+        "(disabled)",
+        1.2,
+        "bf16",
+        32,
+        false,
+        false,
+        0,
+        3,
+        "auto",
+        "auto"
+      ],
+      "widgets_values_named": {
+        "seed": 603620304248137,
+        "control_after_generate": "randomize",
+        "video_context_denoise": 0,
+        "audio_context_denoise": 0,
+        "offload_completed_segments": true,
+        "mlp_chunk_tokens": 8192,
+        "attention_mode": "existing",
+        "sol_tau_start": 1.3,
+        "sol_tau_end": 0.8,
+        "sol_curve": "linear",
+        "sol_min_tokens": 4096,
+        "sol_dense_percent": 0,
+        "sol_sink_conditioning": "exact_kv",
+        "sol_qkv_chunk_tokens": 8192,
+        "sol_out_proj_chunk_tokens": 24576,
+        "vram_activation_reserve_mb": 4096,
+        "inter_block_vram_guard_mb": 2048,
+        "inter_block_guard_cooldown_blocks": 4,
+        "inter_block_guard_emergency_mb": 512,
+        "inter_block_guard_emergency_cooldown_blocks": 3,
+        "late_block_guard_start": 40,
+        "late_block_guard_target_mb": 6144,
+        "late_block_guard_min_cached_mb": 512,
+        "step_boundary_cleanup_mb": 2048,
+        "latent_hires_enabled": false,
+        "latent_hires_model": "(disabled)",
+        "latent_hires_scale": 1.2,
+        "latent_hires_precision": "bf16",
+        "latent_hires_align": 32,
+        "refine_enabled": false,
+        "refine_add_noise": false,
+        "refine_seed": 0,
+        "refine_steps": 3,
+        "memory_mode": "auto",
+        "sampler_mode": "auto"
+      }
+    },
+    {
+      "id": 314,
+      "type": "GetNode",
+      "pos": [
+        -80,
+        270
+      ],
+      "size": [
+        210,
+        60
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 30,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "AUDIO",
+          "type": "AUDIO",
+          "links": [
+            469
+          ]
+        }
+      ],
+      "title": "Get_audio_0",
+      "properties": {
+        "Node name for S&R": "GetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes"
+      },
+      "widgets_values": [
+        "audio_0"
+      ],
+      "widgets_values_named": {
+        "Constant": "audio_0"
+      }
+    },
+    {
+      "id": 323,
+      "type": "SetNode",
+      "pos": [
+        -1540,
+        -1020
+      ],
+      "size": [
+        210,
+        40
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 73,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "AUDIO",
+          "type": "AUDIO",
+          "link": 474
+        }
+      ],
+      "outputs": [
+        {
+          "name": "AUDIO",
+          "type": "AUDIO",
+          "links": null
+        }
+      ],
+      "title": "Set_audio_vocals",
+      "properties": {
+        "Node name for S&R": "SetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes",
+        "previousName": "audio_vocals"
+      },
+      "widgets_values": [
+        "audio_vocals"
+      ],
+      "widgets_values_named": {
+        "Constant": "audio_vocals"
+      }
+    },
+    {
+      "id": 326,
+      "type": "MelBandRoFormerSampler",
+      "pos": [
+        -1870,
+        -1010
+      ],
+      "size": [
+        260,
+        60
+      ],
+      "flags": {},
+      "order": 71,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MELROFORMERMODEL",
+          "link": 478
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "link": 479
+        }
+      ],
+      "outputs": [
+        {
+          "name": "vocals",
+          "type": "AUDIO",
+          "links": [
+            474,
+            476
+          ]
+        },
+        {
+          "name": "instruments",
+          "type": "AUDIO",
+          "links": []
+        }
+      ],
+      "properties": {
+        "cnr_id": "ComfyUI-MelBandRoFormer",
+        "ver": "b40e263224778ec417114d91d8b3b39934e30de5",
+        "Node name for S&R": "MelBandRoFormerSampler",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "version": "7.5.2",
+          "input_ue_unconnectable": {}
+        }
+      }
+    },
+    {
+      "id": 102,
+      "type": "LoadImage",
+      "pos": [
+        -2330,
+        -80
+      ],
+      "size": [
+        290,
+        330
+      ],
+      "flags": {},
+      "order": 31,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            153
+          ]
+        },
+        {
+          "name": "MASK",
+          "type": "MASK",
+          "links": null
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.30.0",
+        "Node name for S&R": "LoadImage"
+      },
+      "widgets_values": [
+        "REPLACE_ME_image_4.png",
+        "image"
+      ],
+      "widgets_values_named": {
+        "image": "REPLACE_ME_image_4.png",
+        "upload": "image"
+      }
+    },
+    {
+      "id": 4,
+      "type": "UNETLoader",
+      "pos": [
+        -800,
+        -170
+      ],
+      "size": [
+        640,
+        90
+      ],
+      "flags": {},
+      "order": 32,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            461
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.30.1",
+        "Node name for S&R": "UNETLoader",
+        "models": [
+          {
+            "name": "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+            "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+            "directory": "diffusion_models"
+          }
+        ]
+      },
+      "widgets_values": [
+        "Minimax\\minimax_h3_fl2va_pruned_w4a8_mixed.safetensors",
+        "default"
+      ],
+      "widgets_values_named": {
+        "unet_name": "Minimax\\minimax_h3_fl2va_pruned_w4a8_mixed.safetensors",
+        "weight_dtype": "default"
+      }
+    },
+    {
+      "id": 324,
+      "type": "ComfySwitchNode",
+      "pos": [
+        -1870,
+        -890
+      ],
+      "size": [
+        260,
+        80
+      ],
+      "flags": {
+        "collapsed": false
+      },
+      "order": 74,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "on_false",
+          "type": "AUDIO",
+          "link": 475
+        },
+        {
+          "name": "on_true",
+          "type": "AUDIO",
+          "link": 476
+        }
+      ],
+      "outputs": [
+        {
+          "name": "output",
+          "type": "AUDIO",
+          "links": [
+            480,
+            481
+          ]
+        }
+      ],
+      "title": "USE VOCALS ONLY",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.16.4",
+        "Node name for S&R": "ComfySwitchNode"
+      },
+      "widgets_values": [
+        true
+      ],
+      "widgets_values_named": {
+        "switch": true
+      },
+      "color": "#c09430",
+      "bgcolor": "rgba(24,24,27,.9)"
+    },
+    {
+      "id": 327,
+      "type": "PreviewAudio",
+      "pos": [
+        -1570,
+        -790
+      ],
+      "size": [
+        300,
+        90
+      ],
+      "flags": {},
+      "order": 76,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "link": 480
+        }
+      ],
+      "outputs": [
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "links": []
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.30.0",
+        "Node name for S&R": "PreviewAudio"
+      },
+      "widgets_values": [],
+      "widgets_values_named": {}
+    },
+    {
+      "id": 319,
+      "type": "LoadAudio",
+      "pos": [
+        -2260,
+        -770
+      ],
+      "size": [
+        290,
+        140
+      ],
+      "flags": {},
+      "order": 33,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "AUDIO",
+          "type": "AUDIO",
+          "links": [
+            482
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.34.0",
+        "Node name for S&R": "LoadAudio"
+      },
+      "widgets_values": [
+        "REPLACE_ME_audio_1.wav",
+        null,
+        null
+      ],
+      "widgets_values_named": {
+        "audio": "REPLACE_ME_audio_1.wav",
+        "upload": null
+      }
+    },
+    {
+      "id": 325,
+      "type": "TrimAudioDuration",
+      "pos": [
+        -1870,
+        -730
+      ],
+      "size": [
+        260,
+        90
+      ],
+      "flags": {},
+      "order": 51,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "link": 482
+        }
+      ],
+      "outputs": [
+        {
+          "name": "AUDIO",
+          "type": "AUDIO",
+          "links": [
+            473,
+            484
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.30.0",
+        "Node name for S&R": "TrimAudioDuration"
+      },
+      "widgets_values": [
+        22,
+        37
+      ],
+      "widgets_values_named": {
+        "start_index": 22,
+        "duration": 37
+      }
+    },
+    {
+      "id": 329,
+      "type": "SetNode",
+      "pos": [
+        -1540,
+        -640
+      ],
+      "size": [
+        210,
+        60
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 66,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "AUDIO",
+          "type": "AUDIO",
+          "link": 484
+        }
+      ],
+      "outputs": [
+        {
+          "name": "AUDIO",
+          "type": "AUDIO",
+          "links": null
+        }
+      ],
+      "title": "Set_audio_orig",
+      "properties": {
+        "Node name for S&R": "SetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes",
+        "previousName": "audio_orig"
+      },
+      "widgets_values": [
+        "audio_orig"
+      ],
+      "widgets_values_named": {
+        "Constant": "audio_orig"
+      }
+    },
+    {
+      "id": 1,
+      "type": "MiniMaxH3LatentLabLongMediaSetup",
+      "pos": [
+        -90,
+        -160
+      ],
+      "size": [
+        460,
+        832
+      ],
+      "flags": {
+        "collapsed": false
+      },
+      "order": 72,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 27
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 28
+        },
+        {
+          "name": "audio_vae",
+          "type": "VAE",
+          "link": 39
+        },
+        {
+          "label": "clip_plan • ignored",
+          "name": "clip_plan",
+          "shape": 7,
+          "type": "H3_LONGMEDIA_CLIP_PLAN",
+          "link": 467
+        },
+        {
+          "name": "reconstruction",
+          "shape": 7,
+          "type": "H3_LONGMEDIA_RECONSTRUCTION",
+          "link": null
+        },
+        {
+          "label": "image_1 • inactive in T2VA",
+          "name": "image_1",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": 389
+        },
+        {
+          "label": "image_2 • inactive in T2VA",
+          "name": "image_2",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": 462
+        },
+        {
+          "label": "image_3 • inactive in T2VA",
+          "name": "image_3",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": 464
+        },
+        {
+          "label": "image_4 • inactive in T2VA",
+          "name": "image_4",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": 465
+        },
+        {
+          "label": "image_5 • inactive in T2VA",
+          "name": "image_5",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": null
+        },
+        {
+          "label": "video_1 • inactive in T2VA",
+          "name": "video_1",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": 471
+        },
+        {
+          "label": "video_2 • inactive in T2VA",
+          "name": "video_2",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": null
+        },
+        {
+          "label": "audio_1",
+          "name": "audio_1",
+          "shape": 7,
+          "type": "AUDIO",
+          "link": 469
+        },
+        {
+          "label": "audio_2",
+          "name": "audio_2",
+          "shape": 7,
+          "type": "AUDIO",
+          "link": null
+        },
+        {
+          "name": "prompt",
+          "type": "STRING",
+          "widget": {
+            "name": "prompt"
+          },
+          "link": 443
+        },
+        {
+          "name": "width",
+          "type": "INT",
+          "widget": {
+            "name": "width"
+          },
+          "link": 378
+        },
+        {
+          "name": "height",
+          "type": "INT",
+          "widget": {
+            "name": "height"
+          },
+          "link": 379
+        },
+        {
+          "name": "video_fps",
+          "type": "FLOAT",
+          "widget": {
+            "name": "video_fps"
+          },
+          "link": 387
+        }
+      ],
+      "outputs": [
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "slot_index": 0,
+          "links": [
+            60
+          ]
+        },
+        {
+          "name": "long_media_av",
+          "type": "LATENT",
+          "slot_index": 1,
+          "links": [
+            210
+          ]
+        },
+        {
+          "name": "long_media_plan",
+          "type": "LONG_MEDIA_PLAN",
+          "slot_index": 2,
+          "links": [
+            2,
+            4,
+            312
+          ]
+        },
+        {
+          "name": "duration_seconds",
+          "type": "FLOAT",
+          "slot_index": 3,
+          "links": null
+        },
+        {
+          "name": "passes",
+          "type": "INT",
+          "slot_index": 4,
+          "links": null
+        },
+        {
+          "name": "report",
+          "type": "STRING",
+          "slot_index": 5,
+          "links": null
+        }
+      ],
+      "properties": {
+        "aux_id": "vizart-vj/ComfyUI-MiniMax-H3-LongMedia",
+        "Node name for S&R": "MiniMaxH3LatentLabLongMediaSetup",
+        "cnr_id": "minimax-h3-longmedia",
+        "ver": "eb931f1c4ce118229ab8bdfdbfebcf0e37e25284",
+        "__lm_named_widget_state_v040": {
+          "control_mode": "auto",
+          "h3_mode": "t2va",
+          "prompt": "",
+          "width": 768,
+          "height": 768,
+          "timeline_mode": "single",
+          "duration_source": "manual",
+          "manual_duration": 10,
+          "segment_seconds": 10,
+          "overlap_frames": 22,
+          "transition_frames": 22,
+          "loop_closure_enabled": false,
+          "loop_closure_frames": 56,
+          "loop_closure_strength": 0.65,
+          "resolution_mode": "match",
+          "reference_budget": "low",
+          "video_fps": 24,
+          "video_mode": "auto",
+          "audio_mode": "auto",
+          "conditioning_mode": "auto_refs",
+          "release_guard": true,
+          "workflow_mode": "ref2va_full",
+          "multiclip_json": "[{\"prompt\":\"\",\"duration\":7.5,\"seed\":null},{\"prompt\":\"\",\"duration\":7.5,\"seed\":null}]",
+          "first_frame_mode": "latent_inject",
+          "first_frame_denoise": 0.25,
+          "first_frame_blend_frames": 3
+        }
+      },
+      "widgets_values": [
+        "auto",
+        "t2va",
+        "",
+        768,
+        768,
+        "single",
+        "manual",
+        10,
+        10,
+        22,
+        22,
+        false,
+        56,
+        0.65,
+        "match",
+        "low",
+        24,
+        "auto",
+        "auto",
+        "auto_refs",
+        true,
+        "ref2va_full",
+        "[{\"prompt\":\"\",\"duration\":7.5,\"seed\":null},{\"prompt\":\"\",\"duration\":7.5,\"seed\":null}]",
+        "latent_inject",
+        0.25,
+        3
+      ],
+      "widgets_values_named": {
+        "control_mode": "auto",
+        "h3_mode": "t2va",
+        "prompt": "",
+        "width": 768,
+        "height": 768,
+        "timeline_mode": "single",
+        "duration_source": "manual",
+        "manual_duration": 10,
+        "segment_seconds": 10,
+        "overlap_frames": 22,
+        "transition_frames": 22,
+        "loop_closure_enabled": false,
+        "loop_closure_frames": 56,
+        "loop_closure_strength": 0.65,
+        "resolution_mode": "match",
+        "reference_budget": "low",
+        "video_fps": 24,
+        "video_mode": "auto",
+        "audio_mode": "auto",
+        "conditioning_mode": "auto_refs",
+        "release_guard": true,
+        "workflow_mode": "ref2va_full",
+        "multiclip_json": "[{\"prompt\":\"\",\"duration\":7.5,\"seed\":null},{\"prompt\":\"\",\"duration\":7.5,\"seed\":null}]",
+        "first_frame_mode": "latent_inject",
+        "first_frame_denoise": 0.25,
+        "first_frame_blend_frames": 3
+      }
+    },
+    {
+      "id": 117,
+      "type": "PrimitiveFloat",
+      "pos": [
+        -10,
+        1350
+      ],
+      "size": [
+        310,
+        60
+      ],
+      "flags": {},
+      "order": 34,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "FLOAT",
+          "type": "FLOAT",
+          "links": [
+            174
+          ]
+        }
+      ],
+      "title": "Megapixel",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.31.0",
+        "Node name for S&R": "PrimitiveFloat"
+      },
+      "widgets_values": [
+        0.5
+      ],
+      "widgets_values_named": {
+        "value": 0.5
+      },
+      "color": "#c09430",
+      "bgcolor": "rgba(24,24,27,.9)"
+    },
+    {
+      "id": 331,
+      "type": "SeedNode",
+      "pos": [
+        10,
+        1190
+      ],
+      "size": [
+        270,
+        90
+      ],
+      "flags": {},
+      "order": 35,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "seed",
+          "type": "INT",
+          "links": [
+            486
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.34.0",
+        "Node name for S&R": "SeedNode"
+      },
+      "widgets_values": [
+        42,
+        "fixed"
+      ],
+      "widgets_values_named": {
+        "seed": 42,
+        "fixed": "fixed"
+      },
+      "color": "#c09430",
+      "bgcolor": "rgba(24,24,27,.9)"
+    },
+    {
+      "id": 256,
+      "type": "MiniMaxH3LongMediaPlanner",
+      "pos": [
+        -1780,
+        500
+      ],
+      "size": [
+        780,
+        950
+      ],
+      "flags": {},
+      "order": 57,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "multiclip_prompt",
+          "type": "STRING",
+          "widget": {
+            "name": "multiclip_prompt"
+          },
+          "link": 454
+        }
+      ],
+      "outputs": [
+        {
+          "name": "clip_plan",
+          "type": "H3_LONGMEDIA_CLIP_PLAN",
+          "links": [
+            466
+          ]
+        },
+        {
+          "name": "clip_count",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "name": "requested_seconds",
+          "type": "FLOAT",
+          "links": null
+        },
+        {
+          "name": "report",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "aux_id": "vizart-vj/ComfyUI-MiniMax-H3-LongMedia",
+        "Node name for S&R": "MiniMaxH3LongMediaPlanner",
+        "cnr_id": "minimax-h3-longmedia",
+        "ver": "eb931f1c4ce118229ab8bdfdbfebcf0e37e25284"
+      },
+      "widgets_values": [
+        "",
+        "",
+        false,
+        "[{\"clip_id\":\"clip-5b9855bb-58de-4edb-b428-2c094782a9da\",\"name\":\"\",\"prompt\":\"\",\"duration\":5,\"seed\":null},{\"clip_id\":\"clip-0aa0799c-89b0-4afb-8161-1229b193e865\",\"name\":\"\",\"prompt\":\"\",\"duration\":5,\"seed\":null},{\"clip_id\":\"clip-766556be-b8e1-4f1c-a84d-9138dad7536b\",\"name\":\"\",\"prompt\":\"\",\"duration\":5,\"seed\":null}]",
+        "",
+        "clip_1:\nduration: 5\nprompt: |\n  A photorealistic, high-resolution night render of a symmetrical classical garden fountain, camera completely locked and static in a wide-angle view.\n  [Subject 1] The scene opens with the exact composition, architectural structure, and lighting palette of the classical garden.\n  [Subject 2] The three-tiered central stone fountain operates in smooth, cinematic slow motion: water jets steadily rise from the central finial nozzle and cascade slowly down all three tiers, creating rhythmic, shimmering sheets and individual glowing, floating water droplets falling gracefully into the main basin.\n  [Subject 3] The two sculpted stone waterfalls on the left and right maintain a steady, decelerated fluid cascade down the textured stone surfaces.\n  [Subject 4] A layer of illuminated, low-lying ground mist drifts and curls very slowly around the base and water pools with cyclical, undulating movement. A gentle, soft breeze causes subtle, slow-motion rhythmic swaying of the tall cypress trees, surrounding bushes, and grass. In the deep blue sky, stars gently twinkle in a synchronized cycle.\n  All fluid and environmental motions are in their initial calm phase of the loop, establishing the continuous, slow-motion infinite seamless loop state.\n  No camera motion, no scene transitions, no particles, no text, and no abrupt changes.\n\nclip_2:\nduration: 5\nprompt: |\n  Continue the same motion from the previous moment, maintaining the exact same composition, camera position, lighting state, and subject identity.\n  [Subject 1] The overall composition, architectural structure, and lighting palette remain identical to the start, with the scene flowing naturally.\n  [Subject 2] The three-tiered central stone fountain continues its smooth, cinematic slow-motion loop: water jets continue rising and cascading, with shimmering sheets and glowing floating water droplets falling gracefully into the main basin, progressing through the middle phase of the cycle.\n  [Subject 3] The two sculpted stone waterfalls on the left and right continue their steady, decelerated fluid cascade down the textured stone surfaces, maintaining the rhythmic flow.\n  [Subject 4] The illuminated, low-lying ground mist continues to drift and curl very slowly around the base and water pools with cyclical, undulating movement. The gentle, soft breeze continues to cause subtle, slow-motion rhythmic swaying of the tall cypress trees, surrounding bushes, and grass. In the deep blue sky, stars continue to gently twinkle in a synchronized cycle.\n  Maintain the locked, static wide-angle view of the symmetrical classical garden fountain. All fluid and environmental motions seamlessly progress toward the return state, achieving a flawless, cinematic slow-motion infinite seamless loop.\n  No camera motion, no scene transitions, no particles, no text, and no abrupt changes.\n\nclip_3:\nduration: 5\nprompt: |\n  Continue the ongoing action from the previous moment, maintaining the exact same composition, camera position, lighting state, and subject identity to complete the loop.\n  [Subject 1] The overall composition, architectural structure, and lighting palette remain identical, completing the cycle and returning naturally to the initial state.\n  [Subject 2] The three-tiered central stone fountain completes its smooth, cinematic slow-motion loop: water jets finish their rise and cascade, with shimmering sheets and glowing floating water droplets falling gracefully into the main basin, returning to the exact visual and motion state of the beginning of the sequence.\n  [Subject 3] The two sculpted stone waterfalls on the left and right complete their steady, decelerated fluid cascade down the textured stone surfaces, returning to the initial calm phase.\n  [Subject 4] The illuminated, low-lying ground mist returns to its starting position, curling very slowly around the base and water pools. The gentle, soft breeze continues to cause subtle, slow-motion rhythmic swaying of the tall cypress trees, surrounding bushes, and grass, returning to the initial sway. In the deep blue sky, stars gently twinkle, completing their synchronized cycle.\n  All fluid and environmental motions seamlessly return to their starting states at the loop boundary, achieving a flawless, cinematic slow-motion infinite seamless loop.\n  Maintain the locked, static wide-angle view of the symmetrical classical garden fountain. No camera motion, no scene transitions, no particles, no text, and no abrupt changes.",
+        ""
+      ],
+      "widgets_values_named": {
+        "global_prompt": "",
+        "multiclip_prompt": "",
+        "multiclip_auto_import": false,
+        "clips_json": "[{\"clip_id\":\"clip-5b9855bb-58de-4edb-b428-2c094782a9da\",\"name\":\"\",\"prompt\":\"\",\"duration\":5,\"seed\":null},{\"clip_id\":\"clip-0aa0799c-89b0-4afb-8161-1229b193e865\",\"name\":\"\",\"prompt\":\"\",\"duration\":5,\"seed\":null},{\"clip_id\":\"clip-766556be-b8e1-4f1c-a84d-9138dad7536b\",\"name\":\"\",\"prompt\":\"\",\"duration\":5,\"seed\":null}]",
+        "multiclip_import_request": "",
+        "multiclip_last_import_source": "clip_1:\nduration: 5\nprompt: |\n  A photorealistic, high-resolution night render of a symmetrical classical garden fountain, camera completely locked and static in a wide-angle view.\n  [Subject 1] The scene opens with the exact composition, architectural structure, and lighting palette of the classical garden.\n  [Subject 2] The three-tiered central stone fountain operates in smooth, cinematic slow motion: water jets steadily rise from the central finial nozzle and cascade slowly down all three tiers, creating rhythmic, shimmering sheets and individual glowing, floating water droplets falling gracefully into the main basin.\n  [Subject 3] The two sculpted stone waterfalls on the left and right maintain a steady, decelerated fluid cascade down the textured stone surfaces.\n  [Subject 4] A layer of illuminated, low-lying ground mist drifts and curls very slowly around the base and water pools with cyclical, undulating movement. A gentle, soft breeze causes subtle, slow-motion rhythmic swaying of the tall cypress trees, surrounding bushes, and grass. In the deep blue sky, stars gently twinkle in a synchronized cycle.\n  All fluid and environmental motions are in their initial calm phase of the loop, establishing the continuous, slow-motion infinite seamless loop state.\n  No camera motion, no scene transitions, no particles, no text, and no abrupt changes.\n\nclip_2:\nduration: 5\nprompt: |\n  Continue the same motion from the previous moment, maintaining the exact same composition, camera position, lighting state, and subject identity.\n  [Subject 1] The overall composition, architectural structure, and lighting palette remain identical to the start, with the scene flowing naturally.\n  [Subject 2] The three-tiered central stone fountain continues its smooth, cinematic slow-motion loop: water jets continue rising and cascading, with shimmering sheets and glowing floating water droplets falling gracefully into the main basin, progressing through the middle phase of the cycle.\n  [Subject 3] The two sculpted stone waterfalls on the left and right continue their steady, decelerated fluid cascade down the textured stone surfaces, maintaining the rhythmic flow.\n  [Subject 4] The illuminated, low-lying ground mist continues to drift and curl very slowly around the base and water pools with cyclical, undulating movement. The gentle, soft breeze continues to cause subtle, slow-motion rhythmic swaying of the tall cypress trees, surrounding bushes, and grass. In the deep blue sky, stars continue to gently twinkle in a synchronized cycle.\n  Maintain the locked, static wide-angle view of the symmetrical classical garden fountain. All fluid and environmental motions seamlessly progress toward the return state, achieving a flawless, cinematic slow-motion infinite seamless loop.\n  No camera motion, no scene transitions, no particles, no text, and no abrupt changes.\n\nclip_3:\nduration: 5\nprompt: |\n  Continue the ongoing action from the previous moment, maintaining the exact same composition, camera position, lighting state, and subject identity to complete the loop.\n  [Subject 1] The overall composition, architectural structure, and lighting palette remain identical, completing the cycle and returning naturally to the initial state.\n  [Subject 2] The three-tiered central stone fountain completes its smooth, cinematic slow-motion loop: water jets finish their rise and cascade, with shimmering sheets and glowing floating water droplets falling gracefully into the main basin, returning to the exact visual and motion state of the beginning of the sequence.\n  [Subject 3] The two sculpted stone waterfalls on the left and right complete their steady, decelerated fluid cascade down the textured stone surfaces, returning to the initial calm phase.\n  [Subject 4] The illuminated, low-lying ground mist returns to its starting position, curling very slowly around the base and water pools. The gentle, soft breeze continues to cause subtle, slow-motion rhythmic swaying of the tall cypress trees, surrounding bushes, and grass, returning to the initial sway. In the deep blue sky, stars gently twinkle, completing their synchronized cycle.\n  All fluid and environmental motions seamlessly return to their starting states at the loop boundary, achieving a flawless, cinematic slow-motion infinite seamless loop.\n  Maintain the locked, static wide-angle view of the symmetrical classical garden fountain. No camera motion, no scene transitions, no particles, no text, and no abrupt changes.",
+        "clip_editor": ""
+      }
+    },
+    {
+      "id": 312,
+      "type": "LoadAudio",
+      "pos": [
+        -2260,
+        760
+      ],
+      "size": [
+        410,
+        140
+      ],
+      "flags": {},
+      "order": 36,
+      "mode": 4,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "AUDIO",
+          "type": "AUDIO",
+          "links": []
+        }
+      ],
+      "title": "Input Audio — used as <Audio 1> and encoded stream",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.30.1",
+        "Node name for S&R": "LoadAudio"
+      },
+      "widgets_values": [
+        "REPLACE_ME_audio_2.wav",
+        null,
+        null
+      ],
+      "widgets_values_named": {
+        "audio": "REPLACE_ME_audio_2.wav",
+        "upload": null
+      },
+      "color": "#346434",
+      "bgcolor": "rgba(24,24,27,.9)"
+    },
+    {
+      "id": 317,
+      "type": "SetNode",
+      "pos": [
+        -1970,
+        1000
+      ],
+      "size": [
+        210,
+        60
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 54,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "link": 470
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "title": "Set_video",
+      "properties": {
+        "Node name for S&R": "SetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes",
+        "previousName": "video"
+      },
+      "widgets_values": [
+        "video"
+      ],
+      "widgets_values_named": {
+        "Constant": "video"
+      },
+      "color": "#006691",
+      "bgcolor": "rgba(24,24,27,.9)"
+    },
+    {
+      "id": 313,
+      "type": "SetNode",
+      "pos": [
+        -1970,
+        1060
+      ],
+      "size": [
+        210,
+        40
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 55,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "AUDIO",
+          "type": "AUDIO",
+          "link": 472
+        }
+      ],
+      "outputs": [
+        {
+          "name": "AUDIO",
+          "type": "AUDIO",
+          "links": null
+        }
+      ],
+      "title": "Set_audio",
+      "properties": {
+        "Node name for S&R": "SetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes",
+        "previousName": "audio"
+      },
+      "widgets_values": [
+        "audio"
+      ],
+      "widgets_values_named": {
+        "Constant": "audio"
+      }
+    },
+    {
+      "id": 316,
+      "type": "VHS_LoadVideo",
+      "pos": [
+        -2310,
+        960
+      ],
+      "size": [
+        250,
+        310
+      ],
+      "flags": {},
+      "order": 37,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "meta_batch",
+          "shape": 7,
+          "type": "VHS_BatchManager",
+          "link": null
+        },
+        {
+          "name": "vae",
+          "shape": 7,
+          "type": "VAE",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            470
+          ]
+        },
+        {
+          "name": "frame_count",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "links": [
+            472
+          ]
+        },
+        {
+          "name": "video_info",
+          "type": "VHS_VIDEOINFO",
+          "links": null
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfyui-videohelpersuite",
+        "ver": "1.7.9",
+        "Node name for S&R": "VHS_LoadVideo"
+      },
+      "widgets_values": {
+        "video": "REPLACE_ME_video.mp4",
+        "force_rate": 0,
+        "custom_width": 0,
+        "custom_height": 0,
+        "frame_load_cap": 0,
+        "skip_first_frames": 0,
+        "select_every_nth": 1,
+        "format": "AnimateDiff",
+        "videopreview": {
+          "hidden": false,
+          "paused": false,
+          "params": {
+            "filename": "REPLACE_ME_video.mp4",
+            "type": "input",
+            "format": "video/mp4",
+            "force_rate": 0,
+            "frame_load_cap": 0,
+            "skip_first_frames": 0,
+            "select_every_nth": 1
+          }
+        }
+      },
+      "widgets_values_named": {
+        "video": "REPLACE_ME_video.mp4",
+        "force_rate": 0,
+        "custom_width": 0,
+        "custom_height": 0,
+        "frame_load_cap": 0,
+        "skip_first_frames": 0,
+        "select_every_nth": 1,
+        "format": "AnimateDiff",
+        "choose video to upload": null,
+        "videopreview": {
+          "hidden": false,
+          "paused": false,
+          "params": {
+            "filename": "REPLACE_ME_video.mp4",
+            "type": "input",
+            "format": "video/mp4",
+            "force_rate": 0,
+            "frame_load_cap": 0,
+            "skip_first_frames": 0,
+            "select_every_nth": 1
+          }
+        }
+      }
+    },
+    {
+      "id": 16,
+      "type": "VHS_VideoCombine",
+      "pos": [
+        2300,
+        -80
+      ],
+      "size": [
+        850,
+        340
+      ],
+      "flags": {},
+      "order": 81,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 21
+        },
+        {
+          "name": "audio",
+          "shape": 7,
+          "type": "AUDIO",
+          "link": 487
+        },
+        {
+          "name": "meta_batch",
+          "shape": 7,
+          "type": "VHS_BatchManager",
+          "link": null
+        },
+        {
+          "name": "vae",
+          "shape": 7,
+          "type": "VAE",
+          "link": null
+        },
+        {
+          "name": "frame_rate",
+          "type": "FLOAT",
+          "widget": {
+            "name": "frame_rate"
+          },
+          "link": 388
+        }
+      ],
+      "outputs": [
+        {
+          "name": "Filenames",
+          "type": "VHS_FILENAMES",
+          "links": []
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfyui-videohelpersuite",
+        "ver": "993082e4f2473bf4acaf06f51e33877a7eb38960",
+        "Node name for S&R": "VHS_VideoCombine",
+        "ue_properties": {
+          "widget_ue_connectable": {
+            "frame_rate": true
+          },
+          "version": "7.8",
+          "input_ue_unconnectable": {}
+        }
+      },
+      "widgets_values": {
+        "frame_rate": 24,
+        "loop_count": 0,
+        "filename_prefix": "MiniMax_H3_LongMedia/%date:yyyy-MM-dd%/MiniMax_H3_LongMedia",
+        "format": "video/nvenc_h264-mp4",
+        "pix_fmt": "yuv420p",
+        "bitrate": 16,
+        "megabit": true,
+        "save_metadata": false,
+        "pingpong": false,
+        "save_output": true,
+        "videopreview": ""
+      },
+      "widgets_values_named": {
+        "frame_rate": 24,
+        "loop_count": 0,
+        "filename_prefix": "MiniMax_H3_LongMedia/%date:yyyy-MM-dd%/MiniMax_H3_LongMedia",
+        "format": "video/nvenc_h264-mp4",
+        "pix_fmt": "yuv420p",
+        "bitrate": 16,
+        "megabit": true,
+        "save_metadata": false,
+        "pingpong": false,
+        "save_output": true,
+        "videopreview": ""
+      }
+    },
+    {
+      "id": 3,
+      "type": "MiniMaxH3LatentLabLongMediaDecode",
+      "pos": [
+        1910,
+        -80
+      ],
+      "size": [
+        330,
+        240
+      ],
+      "flags": {},
+      "order": 80,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "final_av",
+          "type": "LATENT",
+          "link": 309
+        },
+        {
+          "name": "long_media_plan",
+          "type": "LONG_MEDIA_PLAN",
+          "link": 4
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "slot_index": 0,
+          "links": [
+            21
+          ]
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "slot_index": 1,
+          "links": [
+            487
+          ]
+        },
+        {
+          "name": "duration_seconds",
+          "type": "FLOAT",
+          "slot_index": 2,
+          "links": null
+        },
+        {
+          "name": "report",
+          "type": "STRING",
+          "slot_index": 3,
+          "links": null
+        }
+      ],
+      "properties": {
+        "aux_id": "vizart-vj/ComfyUI-MiniMax-H3-LongMedia",
+        "Node name for S&R": "MiniMaxH3LatentLabLongMediaDecode",
+        "cnr_id": "minimax-h3-longmedia",
+        "ver": "eb931f1c4ce118229ab8bdfdbfebcf0e37e25284"
+      },
+      "widgets_values": [
+        true,
+        512,
+        64,
+        64,
+        8,
+        0
+      ],
+      "widgets_values_named": {
+        "enable_tiling": true,
+        "tile_size": 512,
+        "width": 64,
+        "temporal_size": 64,
+        "batch_size": 8,
+        "color_match_strength": 0
+      }
+    },
+    {
+      "id": 265,
+      "type": "GetNode",
+      "pos": [
+        1950,
+        220
+      ],
+      "size": [
+        210,
+        60
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 38,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "FLOAT",
+          "type": "FLOAT",
+          "links": [
+            388
+          ]
+        }
+      ],
+      "title": "Get_fps",
+      "properties": {
+        "Node name for S&R": "GetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes"
+      },
+      "widgets_values": [
+        "fps"
+      ],
+      "widgets_values_named": {
+        "Constant": "fps"
+      },
+      "color": "#346434",
+      "bgcolor": "rgba(24,24,27,.9)"
+    },
+    {
+      "id": 330,
+      "type": "GetNode",
+      "pos": [
+        2320,
+        -200
+      ],
+      "size": [
+        210,
+        60
+      ],
+      "flags": {},
+      "order": 39,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "AUDIO",
+          "type": "AUDIO",
+          "links": []
+        }
+      ],
+      "title": "Get_audio_orig",
+      "properties": {
+        "Node name for S&R": "GetNode",
+        "aux_id": "kijai/ComfyUI-KJNodes"
+      },
+      "widgets_values": [
+        "audio_orig"
+      ],
+      "widgets_values_named": {
+        "Constant": "audio_orig"
+      }
+    },
+    {
+      "id": 180,
+      "type": "Text Multiline",
+      "pos": [
+        -2320,
+        500
+      ],
+      "size": [
+        510,
+        210
+      ],
+      "flags": {
+        "collapsed": false
+      },
+      "order": 40,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": [
+            453,
+            454
+          ]
+        }
+      ],
+      "title": "Prompt",
+      "properties": {
+        "cnr_id": "was-ns",
+        "ver": "3.0.1",
+        "Node name for S&R": "Text Multiline"
+      },
+      "widgets_values": [
+        ""
+      ],
+      "widgets_values_named": {
+        "text": ""
+      },
+      "color": "#c09430",
+      "bgcolor": "rgba(24,24,27,.9)"
+    },
+    {
+      "id": 332,
+      "type": "MarkdownNote",
+      "pos": [
+        -4600,
+        730
+      ],
+      "size": [
+        710,
+        920
+      ],
+      "flags": {},
+      "order": 41,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "# Two-Stage Sampling, Latent Hi-Res and Refiner",
+      "properties": {},
+      "widgets_values": [
+        "# Two-Stage Sampling, Latent Hi-Res and Refiner\n\nLongMedia supports a two-stage H3 workflow inside the **same model lifecycle**. It can either refine the low-noise tail at the original resolution or upscale the denoised video latent and run an independent high-resolution H3 pass.\n\nThe important controls are in **MiniMax H3 • Long Media Sampler**:\n\n```text\nlatent_hires_enabled\nlatent_hires_model\nlatent_hires_scale\nlatent_hires_precision\nlatent_hires_align\n\nrefine_enabled\nrefine_steps\n```\n\n## Recommended topology\n\n```text\nLong Media Setup\n      │\n      ├── positive ──> Basic Guider\n      │\n      ├── initial_av\n      │\n      └── long_media_plan\n                │\n                ▼\n        Long Media Sampler\n                │\n                ▼\n        Long Media Decode\n```\n\nYou do **not** need to load a second MiniMax H3 model for the high-resolution pass.\n\n---\n\n## Mode A — Refiner Only\n\nSettings:\n\n```text\nlatent_hires_enabled = false\nrefine_enabled       = true\n```\n\nLongMedia splits the connected SIGMAS schedule into two continuous parts.\n\nFor `T` denoise steps and `R` refine steps:\n\n```text\nstage 1 = the early/base part of the connected schedule\nstage 2 = the final R-step low-sigma tail\n```\n\nStage 1 starts from normal random noise.\n\nStage 2:\n\n- continues from the Stage-1 solver state;\n- uses zero added noise;\n- keeps the same effective seed;\n- stays at the same latent resolution.\n\nThis is a **continuous low-noise refinement**, not a second independent generation.\n\n---\n\n## Mode B — Latent Hi-Res Only\n\nSettings:\n\n```text\nlatent_hires_enabled = true\nrefine_enabled       = false\n```\n\nLongMedia completes the low-resolution H3 pass, takes the **denoised x0**, and sends only the video latent through the learned MiniMax H3 latent upscaler.\n\nThe audio latent is preserved exactly.\n\n```text\nlow-resolution H3 x0\n        │\n        ├── video latent ──> learned latent upscale\n        │\n        └── audio latent ──> preserved\n        │\n        ▼\nhigh-resolution AV latent\n```\n\nNo second H3 denoise pass is performed.\n\nThis is useful when the learned upscaler alone provides enough spatial detail.\n\n---\n\n## Mode C — Latent Hi-Res + Refiner\n\nSettings:\n\n```text\nlatent_hires_enabled = true\nrefine_enabled       = true\n```\n\nThis is the full two-stage high-resolution path.\n\n### Stage 1 — Low-resolution generation\n\nH3 generates the base movie at the original latent resolution.\n\nLongMedia takes the callback's **denoised x0** rather than the noisy in-progress solver state.\n\nFor segmented or MultiClip generation, clean low-resolution x0 is also the continuation source between units.\n\n### Learned latent upscale\n\nOnly the video latent is spatially upscaled.\n\n```text\nvideo x0 ──> learned MiniMax H3 latent upscaler\naudio x0 ──> unchanged\n```\n\n`latent_hires_scale` is continuous. A value such as `1.2` means a 1.2× spatial latent upscale; `2.0` means 2×.\n\nThe selected model is loaded from:\n\n```text\nComfyUI/models/latent_upscale_models/\n```\n\n### Conditioning rebuild\n\nNative H3 VIDEO keyframes are tied to the target spatial grid. After the latent resolution changes, low-resolution target-grid video keyframes cannot be reused directly.\n\nLongMedia therefore rebuilds the runtime conditioning for the new H/W:\n\n- incompatible low-resolution VIDEO keyframes are removed;\n- Ref2VA Picture/Video references remain available;\n- audio-only guides remain available;\n- audio reference timing remains preserved.\n\n### Stage 2 — Independent high-resolution H3 pass\n\nThe high-resolution pass is intentionally **not** the low-sigma continuation used by Refiner Only.\n\nIt starts from:\n\n- the learned-upscaled denoised x0;\n- fresh noise generated from the **same effective seed**;\n- an independent scheduler subset selected from the original connected SIGMAS curve.\n\nFor a typical 8-step scheduler and `refine_steps=3`, LongMedia selects every-other scheduler points after sigma-max, for example:\n\n```text\noriginal sigma indices: 0 1 2 3 4 5 6 7 8\nhi-res pass:              1   3   5       0\n```\n\nThe exact selected indices are reported in the console as:\n\n```text\n[TWO-PASS HIRES]\n[HIRES SECOND PASS]\n```\n\nThis gives H3 enough noise authority to re-author high-frequency structure at the new spatial resolution instead of merely polishing an interpolated latent.\n\n---\n\n## Why x0 Matters\n\nThe learned upscaler expects a clean denoised latent.\n\nLongMedia therefore refuses to feed the partial noisy solver state into the learned upscaler. The Stage-1 callback x0 is first converted through the normal H3 latent-output contract and only then upscaled.\n\nThis avoids carrying solver noise into spatial detail reconstruction.\n\n---\n\n## Seed Behavior\n\nThe integrated high-resolution second pass uses the **same effective seed** as Stage 1.\n\nThat does not make Stage 2 identical to Stage 1: the latent resolution, noise tensor, conditioning geometry, and sigma subset are different.\n\nThe shared seed keeps the two stages deterministically related.\n\n---\n\n## Suggested Starting Point\n\nA practical general-purpose setup:\n\n```text\nBasicScheduler steps       = 8\n\nlatent_hires_enabled       = true\nlatent_hires_scale         = 1.2–2.0\nlatent_hires_precision     = bf16\n\nrefine_enabled             = true\nrefine_steps               = 2–3\n\nsampler_mode               = auto\nmemory_mode                = auto\nattention_mode             = auto\n```\n\nFor 16 GB-class GPUs, start with a modest upscale such as `1.2–1.5` before attempting a large 2× pass. High-resolution H3 attention and QKV workspaces grow quickly with spatial token count.\n\nLongMedia's guarded Dynamic VRAM paths remain active, but a smaller target is still faster than proving that the allocator has philosophical depth.\n\n---\n\n## The Optional Explicit Second Sampler in the Example Workflow\n\nThe included workflow:\n\n```text\nworkflows/MiniMax-H3-LongMedia-LatentUpscale-Detailer.json\n```\n\nalso contains an **explicit second Long Media Sampler node** connected after the first sampler. It is shipped **bypassed by default**.\n\nThat node is an advanced chained-sampler option:\n\n```text\nSampler #1\n   │\n   ▼\nSampler #2 (bypassed by default)\n   │\n   ▼\nDecode\n```\n\nDo not confuse this with the integrated `latent_hires_enabled + refine_enabled` path.\n\n- **Integrated two-stage mode** runs the learned upscale/refiner inside one Long Media Sampler and one H3 model lifecycle.\n- **Explicit chained Sampler #2** is a separate sampling invocation with its own SIGMAS input and should be enabled only when you deliberately want another diffusion stage.\n\nAvoid enabling a chained Sampler #2 merely because the integrated refiner is enabled. That would add another denoise trajectory rather than \"finishing\" the existing one.\n\n---\n\n## FastVideo VSA 4-Step Checkpoints\n\nFor Kijai FastVideo VSA, the distilled base model owns exactly four transformer calls for **Sampler #1**.\n\nLongMedia does not split those four calls into an inferred 2+2 or similar schedule.\n\nWhen a workflow-owned refiner is allowed, the second-stage step count comes from `refine_steps` and its sigma selection comes from the workflow-connected SIGMAS schedule.\n\nH3ddle FastH3 Preview v1 has a stricter four-call contract and fails closed when extra latent-hires/refine denoise calls would be off-distribution.\n\n---\n\n## Troubleshooting\n\n### Latent Hi-Res enabled but no upscaler selected\n\nSelect a model from `models/latent_upscale_models`.\n\n### High-resolution pass OOMs while the low-resolution pass succeeds\n\nThe spatial token count has increased. Keep:\n\n```text\nmemory_mode = auto\n```\n\nand reduce `latent_hires_scale` first. On current native INT8 / Comfy Kitchen paths, LongMedia can also stream impossible full-QKV workloads rather than substituting approximate attention.\n\n### H3 layout mismatch after upscale\n\nCurrent LongMedia rebuilds the target layout and drops only incompatible target-grid VIDEO keyframes. Ref2VA references and audio guides remain intact.\n\n### Re-running with another seed OOMs before step 1\n\nCurrent LongMedia creates a sampler execution memory boundary before each run, including seed-only reruns that bypass cached Setup execution."
+      ],
+      "widgets_values_named": {
+        "text": "# Two-Stage Sampling, Latent Hi-Res and Refiner\n\nLongMedia supports a two-stage H3 workflow inside the **same model lifecycle**. It can either refine the low-noise tail at the original resolution or upscale the denoised video latent and run an independent high-resolution H3 pass.\n\nThe important controls are in **MiniMax H3 • Long Media Sampler**:\n\n```text\nlatent_hires_enabled\nlatent_hires_model\nlatent_hires_scale\nlatent_hires_precision\nlatent_hires_align\n\nrefine_enabled\nrefine_steps\n```\n\n## Recommended topology\n\n```text\nLong Media Setup\n      │\n      ├── positive ──> Basic Guider\n      │\n      ├── initial_av\n      │\n      └── long_media_plan\n                │\n                ▼\n        Long Media Sampler\n                │\n                ▼\n        Long Media Decode\n```\n\nYou do **not** need to load a second MiniMax H3 model for the high-resolution pass.\n\n---\n\n## Mode A — Refiner Only\n\nSettings:\n\n```text\nlatent_hires_enabled = false\nrefine_enabled       = true\n```\n\nLongMedia splits the connected SIGMAS schedule into two continuous parts.\n\nFor `T` denoise steps and `R` refine steps:\n\n```text\nstage 1 = the early/base part of the connected schedule\nstage 2 = the final R-step low-sigma tail\n```\n\nStage 1 starts from normal random noise.\n\nStage 2:\n\n- continues from the Stage-1 solver state;\n- uses zero added noise;\n- keeps the same effective seed;\n- stays at the same latent resolution.\n\nThis is a **continuous low-noise refinement**, not a second independent generation.\n\n---\n\n## Mode B — Latent Hi-Res Only\n\nSettings:\n\n```text\nlatent_hires_enabled = true\nrefine_enabled       = false\n```\n\nLongMedia completes the low-resolution H3 pass, takes the **denoised x0**, and sends only the video latent through the learned MiniMax H3 latent upscaler.\n\nThe audio latent is preserved exactly.\n\n```text\nlow-resolution H3 x0\n        │\n        ├── video latent ──> learned latent upscale\n        │\n        └── audio latent ──> preserved\n        │\n        ▼\nhigh-resolution AV latent\n```\n\nNo second H3 denoise pass is performed.\n\nThis is useful when the learned upscaler alone provides enough spatial detail.\n\n---\n\n## Mode C — Latent Hi-Res + Refiner\n\nSettings:\n\n```text\nlatent_hires_enabled = true\nrefine_enabled       = true\n```\n\nThis is the full two-stage high-resolution path.\n\n### Stage 1 — Low-resolution generation\n\nH3 generates the base movie at the original latent resolution.\n\nLongMedia takes the callback's **denoised x0** rather than the noisy in-progress solver state.\n\nFor segmented or MultiClip generation, clean low-resolution x0 is also the continuation source between units.\n\n### Learned latent upscale\n\nOnly the video latent is spatially upscaled.\n\n```text\nvideo x0 ──> learned MiniMax H3 latent upscaler\naudio x0 ──> unchanged\n```\n\n`latent_hires_scale` is continuous. A value such as `1.2` means a 1.2× spatial latent upscale; `2.0` means 2×.\n\nThe selected model is loaded from:\n\n```text\nComfyUI/models/latent_upscale_models/\n```\n\n### Conditioning rebuild\n\nNative H3 VIDEO keyframes are tied to the target spatial grid. After the latent resolution changes, low-resolution target-grid video keyframes cannot be reused directly.\n\nLongMedia therefore rebuilds the runtime conditioning for the new H/W:\n\n- incompatible low-resolution VIDEO keyframes are removed;\n- Ref2VA Picture/Video references remain available;\n- audio-only guides remain available;\n- audio reference timing remains preserved.\n\n### Stage 2 — Independent high-resolution H3 pass\n\nThe high-resolution pass is intentionally **not** the low-sigma continuation used by Refiner Only.\n\nIt starts from:\n\n- the learned-upscaled denoised x0;\n- fresh noise generated from the **same effective seed**;\n- an independent scheduler subset selected from the original connected SIGMAS curve.\n\nFor a typical 8-step scheduler and `refine_steps=3`, LongMedia selects every-other scheduler points after sigma-max, for example:\n\n```text\noriginal sigma indices: 0 1 2 3 4 5 6 7 8\nhi-res pass:              1   3   5       0\n```\n\nThe exact selected indices are reported in the console as:\n\n```text\n[TWO-PASS HIRES]\n[HIRES SECOND PASS]\n```\n\nThis gives H3 enough noise authority to re-author high-frequency structure at the new spatial resolution instead of merely polishing an interpolated latent.\n\n---\n\n## Why x0 Matters\n\nThe learned upscaler expects a clean denoised latent.\n\nLongMedia therefore refuses to feed the partial noisy solver state into the learned upscaler. The Stage-1 callback x0 is first converted through the normal H3 latent-output contract and only then upscaled.\n\nThis avoids carrying solver noise into spatial detail reconstruction.\n\n---\n\n## Seed Behavior\n\nThe integrated high-resolution second pass uses the **same effective seed** as Stage 1.\n\nThat does not make Stage 2 identical to Stage 1: the latent resolution, noise tensor, conditioning geometry, and sigma subset are different.\n\nThe shared seed keeps the two stages deterministically related.\n\n---\n\n## Suggested Starting Point\n\nA practical general-purpose setup:\n\n```text\nBasicScheduler steps       = 8\n\nlatent_hires_enabled       = true\nlatent_hires_scale         = 1.2–2.0\nlatent_hires_precision     = bf16\n\nrefine_enabled             = true\nrefine_steps               = 2–3\n\nsampler_mode               = auto\nmemory_mode                = auto\nattention_mode             = auto\n```\n\nFor 16 GB-class GPUs, start with a modest upscale such as `1.2–1.5` before attempting a large 2× pass. High-resolution H3 attention and QKV workspaces grow quickly with spatial token count.\n\nLongMedia's guarded Dynamic VRAM paths remain active, but a smaller target is still faster than proving that the allocator has philosophical depth.\n\n---\n\n## The Optional Explicit Second Sampler in the Example Workflow\n\nThe included workflow:\n\n```text\nworkflows/MiniMax-H3-LongMedia-LatentUpscale-Detailer.json\n```\n\nalso contains an **explicit second Long Media Sampler node** connected after the first sampler. It is shipped **bypassed by default**.\n\nThat node is an advanced chained-sampler option:\n\n```text\nSampler #1\n   │\n   ▼\nSampler #2 (bypassed by default)\n   │\n   ▼\nDecode\n```\n\nDo not confuse this with the integrated `latent_hires_enabled + refine_enabled` path.\n\n- **Integrated two-stage mode** runs the learned upscale/refiner inside one Long Media Sampler and one H3 model lifecycle.\n- **Explicit chained Sampler #2** is a separate sampling invocation with its own SIGMAS input and should be enabled only when you deliberately want another diffusion stage.\n\nAvoid enabling a chained Sampler #2 merely because the integrated refiner is enabled. That would add another denoise trajectory rather than \"finishing\" the existing one.\n\n---\n\n## FastVideo VSA 4-Step Checkpoints\n\nFor Kijai FastVideo VSA, the distilled base model owns exactly four transformer calls for **Sampler #1**.\n\nLongMedia does not split those four calls into an inferred 2+2 or similar schedule.\n\nWhen a workflow-owned refiner is allowed, the second-stage step count comes from `refine_steps` and its sigma selection comes from the workflow-connected SIGMAS schedule.\n\nH3ddle FastH3 Preview v1 has a stricter four-call contract and fails closed when extra latent-hires/refine denoise calls would be off-distribution.\n\n---\n\n## Troubleshooting\n\n### Latent Hi-Res enabled but no upscaler selected\n\nSelect a model from `models/latent_upscale_models`.\n\n### High-resolution pass OOMs while the low-resolution pass succeeds\n\nThe spatial token count has increased. Keep:\n\n```text\nmemory_mode = auto\n```\n\nand reduce `latent_hires_scale` first. On current native INT8 / Comfy Kitchen paths, LongMedia can also stream impossible full-QKV workloads rather than substituting approximate attention.\n\n### H3 layout mismatch after upscale\n\nCurrent LongMedia rebuilds the target layout and drops only incompatible target-grid VIDEO keyframes. Ref2VA references and audio guides remain intact.\n\n### Re-running with another seed OOMs before step 1\n\nCurrent LongMedia creates a sampler execution memory boundary before each run, including seed-only reruns that bypass cached Setup execution."
+      },
+      "color": "#222",
+      "bgcolor": "#000"
+    }
+  ],
+  "links": [
+    [
+      2,
+      1,
+      2,
+      2,
+      1,
+      "H3_LONG_MEDIA_PLAN"
+    ],
+    [
+      4,
+      1,
+      2,
+      3,
+      1,
+      "H3_LONG_MEDIA_PLAN"
+    ],
+    [
+      16,
+      9,
+      0,
+      2,
+      2,
+      "GUIDER"
+    ],
+    [
+      18,
+      11,
+      0,
+      2,
+      4,
+      "SIGMAS"
+    ],
+    [
+      21,
+      3,
+      0,
+      16,
+      0,
+      "IMAGE"
+    ],
+    [
+      27,
+      5,
+      0,
+      1,
+      0,
+      "CLIP"
+    ],
+    [
+      28,
+      6,
+      0,
+      1,
+      1,
+      "VAE"
+    ],
+    [
+      39,
+      7,
+      0,
+      1,
+      2,
+      "VAE"
+    ],
+    [
+      55,
+      43,
+      0,
+      44,
+      0,
+      "IMAGE"
+    ],
+    [
+      60,
+      1,
+      0,
+      9,
+      1,
+      "CONDITIONING"
+    ],
+    [
+      67,
+      47,
+      0,
+      11,
+      0,
+      "MODEL"
+    ],
+    [
+      94,
+      43,
+      0,
+      58,
+      0,
+      "IMAGE"
+    ],
+    [
+      135,
+      64,
+      0,
+      92,
+      0,
+      "IMAGE"
+    ],
+    [
+      136,
+      92,
+      0,
+      67,
+      0,
+      "IMAGE"
+    ],
+    [
+      137,
+      65,
+      0,
+      91,
+      0,
+      "IMAGE"
+    ],
+    [
+      138,
+      91,
+      0,
+      68,
+      0,
+      "IMAGE"
+    ],
+    [
+      153,
+      102,
+      0,
+      43,
+      0,
+      "IMAGE"
+    ],
+    [
+      156,
+      6,
+      0,
+      104,
+      0,
+      "VAE"
+    ],
+    [
+      157,
+      7,
+      0,
+      105,
+      0,
+      "VAE"
+    ],
+    [
+      174,
+      117,
+      0,
+      118,
+      0,
+      "FLOAT"
+    ],
+    [
+      175,
+      119,
+      0,
+      92,
+      1,
+      "FLOAT"
+    ],
+    [
+      176,
+      119,
+      0,
+      91,
+      1,
+      "FLOAT"
+    ],
+    [
+      182,
+      122,
+      0,
+      69,
+      0,
+      "IMAGE"
+    ],
+    [
+      183,
+      119,
+      0,
+      122,
+      1,
+      "FLOAT"
+    ],
+    [
+      202,
+      44,
+      0,
+      133,
+      0,
+      "INT"
+    ],
+    [
+      203,
+      44,
+      1,
+      134,
+      0,
+      "INT"
+    ],
+    [
+      207,
+      66,
+      0,
+      122,
+      0,
+      "IMAGE"
+    ],
+    [
+      210,
+      1,
+      1,
+      2,
+      0,
+      "LATENT"
+    ],
+    [
+      245,
+      169,
+      0,
+      2,
+      5,
+      "INT"
+    ],
+    [
+      265,
+      5,
+      0,
+      183,
+      0,
+      "CLIP"
+    ],
+    [
+      295,
+      10,
+      0,
+      2,
+      3,
+      "SAMPLER"
+    ],
+    [
+      308,
+      2,
+      0,
+      215,
+      0,
+      "LATENT"
+    ],
+    [
+      309,
+      215,
+      0,
+      3,
+      0,
+      "LATENT"
+    ],
+    [
+      310,
+      9,
+      0,
+      215,
+      2,
+      "GUIDER"
+    ],
+    [
+      311,
+      10,
+      0,
+      215,
+      3,
+      "SAMPLER"
+    ],
+    [
+      312,
+      1,
+      2,
+      215,
+      1,
+      "LONG_MEDIA_PLAN"
+    ],
+    [
+      313,
+      47,
+      0,
+      9,
+      0,
+      "MODEL"
+    ],
+    [
+      328,
+      213,
+      0,
+      215,
+      4,
+      "SIGMAS"
+    ],
+    [
+      378,
+      135,
+      0,
+      1,
+      15,
+      "INT"
+    ],
+    [
+      379,
+      136,
+      0,
+      1,
+      16,
+      "INT"
+    ],
+    [
+      385,
+      258,
+      0,
+      264,
+      0,
+      "INT"
+    ],
+    [
+      386,
+      264,
+      0,
+      263,
+      0,
+      "FLOAT"
+    ],
+    [
+      387,
+      261,
+      0,
+      1,
+      17,
+      "FLOAT"
+    ],
+    [
+      388,
+      265,
+      0,
+      16,
+      4,
+      "FLOAT"
+    ],
+    [
+      389,
+      101,
+      0,
+      1,
+      5,
+      "IMAGE"
+    ],
+    [
+      413,
+      119,
+      0,
+      43,
+      1,
+      "FLOAT"
+    ],
+    [
+      443,
+      31,
+      0,
+      1,
+      14,
+      "STRING"
+    ],
+    [
+      453,
+      180,
+      0,
+      30,
+      0,
+      "STRING"
+    ],
+    [
+      454,
+      180,
+      0,
+      256,
+      0,
+      "STRING"
+    ],
+    [
+      460,
+      216,
+      0,
+      47,
+      0,
+      "MODEL"
+    ],
+    [
+      461,
+      4,
+      0,
+      216,
+      0,
+      "MODEL"
+    ],
+    [
+      462,
+      70,
+      0,
+      1,
+      6,
+      "IMAGE"
+    ],
+    [
+      464,
+      73,
+      0,
+      1,
+      7,
+      "IMAGE"
+    ],
+    [
+      465,
+      74,
+      0,
+      1,
+      8,
+      "IMAGE"
+    ],
+    [
+      466,
+      256,
+      0,
+      311,
+      0,
+      "H3_LONGMEDIA_CLIP_PLAN"
+    ],
+    [
+      467,
+      311,
+      0,
+      1,
+      3,
+      "H3_LONGMEDIA_CLIP_PLAN"
+    ],
+    [
+      469,
+      314,
+      0,
+      1,
+      12,
+      "AUDIO"
+    ],
+    [
+      470,
+      316,
+      0,
+      317,
+      0,
+      "IMAGE"
+    ],
+    [
+      471,
+      318,
+      0,
+      1,
+      10,
+      "IMAGE"
+    ],
+    [
+      472,
+      316,
+      2,
+      313,
+      0,
+      "AUDIO"
+    ],
+    [
+      473,
+      325,
+      0,
+      321,
+      0,
+      "AUDIO"
+    ],
+    [
+      474,
+      326,
+      0,
+      323,
+      0,
+      "AUDIO"
+    ],
+    [
+      475,
+      321,
+      0,
+      324,
+      0,
+      "AUDIO"
+    ],
+    [
+      476,
+      326,
+      0,
+      324,
+      1,
+      "AUDIO"
+    ],
+    [
+      478,
+      320,
+      0,
+      326,
+      0,
+      "MELROFORMERMODEL"
+    ],
+    [
+      479,
+      321,
+      0,
+      326,
+      1,
+      "AUDIO"
+    ],
+    [
+      480,
+      324,
+      0,
+      327,
+      0,
+      "AUDIO"
+    ],
+    [
+      481,
+      324,
+      0,
+      328,
+      0,
+      "AUDIO"
+    ],
+    [
+      482,
+      319,
+      0,
+      325,
+      0,
+      "AUDIO"
+    ],
+    [
+      484,
+      325,
+      0,
+      329,
+      0,
+      "AUDIO"
+    ],
+    [
+      486,
+      331,
+      0,
+      168,
+      0,
+      "INT"
+    ],
+    [
+      487,
+      3,
+      1,
+      16,
+      1,
+      "AUDIO"
+    ]
+  ],
+  "groups": [
+    {
+      "id": 1,
+      "title": "Models",
+      "bounding": [
+        -830,
+        -290,
+        700,
+        670
+      ],
+      "color": "#3f789e",
+      "flags": {}
+    },
+    {
+      "id": 2,
+      "title": "Conditioning",
+      "bounding": [
+        -110,
+        -290,
+        490,
+        1830
+      ],
+      "color": "#3f789e",
+      "flags": {}
+    },
+    {
+      "id": 3,
+      "title": "Sampling",
+      "bounding": [
+        400,
+        -290,
+        900,
+        1830
+      ],
+      "color": "#3f789e",
+      "flags": {}
+    },
+    {
+      "id": 4,
+      "title": "Decoding and create video",
+      "bounding": [
+        1880,
+        -290,
+        1300,
+        1220
+      ],
+      "color": "#3f789e",
+      "flags": {}
+    },
+    {
+      "id": 6,
+      "title": "Use Image Size",
+      "bounding": [
+        -2350,
+        -290,
+        1500,
+        670
+      ],
+      "color": "#3f789e",
+      "flags": {}
+    },
+    {
+      "id": 7,
+      "title": "Prompt + Planner + Cameras",
+      "bounding": [
+        -2350,
+        400,
+        2220,
+        1140
+      ],
+      "color": "#3f789e",
+      "flags": {}
+    },
+    {
+      "id": 10,
+      "title": "2 pass",
+      "bounding": [
+        1320,
+        -290,
+        540,
+        1220
+      ],
+      "color": "#3f789e",
+      "flags": {}
+    },
+    {
+      "id": 11,
+      "title": "Mel-Ban RoFormer Vocal Extraction (optional)",
+      "bounding": [
+        -2300,
+        -1100,
+        1050,
+        530
+      ],
+      "color": "#3f789e",
+      "flags": {}
+    }
+  ],
+  "config": {},
+  "extra": {
+    "workflow_name": "MiniMax-H3-LongMedia-SAFE-1080p-15s",
+    "ds": {
+      "scale": 0.47362440744769635,
+      "offset": [
+        3479.173035785756,
+        580.2042581446804
+      ]
+    },
+    "frontendVersion": "1.51.9",
+    "VHS_latentpreview": true,
+    "VHS_latentpreviewrate": 0,
+    "VHS_MetadataImage": true,
+    "VHS_KeepIntermediate": true,
+    "anomalous_hashes": {
+      "151_MelBand\\MelBandRoformer_fp16.safetensors": {
+        "hash": "",
+        "size": 456479072
+      },
+      "6_Minimax\\minimax_h3_video_vae_fp16.safetensors": {
+        "hash": "",
+        "size": 5207808496
+      },
+      "7_Minimax\\minimax_h3_audio_vae_fp32.safetensors": {
+        "hash": "",
+        "size": 605254808
+      },
+      "4_Minimax\\10Eros_Max_h3_TURBO-hybrid_beta3_int8_convrot.safetensors": {
+        "hash": "",
+        "size": 20973147816
+      }
+    }
+  },
+  "version": 0.4
+}

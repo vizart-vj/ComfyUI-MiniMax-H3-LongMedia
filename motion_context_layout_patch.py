@@ -102,13 +102,14 @@ def apply_patch():
 
     where = getattr(current, "__module__", "") or ""
     home = getattr(mm.PackedLayout, "__module__", "") or ""
-    # SolAttn's Morton layout wrapper is known-compatible; wrapping outside it
-    # is safe because it returns the same layout object before our fixup runs.
-    if where != home and not where.endswith(SOLATTN_LAYOUT_MODULE_SUFFIX):
-        _LOG.warning(
-            "LongMedia motion context: PackedLayout already wrapped by %r; refusing unknown stack",
-            where)
-        return False
+    # v0.4.81: compose outside the current PackedLayout owner. Our fixup calls
+    # the current initializer first and only translates marker-gated condition
+    # rows afterwards, so module ownership alone is not a valid collision test.
+    if where != home:
+        _LOG.info(
+            "LongMedia motion context: composing outside existing PackedLayout owner %r",
+            where,
+        )
 
     _orig_init = current
     mm.PackedLayout.__init__ = _patched_init

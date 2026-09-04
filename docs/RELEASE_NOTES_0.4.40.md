@@ -14,7 +14,7 @@
 - Existing `MiniMaxH3LatentLab...` class identifiers are retained for workflow compatibility.
 - `segmented_continuation` continues to use its stitched latent decode path.
 - `multiclip` alone owns native per-clip continuous VideoVAE assembly metadata.
-- The README screenshot link `![screenshot](ex.png)` is preserved.
+- In the original 0.4.40 package, the README still referenced the bundled `ex.png` screenshot.
 
 - Fixed `segmented_continuation` native-decode routing by using `workflow_mode` as the authoritative workflow discriminator in both Sampler and Decode.
 

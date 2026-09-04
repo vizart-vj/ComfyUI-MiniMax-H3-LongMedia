@@ -1,6 +1,6 @@
 [project]
 name = "minimax-h3-longmedia"
-version = "0.4.40"
+version = "0.5.40"
 description = "Long-form MiniMax H3 video/audio generation for ComfyUI with unified clip planning, continuity, lip-sync, and adaptive low-VRAM execution."
 license = { file = "LICENSE" }
 dependencies = []

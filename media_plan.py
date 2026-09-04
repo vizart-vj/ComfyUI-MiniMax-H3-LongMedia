@@ -30,6 +30,11 @@ class LongMediaPlan:
     trim_frames: int
     resolution_mode: str
     video_fps: float
+    # Optional native loop-closure policy. Available in every workflow
+    # because even non-loop modes may be authored as seamless social clips.
+    loop_closure_enabled: bool = False
+    loop_closure_frames: int = 57
+    loop_closure_strength: float = 0.65
     source_video: Any = None
     source_audio: Any = None
     # Optional conditioning-only audio. Kept separate from source_audio so a
@@ -75,6 +80,32 @@ class LongMediaPlan:
     # v0.4.6: explicit workflow ownership. Never infer segmentation from passes.
     workflow_mode: str = "hybrid_auto"
     segmentation_active: bool = False
+    # v0.4.83 reconstruction: source-video fidelity contract. 1.0 means full
+    # regeneration/noise-mask authority; lower values preserve more of the encoded
+    # source latent while still allowing H3 to synthesize missing detail.
+    reconstruction_active: bool = False
+    reconstruction_strength: float = 1.0
+    reconstruction_profile: str = "balanced"
+    # v0.5.4: reconstruction V5 uses native Ref2VA video-edit semantics.
+    # Each local source window is a <Video 1> reference while the target latent
+    # remains fresh; generated overlap is the only target-latent continuation.
+    reconstruction_guidance: str = "segmented_ref2va_edit"
+    # Target canvas is persisted so every later source-reference refresh applies
+    # exactly the same source_fit transform as pass 0 before reference downscale.
+    reconstruction_target_width: int = 0
+    reconstruction_target_height: int = 0
+    # v0.5.5: optional post-refine detail layer. It runs only after the global
+    # reconstruction refiner and merges high-frequency latent residuals back
+    # into the already-stable reconstruction, so geometry/motion stay owned by
+    # the completed two-pass result.
+    reconstruction_detail_enabled: bool = True
+    reconstruction_detail_strength: float = 0.35
+    reconstruction_detail_steps: int = 3
+    # v0.4.86: resize policy used only when encoding reconstruction source
+    # frames into the target LongMedia canvas. Kept in the immutable plan so
+    # every segment uses one authoritative geometry contract.
+    reconstruction_resize_mode: str = "center_crop"
+    reconstruction_audio_locked: bool = False
     # Production console guard. False enables full LongMedia diagnostics for profiling.
     release_guard: bool = True
 

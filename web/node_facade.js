@@ -102,7 +102,17 @@ function lmSetWidgetVisible(widget, visible, visited = new WeakSet()) {
 }
 
 function lmWidget(node, name) {
-    return node.widgets?.find((w) => w.name === name);
+    if (!node || !name) return undefined;
+    let cache = node.__lmWidgetByNameV526;
+    if (!cache) {
+        cache = new Map();
+        node.__lmWidgetByNameV526 = cache;
+    }
+    const cached = cache.get(name);
+    if (cached) return cached;
+    const found = node.widgets?.find((w) => w?.name === name);
+    if (found) cache.set(name, found);
+    return found;
 }
 
 function lmSetInputDisplay(input, label) {
@@ -150,15 +160,36 @@ function lmRefreshSetupInputLabels(node) {
     const audios = [];
     for (let i = 1; i <= 3; i += 1) audios.push(lmFindInput(node, `audio_${i}`));
 
-    // v0.3.96: native refs keep stable meanings. Workflow/audio policies only annotate.
+    const control = lmWidget(node, 'control_mode')?.value ?? 'auto';
+    const h3Mode = lmWidget(node, 'h3_mode')?.value ?? 'hybrid';
+    const timeline = lmWidget(node, 'timeline_mode')?.value ?? 'single';
+
     pictures.forEach((input, idx) => lmSetInputDisplay(input, `image_${idx + 1} • picture_${idx + 1}`));
     videos.forEach((input, idx) => lmSetInputDisplay(input, `video_${idx + 1}`));
     audios.forEach((input, idx) => lmSetInputDisplay(input, `audio_${idx + 1}`));
 
-    const audioMode = lmWidget(node, 'audio_mode')?.value ?? 'auto';
-    if (audioMode === 'lip_sync') {
-        lmSetInputDisplay(audios[0], 'audio_1 • lip_sync');
+    if (control !== 'manual') {
+        if (h3Mode === 'fl2va') {
+            lmSetInputDisplay(pictures[0], 'image_1 • first_frame');
+            lmSetInputDisplay(pictures[1], 'image_2 • last_frame (optional)');
+            for (let i = 2; i < pictures.length; i += 1) lmSetInputDisplay(pictures[i], `image_${i + 1} • inactive in FL2VA`);
+        } else if (h3Mode === 'hybrid') {
+            lmSetInputDisplay(pictures[0], 'image_1 • first_frame');
+            lmSetInputDisplay(pictures[1], 'image_2 • last_frame / optional');
+            for (let i = 2; i < pictures.length; i += 1) lmSetInputDisplay(pictures[i], `image_${i + 1} • picture_${i - 1}`);
+        } else if (h3Mode === 't2va') {
+            pictures.forEach((input, idx) => lmSetInputDisplay(input, `image_${idx + 1} • inactive in T2VA`));
+            videos.forEach((input, idx) => lmSetInputDisplay(input, `video_${idx + 1} • inactive in T2VA`));
+        } else if (h3Mode === 'video_ref_edit') {
+            lmSetInputDisplay(videos[0], 'video_1 • source motion/camera');
+        }
     }
+
+    const clipPlan = lmFindInput(node, 'clip_plan');
+    if (clipPlan) lmSetInputDisplay(clipPlan, timeline === 'multiclip' ? 'clip_plan • active' : 'clip_plan • ignored');
+
+    const audioMode = lmWidget(node, 'audio_mode')?.value ?? 'auto';
+    if (audioMode === 'lip_sync') lmSetInputDisplay(audios[0], 'audio_1 • lip_sync');
 }
 
 function lmSetCombo(node, name, values, fallback) {
@@ -191,8 +222,8 @@ function lmSetBoolean(node, name, fallback) {
 }
 
 function lmSanitizeSetup(node) {
-    // Base release widgets: repair only invalid/corrupt values, never overwrite a
-    // valid user choice. This covers workflows saved by the early broken 0.3.0.
+    // Repair only invalid/corrupt values. Public semantic controls never expose
+    // migration sentinels; old 0.5.23 `legacy` values are translated below.
     lmSetCombo(node, "duration_source", ["auto", "manual", "audio", "video", "longest_input"], "auto");
     lmSetCombo(node, "resolution_mode", ["match", "max"], "match");
     lmSetCombo(node, "reference_budget", ["low", "medium", "high", "max"], "low");
@@ -203,21 +234,45 @@ function lmSanitizeSetup(node) {
     lmSetNumber(node, "manual_duration", 10.0, 0.1, 600.0, false);
     lmSetNumber(node, "video_fps", 24.0, 1.0, 120.0, false);
 
-    const workflowValues = ["hybrid_auto", "segmented_continuation", "multiclip", "ref2va_full", "loop", "manual", "video_ref_edit"];
+    const workflowValues = ["hybrid_auto", "segmented_continuation", "multiclip", "reconstruct", "ref2va_full", "loop", "manual", "video_ref_edit"];
     lmSetCombo(node, "workflow_mode", workflowValues, "hybrid_auto");
-    // These legacy widgets are always submitted by ComfyUI even while hidden,
-    // so they MUST contain values accepted by the Python INPUT_TYPES validator.
+
+    // One-time migration of 0.5.23 semantic sentinels. They are accepted only
+    // as serialized input values and are immediately replaced by real modes.
+    const legacy = String(lmWidget(node, "workflow_mode")?.value ?? "hybrid_auto");
+    const map = {
+        hybrid_auto: ["auto", "hybrid", "single"],
+        segmented_continuation: ["auto", "ref2va", "segmented"],
+        multiclip: ["auto", "ref2va", "multiclip"],
+        ref2va_full: ["auto", "ref2va", "single"],
+        video_ref_edit: ["auto", "video_ref_edit", "single"],
+        manual: ["manual", "hybrid", "segmented"],
+        loop: ["auto", "hybrid", "single"],
+        reconstruct: ["auto", "video_ref_edit", "segmented"],
+    };
+    const migrated = map[legacy] ?? map.hybrid_auto;
+    const control = lmWidget(node, "control_mode");
+    const h3 = lmWidget(node, "h3_mode");
+    const timeline = lmWidget(node, "timeline_mode");
+    if (control?.value === "legacy") control.value = migrated[0];
+    if (h3?.value === "legacy") h3.value = migrated[1];
+    if (timeline?.value === "legacy") timeline.value = migrated[2];
+
+    lmSetCombo(node, "control_mode", ["auto", "manual"], "auto");
+    lmSetCombo(node, "h3_mode", ["t2va", "fl2va", "ref2va", "hybrid", "video_ref_edit"], "hybrid");
+    lmSetCombo(node, "timeline_mode", ["single", "segmented", "multiclip"], "single");
+
     lmSetCombo(node, "generation_mode", ["auto", "lip_sync"], "auto");
-    lmSetCombo(node, "first_frame_mode", ["latent_inject", "pixel_override", "blend"], "latent_inject");
-    lmSetCombo(node, "conditioning_mode", ["auto_refs", "hybrid_first_frame", "hybrid_first_last"], "auto_refs");
+    lmSetCombo(node, "first_frame_mode", ["native_keyframe", "latent_inject", "pixel_override", "blend"], "latent_inject");
+    lmSetCombo(node, "conditioning_mode", ["auto_refs", "hybrid_first_frame", "hybrid_first_last", "multiclip_ref2va"], "auto_refs");
     lmSetNumber(node, "first_frame_denoise", 0.25, 0.0, 1.0, false);
     lmSetNumber(node, "first_frame_blend_frames", 3, 1, 17, true);
     lmSetNumber(node, "segment_seconds", 5.0, 1.0, 60.0, false);
     lmSetNumber(node, "overlap_frames", 22, 5, 3600, true);
-
-    // v0.3.28: valid Manual values are preserved while public modes hide them.
-    // Python already derives the effective public-mode policy. Rewriting these
-    // widgets on every refresh made Manual -> public -> Manual destructive.
+    lmSetNumber(node, "transition_frames", 22, 5, 3600, true);
+    lmSetBoolean(node, "loop_closure_enabled", false);
+    lmSetNumber(node, "loop_closure_frames", 57, 2, 720, true);
+    lmSetNumber(node, "loop_closure_strength", 0.65, 0.0, 1.0, false);
 }
 
 
@@ -538,7 +593,7 @@ function lmEnsureMulticlipEditor(node) {
 
     const domWidget = node.addDOMWidget("multiclip_editor", "multiclip_editor", root, {
         serialize: false,
-        hideOnZoom: false,
+        hideOnZoom: true,
         getValue: () => null,
         setValue: () => {},
     });
@@ -671,96 +726,211 @@ function lmSyncHiresModelState(node) {
     }
 }
 
+function lmMoveWidgetBefore(node, name, beforeName) {
+    const widgets = node?.widgets;
+    if (!Array.isArray(widgets)) return;
+    const from = widgets.findIndex((w) => w?.name === name);
+    const to = widgets.findIndex((w) => w?.name === beforeName);
+    if (from < 0 || to < 0 || from === to) return;
+    const [w] = widgets.splice(from, 1);
+    const target = widgets.findIndex((x) => x?.name === beforeName);
+    widgets.splice(Math.max(0, target), 0, w);
+}
+
+function lmAddCanvasGroupHeader(node, name, title, beforeName) {
+    if (!node || typeof node.addCustomWidget !== "function") return null;
+    const w = node.addCustomWidget({
+        name,
+        type: "custom",
+        value: null,
+        serialize: false,
+        options: { serialize: false, canvasOnly: true },
+        __lmGroupHeader: true,
+        computeSize(width) {
+            return [Math.max(40, Number(width) || Number(node.size?.[0]) || 420), 24];
+        },
+        draw(ctx, _node, widgetWidth, y) {
+            if (!ctx) return;
+            ctx.save();
+            try {
+                ctx.globalAlpha *= 0.72;
+                ctx.fillStyle = "#c8c8c8";
+                ctx.font = "600 10px system-ui, sans-serif";
+                ctx.textBaseline = "middle";
+                const x = 4;
+                const cy = y + 12;
+                ctx.fillText(title, x, cy);
+                const textWidth = ctx.measureText(title).width;
+                const lineX = x + textWidth + 8;
+                const lineW = Math.max(0, Number(widgetWidth) - lineX - 4);
+                if (lineW > 0) {
+                    ctx.globalAlpha *= 0.28;
+                    ctx.fillRect(lineX, Math.round(cy), lineW, 1);
+                }
+            } finally {
+                ctx.restore();
+            }
+        },
+    });
+    w.serializeValue = () => undefined;
+    w.__lmGroupHeader = true;
+    const current = node.widgets?.indexOf(w) ?? -1;
+    const target = node.widgets?.findIndex((x) => x?.name === beforeName) ?? -1;
+    if (current >= 0 && target >= 0 && current !== target) {
+        node.widgets.splice(current, 1);
+        const adjusted = current < target ? target - 1 : target;
+        node.widgets.splice(Math.max(0, adjusted), 0, w);
+    }
+    // The named-widget cache may have been built before this decorative widget existed.
+    node.__lmWidgetByNameV526?.set?.(name, w);
+    return w;
+}
+
 function lmInstallSetupGroups(node) {
     lmInstallNamedWidgetPersistence(node);
-    if (!node || node.__lmSetupGroupsV453 || typeof node.addDOMWidget !== "function") return;
-    node.__lmSetupGroupsV453 = true;
+    if (!node || typeof node.addCustomWidget !== "function") return;
     const groups = [
+        ["control_mode", "CONTROL"],
+        ["h3_mode", "H3 CONDITIONING"],
         ["prompt", "PROMPT / CANVAS"],
-        ["manual_duration", "TIMELINE / SEGMENTS"],
+        ["timeline_mode", "TIMELINE / SEGMENTS"],
+        ["loop_closure_enabled", "LOOP CLOSURE"],
         ["resolution_mode", "MEDIA / REFERENCES"],
-        ["release_guard", "WORKFLOW / DEBUG"],
+        ["release_guard", "MANUAL / DEBUG"],
     ];
+
+    // Setup reorders semantic widgets dynamically (manual/auto, timeline mode, etc.).
+    // Decorative headers must therefore be re-anchored on every refresh.  In v0.5.26
+    // the headers were inserted only once; later lmMoveWidgetBefore() calls moved the
+    // real widgets while the headers stayed at their old indices, so CONTROL / H3 /
+    // PROMPT and LOOP sections visibly drifted apart.
     for (const [beforeName, title] of groups) {
-        const root = document.createElement("div");
-        root.style.cssText = [
-            "height:24px", "display:flex", "align-items:center", "gap:8px",
-            "font:600 10px/1 system-ui,sans-serif", "letter-spacing:.12em",
-            "opacity:.72", "padding:5px 4px 1px 4px", "box-sizing:border-box",
-            "pointer-events:none", "user-select:none"
-        ].join(";");
-        const label = document.createElement("span");
-        label.textContent = title;
-        label.style.whiteSpace = "nowrap";
-        const line = document.createElement("span");
-        line.style.cssText = "height:1px;flex:1;background:currentColor;opacity:.28";
-        root.append(label, line);
-        const w = node.addDOMWidget(`__lm_setup_group_${beforeName}`, "lm_group", root, {
-            serialize: false, hideOnZoom: true, getValue: () => null, setValue: () => {},
-        });
-        w.serializeValue = () => undefined;
-        w.__lmGroupHeader = true;
-        const current = node.widgets?.indexOf(w) ?? -1;
-        const target = node.widgets?.findIndex((x) => x?.name === beforeName) ?? -1;
-        if (current >= 0 && target >= 0 && current !== target) {
-            node.widgets.splice(current, 1);
-            const adjusted = current < target ? target - 1 : target;
-            node.widgets.splice(Math.max(0, adjusted), 0, w);
+        const headerName = `__lm_setup_group_${beforeName}`;
+        let header = lmWidget(node, headerName);
+        if (!header) {
+            header = lmAddCanvasGroupHeader(node, headerName, title, beforeName);
+        } else {
+            lmMoveWidgetBefore(node, headerName, beforeName);
         }
     }
+    node.__lmSetupGroupsV527 = true;
 }
 
 function lmRefreshSetup(node) {
+    // Presentation order only; Python schema/serialization remains stable.
+    lmMoveWidgetBefore(node, "control_mode", "prompt");
+    lmMoveWidgetBefore(node, "h3_mode", "prompt");
+    lmMoveWidgetBefore(node, "timeline_mode", "duration_source");
+    lmMoveWidgetBefore(node, "duration_source", "manual_duration");
+    lmMoveWidgetBefore(node, "transition_frames", "loop_closure_enabled");
     lmInstallSetupGroups(node);
+
+    const loopStrengthWidget = lmWidget(node, "loop_closure_strength");
+    const loopFramesIndex = node.widgets?.findIndex((w) => w?.name === "loop_closure_frames") ?? -1;
+    const loopStrengthIndex = node.widgets?.indexOf(loopStrengthWidget) ?? -1;
+    if (loopStrengthWidget && loopFramesIndex >= 0 && loopStrengthIndex >= 0 && loopStrengthIndex !== loopFramesIndex + 1) {
+        node.widgets.splice(loopStrengthIndex, 1);
+        const framesNow = node.widgets.findIndex((w) => w?.name === "loop_closure_frames");
+        node.widgets.splice(framesNow + 1, 0, loopStrengthWidget);
+    }
+
     lmSanitizeSetup(node);
-    const mode = lmWidget(node, "workflow_mode")?.value ?? "hybrid_auto";
+    const control = lmWidget(node, "control_mode")?.value ?? "auto";
+    const h3Mode = lmWidget(node, "h3_mode")?.value ?? "hybrid";
+    const timeline = lmWidget(node, "timeline_mode")?.value ?? "single";
     const audioMode = lmWidget(node, "audio_mode")?.value ?? "auto";
-    const manual = mode === "manual";
-    const segmented = mode === "segmented_continuation";
-    const externalPlanner = lmInputConnected(node, "clip_plan");
-    const multiclip = mode === "multiclip";
-    const lipSync = audioMode === "lip_sync";
-    // Global duration controls are meaningless in MultiClip: each card owns its duration.
+    const durationSource = lmWidget(node, "duration_source")?.value ?? "auto";
+    const frameMode = lmWidget(node, "first_frame_mode")?.value ?? "latent_inject";
+    const manual = control === "manual";
+    const segmented = timeline === "segmented";
+    const multiclip = timeline === "multiclip";
+    const hybrid = h3Mode === "hybrid";
+    const reconstruct = lmInputConnected(node, "reconstruction");
+    const loopEnabled = lmWidget(node, "loop_closure_enabled")?.value === true;
+
+    const h3Widget = lmWidget(node, "h3_mode");
+    if (h3Widget) { h3Widget.label = "h3_mode"; h3Widget.localized_name = "h3_mode"; }
+    const timelineWidget = lmWidget(node, "timeline_mode");
+    if (timelineWidget) { timelineWidget.label = "timeline_mode"; timelineWidget.localized_name = "timeline_mode"; }
     const segmentDuration = lmWidget(node, "segment_seconds");
-    if (segmentDuration) {
-        segmentDuration.label = "segment_duration";
-        segmentDuration.localized_name = "segment_duration";
-    }
-    lmSetWidgetVisible(lmWidget(node, "manual_duration"), !multiclip);
-    lmSetWidgetVisible(lmWidget(node, "duration_source"), !multiclip);
-    lmSetWidgetVisible(segmentDuration, manual || segmented);
-    // Keep serialized JSON as backend storage only; users edit clip cards.
-    lmSetWidgetVisible(lmWidget(node, "multiclip_json"), false);
-    const multiclipEditor = lmEnsureMulticlipEditor(node);
-    if (multiclipEditor) {
-        // When an external LongMedia Planner is connected, it is the only clip editor.
-        lmSetWidgetVisible(multiclipEditor, multiclip && !externalPlanner);
-        if (multiclip && !externalPlanner) lmSyncMulticlipEditorFromStorage(node);
-    }
-    // Segmentation controls exist only in Manual and Segmented Continuation.
-    lmSetWidgetVisible(lmWidget(node, "overlap_frames"), manual || segmented);
-    lmSetWidgetVisible(lmWidget(node, "conditioning_mode"), manual);
-    // v0.3.95: generation_mode is legacy compatibility storage; lip-sync lives in audio_mode.
+    if (segmentDuration) { segmentDuration.label = "segment_duration"; segmentDuration.localized_name = "segment_duration"; }
+    const transition = lmWidget(node, "transition_frames");
+    if (transition) { transition.label = "transition_frames"; transition.localized_name = "transition_frames"; }
+    const legacyCond = lmWidget(node, "conditioning_mode");
+    if (legacyCond) { legacyCond.label = "conditioning_override"; legacyCond.localized_name = "conditioning_override"; }
+
+    // New semantic selectors are always visible. Reconstruction can still own
+    // execution through its socket, but Setup's selected state remains inspectable.
+    lmSetWidgetVisible(lmWidget(node, "control_mode"), true);
+    lmSetWidgetVisible(h3Widget, true);
+    lmSetWidgetVisible(timelineWidget, true);
+
+    // Timeline ownership is a first-class control even in control_mode=auto.
+    // H3 mode only changes the meaning of `auto` (video_ref_edit => video_1);
+    // explicit video/audio/manual/longest_input choices stay user-owned.
+    lmSetWidgetVisible(lmWidget(node, "duration_source"), true);
+    lmSetWidgetVisible(lmWidget(node, "manual_duration"), !multiclip && !reconstruct && (durationSource === "manual" || manual));
+
+    // Segment size is meaningful only for fixed segmentation. Manual shows it
+    // regardless so advanced users can stage a configuration before switching.
+    lmSetWidgetVisible(segmentDuration, segmented || manual);
+    // Requested feature: transition magnitude belongs to BOTH Segmented and
+    // MultiClip, and is also directly available in Manual.
+    lmSetWidgetVisible(transition, segmented || multiclip || manual);
+
+    // Hybrid owns image-injection parameters. FL2VA is intentionally pure native
+    // keyframe conditioning and never exposes/inherits these controls.
+    lmSetWidgetVisible(lmWidget(node, "first_frame_mode"), hybrid || manual);
+    lmSetWidgetVisible(lmWidget(node, "first_frame_denoise"), manual || (hybrid && frameMode === "latent_inject"));
+    lmSetWidgetVisible(lmWidget(node, "first_frame_blend_frames"), manual || (hybrid && frameMode === "blend"));
+
+    // Manual is a control level, not a workflow. It exposes the old low-level
+    // conditioning selector and common diagnostic knobs without changing sampler UI.
+    lmSetWidgetVisible(legacyCond, manual);
+
+    // Legacy backend state remains serialized for compatibility but is never a
+    // public mode selector anymore.
+    lmSetWidgetVisible(lmWidget(node, "workflow_mode"), false);
+    lmSetWidgetVisible(lmWidget(node, "overlap_frames"), false);
     lmSetWidgetVisible(lmWidget(node, "generation_mode"), false);
-    // Planner supplies clip data only; Setup always owns workflow selection.
-    lmSetWidgetVisible(lmWidget(node, "workflow_mode"), true);
-    // Lip-sync-specific first-frame controls become visible immediately when selected.
-    for (const name of ["first_frame_mode", "first_frame_denoise", "first_frame_blend_frames"])
-        lmSetWidgetVisible(lmWidget(node, name), false);
+    lmSetWidgetVisible(lmWidget(node, "multiclip_json"), false);
+    const multiclipEditor = node.__lmMulticlipDomWidgetV387 ?? null;
+    if (multiclipEditor) lmSetWidgetVisible(multiclipEditor, false);
+
+    // Loop Closure is orthogonal. Keep only the switch visible while disabled;
+    // Manual may inspect/tune its dormant values without enabling it.
+    lmSetWidgetVisible(lmWidget(node, "loop_closure_enabled"), true);
+    lmSetWidgetVisible(lmWidget(node, "loop_closure_frames"), loopEnabled || manual);
+    lmSetWidgetVisible(lmWidget(node, "loop_closure_strength"), loopEnabled || manual);
+
+    for (const name of [
+        "prompt", "width", "height", "resolution_mode", "reference_budget",
+        "video_fps", "video_mode", "audio_mode", "release_guard",
+    ]) lmSetWidgetVisible(lmWidget(node, name), true);
+
+    // In Auto keep the surface concise. Manual opens the deeper media policy
+    // knobs that were previously always visible.
+    lmSetWidgetVisible(lmWidget(node, "reference_budget"), true);
+    lmSetWidgetVisible(lmWidget(node, "video_mode"), manual || h3Mode === "video_ref_edit");
+    lmSetWidgetVisible(lmWidget(node, "release_guard"), manual);
+
+    for (const name of [
+        "__lm_setup_group_control_mode", "__lm_setup_group_h3_mode", "__lm_setup_group_prompt",
+        "__lm_setup_group_timeline_mode", "__lm_setup_group_loop_closure_enabled",
+        "__lm_setup_group_resolution_mode", "__lm_setup_group_release_guard",
+    ]) lmSetWidgetVisible(lmWidget(node, name), true);
+
     lmRefreshSetupInputLabels(node);
     const computed = node.computeSize?.();
-    // Preserve the exact user-selected width across workflow_mode changes.
-    // Only the height is recomputed when MultiClip widgets appear/disappear.
     const width = Number(node.size?.[0]);
-    const height = computed?.[1] ?? node.size?.[1];
-    if (Number.isFinite(width) && width > 0 && Number.isFinite(height) && height > 0) {
+    const height = Number(computed?.[1] ?? node.size?.[1]);
+    const currentHeight = Number(node.size?.[1]);
+    if (Number.isFinite(width) && width > 0 && Number.isFinite(height) && height > 0 &&
+        (!Number.isFinite(currentHeight) || Math.abs(currentHeight - height) > 0.5)) {
         node.setSize?.([width, height]);
     }
-    node.setDirtyCanvas?.(true, true);
-    node.graph?.setDirtyCanvas?.(true, true);
-    app.canvas?.setDirty?.(true, true);
+    node.setDirtyCanvas?.(true, false);
 }
-
 
 
 function lmInstallPresentationSafeSerialize(node) {
@@ -785,8 +955,8 @@ function lmInstallPresentationSafeSerialize(node) {
 
 function lmInstallSamplerGroups(node) {
     lmInstallNamedWidgetPersistence(node);
-    if (!node || node.__lmSamplerGroupsV453 || typeof node.addDOMWidget !== "function") return;
-    node.__lmSamplerGroupsV453 = true;
+    if (!node || node.__lmSamplerGroupsV526 || typeof node.addCustomWidget !== "function") return;
+    node.__lmSamplerGroupsV526 = true;
     const groups = [
         ["video_context_denoise", "CONTEXT / SEGMENTS"],
         ["mlp_chunk_tokens", "ATTENTION / COMPUTE"],
@@ -796,34 +966,7 @@ function lmInstallSamplerGroups(node) {
         ["memory_mode", "RUNTIME MODE"],
     ];
     for (const [beforeName, title] of groups) {
-        const root = document.createElement("div");
-        root.style.cssText = [
-            "height:24px", "display:flex", "align-items:center", "gap:8px",
-            "font:600 10px/1 system-ui,sans-serif", "letter-spacing:.12em",
-            "opacity:.72", "padding:5px 4px 1px 4px", "box-sizing:border-box",
-            "pointer-events:none", "user-select:none"
-        ].join(";");
-        const label = document.createElement("span");
-        label.textContent = title;
-        label.style.whiteSpace = "nowrap";
-        const line = document.createElement("span");
-        line.style.cssText = "height:1px;flex:1;background:currentColor;opacity:.28";
-        root.append(label, line);
-        const w = node.addDOMWidget(`__lm_group_${beforeName}`, "lm_group", root, {
-            serialize: false,
-            hideOnZoom: true,
-            getValue: () => null,
-            setValue: () => {},
-        });
-        w.serializeValue = () => undefined;
-        w.__lmGroupHeader = true;
-        const current = node.widgets?.indexOf(w) ?? -1;
-        const target = node.widgets?.findIndex((x) => x?.name === beforeName) ?? -1;
-        if (current >= 0 && target >= 0 && current !== target) {
-            node.widgets.splice(current, 1);
-            const adjusted = current < target ? target - 1 : target;
-            node.widgets.splice(Math.max(0, adjusted), 0, w);
-        }
+        lmAddCanvasGroupHeader(node, `__lm_group_${beforeName}`, title, beforeName);
     }
 }
 
@@ -845,80 +988,81 @@ function lmRefreshSampler(node) {
         lmSetWidgetVisible(lmWidget(node, name), hiresEnabled);
     const refineEnabled = Boolean(lmWidget(node, "refine_enabled")?.value);
     lmSetWidgetVisible(lmWidget(node, "refine_steps"), refineEnabled);
-    node.setSize?.([Math.max(node.size?.[0] ?? 0, 420), node.computeSize?.()[1] ?? node.size[1]]);
-    node.setDirtyCanvas?.(true, true);
-    node.graph?.setDirtyCanvas?.(true, true);
-    app.canvas?.setDirty?.(true, true);
+    const targetWidth = Math.max(Number(node.size?.[0]) || 0, 420);
+    const targetHeight = Number(node.computeSize?.()?.[1] ?? node.size?.[1]);
+    if (Number.isFinite(targetHeight) && targetHeight > 0 &&
+        (Math.abs((Number(node.size?.[0]) || 0) - targetWidth) > 0.5 ||
+         Math.abs((Number(node.size?.[1]) || 0) - targetHeight) > 0.5)) {
+        node.setSize?.([targetWidth, targetHeight]);
+    }
+    node.setDirtyCanvas?.(true, false);
 }
 
 let lmConfiguringGraph = false;
 
 function lmInstallModeWatcher(node, modeName, refresh) {
     if (!node) return;
-    const key = `__lmModeWatcher_${modeName}`;
-    if (node[key]) return;
-    node[key] = true;
-    const lastKey = `${key}_last`;
+    const key = "__lmModeWatcherGroupV526";
+    let group = node[key];
+    if (!group) {
+        group = { names: new Set(), last: new Map(), refresh, timer: null };
+        node[key] = group;
+        // Durable fallback only. Unlike the old implementation this is ONE timer per
+        // node and performs no work from onDrawForeground, so pan/zoom stays canvas-only.
+        group.timer = setInterval(() => {
+            if (lmConfiguringGraph || !node.graph) return;
+            let changed = false;
+            for (const name of group.names) {
+                const current = lmWidget(node, name)?.value;
+                if (!group.last.has(name)) {
+                    group.last.set(name, current);
+                } else if (current !== group.last.get(name)) {
+                    group.last.set(name, current);
+                    changed = true;
+                }
+            }
+            if (changed) group.refresh(node);
+        }, 400);
 
-    // Draw callbacks are useful but not reliable enough on every ComfyUI frontend:
-    // extensions can replace onDrawForeground after nodeCreated, and collapsed/offscreen
-    // nodes may not be redrawn immediately after a combo changes. Keep the draw watcher
-    // as a fast path and add a tiny value-only polling watcher as the durable fallback.
-    const priorDraw = node.onDrawForeground;
-    node.onDrawForeground = function (...args) {
-        const result = priorDraw?.apply(this, args);
-        const current = lmWidget(this, modeName)?.value;
-        if (current !== this[lastKey]) {
-            this[lastKey] = current;
-            if (!lmConfiguringGraph) refresh(this);
-        }
-        return result;
-    };
+        const priorRemoved = node.onRemoved;
+        node.onRemoved = function (...args) {
+            const state = this[key];
+            if (state?.timer != null) {
+                clearInterval(state.timer);
+                state.timer = null;
+            }
+            return priorRemoved?.apply(this, args);
+        };
+    }
+    group.refresh = refresh;
+    group.names.add(modeName);
+    group.last.set(modeName, lmWidget(node, modeName)?.value);
+}
 
-    const timerKey = `${key}_timer`;
-    node[timerKey] = setInterval(() => {
-        if (lmConfiguringGraph || !node.graph) return;
-        const current = lmWidget(node, modeName)?.value;
-        if (current !== node[lastKey]) {
-            node[lastKey] = current;
-            refresh(node);
-        }
-    }, 100);
-
-    const priorRemoved = node.onRemoved;
-    node.onRemoved = function (...args) {
-        const timer = this[timerKey];
-        if (timer != null) {
-            clearInterval(timer);
-            this[timerKey] = null;
-        }
-        return priorRemoved?.apply(this, args);
-    };
+function lmScheduleModeRefresh(node, refresh) {
+    if (!node || node.__lmModeRefreshScheduledV526) return;
+    node.__lmModeRefreshScheduledV526 = true;
+    requestAnimationFrame(() => {
+        node.__lmModeRefreshScheduledV526 = false;
+        if (!lmConfiguringGraph && node.graph) refresh(node);
+    });
 }
 
 function lmWireModeCallback(node, modeName, refresh, scheduleInitial = true) {
     const w = lmWidget(node, modeName);
-    if (w && !w.__lmModeCallbackWrapped) {
-        w.__lmModeCallbackWrapped = true;
+    if (w && !w.__lmModeCallbackWrappedV526) {
+        w.__lmModeCallbackWrappedV526 = true;
         const cb = w.callback;
         w.callback = function (...args) {
             const r = cb?.apply(this, args);
-            // Saved widget values may invoke callbacks while LiteGraph is still
-            // restoring the node. Defer all presentation work to afterConfigureGraph
-            // so half-restored values cannot produce a partial Manual expansion.
-            if (!lmConfiguringGraph) {
-                requestAnimationFrame(() => refresh(node));
-                setTimeout(() => refresh(node), 0);
-                setTimeout(() => refresh(node), 50);
-            }
+            const group = node.__lmModeWatcherGroupV526;
+            group?.last?.set?.(modeName, lmWidget(node, modeName)?.value);
+            if (!lmConfiguringGraph) lmScheduleModeRefresh(node, refresh);
             return r;
         };
     }
     lmInstallModeWatcher(node, modeName, refresh);
-    if (!scheduleInitial) return;
-    requestAnimationFrame(() => refresh(node));
-    setTimeout(() => refresh(node), 0);
-    setTimeout(() => refresh(node), 50);
+    if (scheduleInitial) lmScheduleModeRefresh(node, refresh);
 }
 
 app.registerExtension({
@@ -935,8 +1079,14 @@ app.registerExtension({
                 setTimeout(() => lmPruneLegacyPromptInput(node), 0);
             });
             lmWireSetupConnectionRefresh(node);
+            lmWireModeCallback(node, "control_mode", lmRefreshSetup, !lmConfiguringGraph);
+            lmWireModeCallback(node, "h3_mode", lmRefreshSetup, !lmConfiguringGraph);
+            lmWireModeCallback(node, "timeline_mode", lmRefreshSetup, !lmConfiguringGraph);
+            lmWireModeCallback(node, "first_frame_mode", lmRefreshSetup, !lmConfiguringGraph);
+            lmWireModeCallback(node, "loop_closure_enabled", lmRefreshSetup, !lmConfiguringGraph);
             lmWireModeCallback(node, "workflow_mode", lmRefreshSetup, !lmConfiguringGraph);
             lmWireModeCallback(node, "audio_mode", lmRefreshSetup, !lmConfiguringGraph);
+            lmWireModeCallback(node, "duration_source", lmRefreshSetup, !lmConfiguringGraph);
             lmWireModeCallback(node, "generation_mode", lmRefreshSetup, !lmConfiguringGraph);
             lmWireModeCallback(node, "conditioning_mode", lmRefreshSetup, !lmConfiguringGraph);
             if (!lmConfiguringGraph) setTimeout(() => lmRefreshSetup(node), 100);
@@ -964,8 +1114,14 @@ app.registerExtension({
                 lmRestoreNamedWidgetState(node);
                 lmPruneLegacyPromptInput(node);
                 lmWireSetupConnectionRefresh(node);
+                lmWireModeCallback(node, "control_mode", lmRefreshSetup, false);
+                lmWireModeCallback(node, "h3_mode", lmRefreshSetup, false);
+                lmWireModeCallback(node, "timeline_mode", lmRefreshSetup, false);
+                lmWireModeCallback(node, "first_frame_mode", lmRefreshSetup, false);
+                lmWireModeCallback(node, "loop_closure_enabled", lmRefreshSetup, false);
                 lmWireModeCallback(node, "workflow_mode", lmRefreshSetup, false);
                 lmWireModeCallback(node, "audio_mode", lmRefreshSetup, false);
+                lmWireModeCallback(node, "duration_source", lmRefreshSetup, false);
                 lmWireModeCallback(node, "generation_mode", lmRefreshSetup, false);
                 lmWireModeCallback(node, "conditioning_mode", lmRefreshSetup, false);
                 lmRefreshSetup(node);

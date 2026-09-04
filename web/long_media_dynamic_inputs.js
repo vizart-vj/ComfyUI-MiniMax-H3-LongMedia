@@ -145,15 +145,39 @@ function refreshSocketLabels(node) {
     const videos = Array.from({ length: 3 }, (_, i) => get(`video_${i + 1}`));
     const audios = Array.from({ length: 3 }, (_, i) => get(`audio_${i + 1}`));
 
-    // v0.3.96: sockets keep native H3 reference semantics in every workflow.
-    // Modes may annotate a native input, but never repurpose image/audio slots.
+    const control = widget(node, 'control_mode')?.value ?? 'auto';
+    const h3Mode = widget(node, 'h3_mode')?.value ?? 'hybrid';
+    const timeline = widget(node, 'timeline_mode')?.value ?? 'single';
+
     pictures.forEach((input, idx) => setInputDisplay(input, `image_${idx + 1} • picture_${idx + 1}`));
     videos.forEach((input, idx) => setInputDisplay(input, `video_${idx + 1}`));
     audios.forEach((input, idx) => setInputDisplay(input, `audio_${idx + 1}`));
 
+    if (control !== 'manual') {
+        if (h3Mode === 'fl2va') {
+            setInputDisplay(pictures[0], 'image_1 • first_frame');
+            setInputDisplay(pictures[1], 'image_2 • last_frame (optional)');
+            for (let i = 2; i < pictures.length; i += 1) setInputDisplay(pictures[i], `image_${i + 1} • inactive in FL2VA`);
+        } else if (h3Mode === 'hybrid') {
+            setInputDisplay(pictures[0], 'image_1 • first_frame');
+            setInputDisplay(pictures[1], 'image_2 • last_frame / optional');
+            for (let i = 2; i < pictures.length; i += 1) setInputDisplay(pictures[i], `image_${i + 1} • picture_${i - 1}`);
+        } else if (h3Mode === 't2va') {
+            pictures.forEach((input, idx) => setInputDisplay(input, `image_${idx + 1} • inactive in T2VA`));
+            videos.forEach((input, idx) => setInputDisplay(input, `video_${idx + 1} • inactive in T2VA`));
+        } else if (h3Mode === 'video_ref_edit') {
+            setInputDisplay(videos[0], 'video_1 • source motion/camera');
+        }
+    }
+
+    const clipPlan = get('clip_plan');
+    if (clipPlan) setInputDisplay(clipPlan, timeline === 'multiclip' ? 'clip_plan • active' : 'clip_plan • ignored');
+
     const audioMode = widget(node, 'audio_mode')?.value ?? 'auto';
     if (audioMode === 'lip_sync') {
         setInputDisplay(audios[0], 'audio_1 • lip_sync');
+    } else if (h3Mode === 'video_ref_edit' && ['auto', 'preserve', 'preserve_reference'].includes(audioMode)) {
+        setInputDisplay(audios[0], 'audio_1 • source soundtrack + sync');
     }
 }
 
@@ -164,9 +188,12 @@ const COMBOS = {
     video_mode: { values: ["auto", "preserve", "transform"], fallback: "auto" },
     audio_mode: { values: ["auto", "preserve", "generate", "reference_only", "preserve_reference", "lip_sync"], fallback: "auto" },
     generation_mode: { values: ["auto", "lip_sync"], fallback: "auto" },
-    first_frame_mode: { values: ["latent_inject", "pixel_override", "blend"], fallback: "latent_inject" },
-    conditioning_mode: { values: ["auto_refs", "hybrid_first_frame", "hybrid_first_last"], fallback: "auto_refs" },
-    workflow_mode: { values: ["hybrid_auto", "segmented_continuation", "multiclip", "ref2va_full", "loop", "manual", "video_ref_edit"], fallback: "hybrid_auto" },
+    first_frame_mode: { values: ["native_keyframe", "latent_inject", "pixel_override", "blend"], fallback: "latent_inject" },
+    conditioning_mode: { values: ["auto_refs", "hybrid_first_frame", "hybrid_first_last", "multiclip_ref2va"], fallback: "auto_refs" },
+    workflow_mode: { values: ["hybrid_auto", "segmented_continuation", "multiclip", "reconstruct", "ref2va_full", "loop", "manual", "video_ref_edit"], fallback: "hybrid_auto" },
+    control_mode: { values: ["auto", "manual"], fallback: "auto" },
+    h3_mode: { values: ["t2va", "fl2va", "ref2va", "hybrid", "video_ref_edit"], fallback: "hybrid" },
+    timeline_mode: { values: ["single", "segmented", "multiclip"], fallback: "single" },
 };
 
 const NUMBERS = {
@@ -175,12 +202,37 @@ const NUMBERS = {
     manual_duration: 5.0,
     segment_seconds: 8.0,
     overlap_frames: 22,
+    transition_frames: 22,
+    loop_closure_frames: 57,
+    loop_closure_strength: 0.65,
     video_fps: 24.0,
     first_frame_denoise: 0.25,
     first_frame_blend_frames: 3,
 };
 
 function repairCorruptWidgetValues(node) {
+    // Migrate the one-release 0.5.23 semantic sentinels before generic combo
+    // repair. This must live here as well as in node_facade.js because frontend
+    // extension callback ordering is not guaranteed.
+    const legacyWorkflow = String(widget(node, "workflow_mode")?.value ?? "hybrid_auto");
+    const semanticMap = {
+        hybrid_auto: ["auto", "hybrid", "single"],
+        segmented_continuation: ["auto", "ref2va", "segmented"],
+        multiclip: ["auto", "ref2va", "multiclip"],
+        ref2va_full: ["auto", "ref2va", "single"],
+        video_ref_edit: ["auto", "video_ref_edit", "single"],
+        manual: ["manual", "hybrid", "segmented"],
+        loop: ["auto", "hybrid", "single"],
+        reconstruct: ["auto", "video_ref_edit", "segmented"],
+    };
+    const migrated = semanticMap[legacyWorkflow] ?? semanticMap.hybrid_auto;
+    const control = widget(node, "control_mode");
+    const h3 = widget(node, "h3_mode");
+    const timeline = widget(node, "timeline_mode");
+    if (control?.value === "legacy") control.value = migrated[0];
+    if (h3?.value === "legacy") h3.value = migrated[1];
+    if (timeline?.value === "legacy") timeline.value = migrated[2];
+
     // Recovery only: valid values are never touched. This repairs workflows saved
     // while an older JS build had shifted widgets_values (e.g. generation_mode=0).
     for (const [name, spec] of Object.entries(COMBOS)) {
