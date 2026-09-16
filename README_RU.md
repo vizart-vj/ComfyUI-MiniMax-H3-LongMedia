@@ -2,6 +2,8 @@
 
 Production-oriented ComfyUI nodes для **MiniMax H3**: long-form video/audio generation, native reference editing, Director timeline authoring, MultiClip planning, camera direction, segmentation, lip-sync/redubbing, latent hi-res refine, reconstruction и adaptive low-VRAM execution.
 
+![screenshot](ex.png)
+
 **Текущий релиз: 0.6.40.**
 
 ## Документация
