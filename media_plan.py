@@ -45,11 +45,13 @@ class LongMediaPlan:
     final_audio_override: Any = None
     final_audio_track_count: int = 0
     audio_output_mode: str = "auto"
-    # v0.3.104 lip-sync: native Ref2VA Audio1 + local native H3 Audio Guide.
+    # Legacy compatibility flag for pre-0.6.11 audio-guide lip-sync. New lip-sync
+    # keeps this False and uses the frozen target-audio stream exclusively.
     lip_sync_native_audio_guide: bool = False
-    # v0.3.113: authoritative source audio is injected into the target AV latent
-    # and frozen (noise mask 0) so the joint H3 transformer predicts video
-    # against the exact speech timeline instead of treating Audio1 only as a ref.
+    # Authoritative source audio is injected into the target AV latent and frozen
+    # (noise mask 0) so the joint H3 transformer predicts video against the exact
+    # speech timeline. Since v0.6.11 this is the sole lip-sync audio authority:
+    # Audio1 is not simultaneously emitted as Ref2VA audio or an audio-only guide.
     lip_sync_target_audio_locked: bool = False
     first_frame_override: Any = None
     first_frame_mode: str = "latent_inject"
@@ -63,6 +65,11 @@ class LongMediaPlan:
     # intentionally resident.  Never store CLIP/TE/model-patcher objects here.
     segment_positive_conditionings: Any = None
     segment_prompt_summaries: Any = None
+    # Per-pass temporal conditioning routes. Legacy entries describe native
+    # embedding-tail rows; v0.6.17 supports combined conditioning_region rows;
+    # v0.6.20 uses factorized camera_control / embedding_control rows with exact
+    # text_start/stop and local frame windows. Pure metadata: no model/device buffers.
+    segment_temporal_embeddings: Any = None
     # v0.3.85 MultiClip: optional per-pass seeds; None = sampler base seed + clip index.
     segment_seeds: Any = None
     # V63 storyboard bridge: ready per-pass AV latents and decoded boundary index.
@@ -106,6 +113,22 @@ class LongMediaPlan:
     # every segment uses one authoritative geometry contract.
     reconstruction_resize_mode: str = "center_crop"
     reconstruction_audio_locked: bool = False
+    # v0.5.50 Director selective-regeneration contract. Empty project_id keeps
+    # ordinary Planner/Setup workflows completely outside the persistent take cache.
+    director_project_id: str = ""
+    director_node_id: str = ""
+    director_clip_ids: Any = None
+    director_clip_metadata: Any = None
+    # Full authored Director timeline captured for every rendered take. This is
+    # deliberately separate from per-clip metadata: Restore Take must be able to
+    # reconstruct CAMERA / embedding / prompt / reference tracks exactly as authored.
+    director_timeline_snapshot: Any = None
+    director_regeneration: Any = None
+    director_reference_fingerprint: str = ""
+    # Optional latent-native temporal anti-smear policy configured by LongMedia Setup.
+    # off keeps the historical sampling path bit-for-bit; auto/fluid/strong arm
+    # a selective second pass only on motion-overloaded temporal regions.
+    motion_repair_mode: str = "off"
     # Production console guard. False enables full LongMedia diagnostics for profiling.
     release_guard: bool = True
 

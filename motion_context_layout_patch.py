@@ -70,12 +70,37 @@ def _patched_init(self, text_len, latent_t, latent_h, latent_w, audio_t,
         keyframes=safe, refs=refs, frame_count=frame_count,
     )
 
-    cond_spans = [(a, b) for a, b, kind in self.segments if kind == "cond"]
-    if len(cond_spans) != len(keyframes):
+    # One MiniMax keyframe can contribute zero, one, or two packed condition
+    # segments depending on modality: visual latents become ``cond`` and audio
+    # latents become ``cond_audio``.  Older LongMedia code incorrectly compared
+    # the number of visual ``cond`` spans with len(keyframes), which breaks as
+    # soon as FIRST/LAST visual anchors coexist with an audio-only guide (the
+    # common chained Sampler #2 case).  Reconstruct the exact stock segment
+    # sequence from keyframe payloads and align by modality instead.
+    expected_condition_segments = []
+    for kf in keyframes:
+        if kf.get("latent") is not None:
+            expected_condition_segments.append(("cond", kf))
+        if kf.get("audio_latent") is not None:
+            expected_condition_segments.append(("cond_audio", kf))
+
+    actual_condition_segments = [
+        (a, b, kind) for a, b, kind in self.segments
+        if kind in ("cond", "cond_audio")
+    ]
+    if len(actual_condition_segments) != len(expected_condition_segments):
         raise RuntimeError(
-            "LongMedia motion context: conditioning/layout segment count mismatch")
+            "LongMedia motion context: conditioning/layout segment count mismatch "
+            f"(layout={len(actual_condition_segments)}, expected={len(expected_condition_segments)})")
+
     origin = _target_origin(self)
-    for (a, b), kf in zip(cond_spans, keyframes):
+    for (a, b, actual_kind), (expected_kind, kf) in zip(
+        actual_condition_segments, expected_condition_segments
+    ):
+        if actual_kind != expected_kind:
+            raise RuntimeError(
+                "LongMedia motion context: conditioning/layout modality mismatch "
+                f"(layout={actual_kind}, expected={expected_kind})")
         p = kf.get(MC_KEY)
         if p is None:
             continue

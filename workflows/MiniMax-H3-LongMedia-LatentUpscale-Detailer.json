@@ -1,7 +1,7 @@
 {
   "id": "8d6c17ea-ca57-402a-b735-5d07a3805c78",
   "revision": 0,
-  "last_node_id": 332,
+  "last_node_id": 331,
   "last_link_id": 487,
   "nodes": [
     {
@@ -18,7 +18,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 43,
+      "order": 42,
       "mode": 0,
       "inputs": [
         {
@@ -63,7 +63,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 42,
+      "order": 41,
       "mode": 0,
       "inputs": [
         {
@@ -108,7 +108,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 59,
+      "order": 58,
       "mode": 4,
       "inputs": [
         {
@@ -153,7 +153,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 62,
+      "order": 61,
       "mode": 0,
       "inputs": [
         {
@@ -187,7 +187,9 @@
         "cnr_id": "comfy-core",
         "ver": "0.29.2",
         "Node name for S&R": "GetImageSize"
-      }
+      },
+      "widgets_values": [],
+      "widgets_values_named": {}
     },
     {
       "id": 133,
@@ -203,7 +205,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 68,
+      "order": 67,
       "mode": 0,
       "inputs": [
         {
@@ -248,7 +250,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 69,
+      "order": 68,
       "mode": 0,
       "inputs": [
         {
@@ -422,7 +424,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 44,
+      "order": 43,
       "mode": 4,
       "showAdvanced": true,
       "inputs": [
@@ -481,7 +483,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 45,
+      "order": 44,
       "mode": 4,
       "showAdvanced": true,
       "inputs": [
@@ -540,7 +542,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 46,
+      "order": 45,
       "mode": 4,
       "showAdvanced": true,
       "inputs": [
@@ -626,7 +628,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 58,
+      "order": 57,
       "mode": 4,
       "inputs": [
         {
@@ -671,7 +673,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 60,
+      "order": 59,
       "mode": 4,
       "inputs": [
         {
@@ -714,7 +716,7 @@
         60
       ],
       "flags": {},
-      "order": 47,
+      "order": 46,
       "mode": 0,
       "inputs": [
         {
@@ -847,7 +849,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 53,
+      "order": 52,
       "mode": 0,
       "inputs": [
         {
@@ -932,7 +934,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 52,
+      "order": 51,
       "mode": 0,
       "inputs": [
         {
@@ -977,7 +979,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 48,
+      "order": 47,
       "mode": 0,
       "inputs": [
         {
@@ -1024,7 +1026,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 61,
+      "order": 60,
       "mode": 0,
       "inputs": [
         {
@@ -1112,7 +1114,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 63,
+      "order": 62,
       "mode": 0,
       "inputs": [
         {
@@ -1157,7 +1159,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 49,
+      "order": 48,
       "mode": 0,
       "showAdvanced": true,
       "inputs": [
@@ -1415,7 +1417,7 @@
         50
       ],
       "flags": {},
-      "order": 75,
+      "order": 74,
       "mode": 0,
       "inputs": [
         {
@@ -1732,10 +1734,10 @@
       "title": "# Sampler, VRAM and Performance Rules",
       "properties": {},
       "widgets_values": [
-        "# Sampler, VRAM and Performance Guide\n\nThese recommendations apply to the 0.5.40 release.\n\n## Production Default\n\nStart with:\n\n```text\nsampler_mode   = auto\nmemory_mode    = auto\nattention_mode = auto\n```\n\nKeep ComfyUI Dynamic VRAM enabled.\n\nDo not launch with:\n\n```text\n--disable-dynamic-vram\n```\n\nLongMedia's large-model execution relies on coordinated dynamic residency.\n\n## Memory Modes\n\n### `auto`\nRecommended. Chooses an effective profile from model size, quantization/backend, GPU VRAM, and packed sequence geometry.\n\n### `normal`\nUse only when the model and activation workspace fit comfortably.\n\n### `low_vram`\nUses tighter activation/residency limits and more aggressive chunking.\n\n### `ultra_low_vram`\nLast-resort execution for very constrained GPUs or extreme sequence geometry. Expect additional transfer overhead.\n\n## Attention Modes\n\n### `auto`\nRecommended. LongMedia selects a compatible exact/bounded path from the active backend and sequence geometry.\n\n### `existing`\nKeeps the installed/selected ComfyUI attention family.\n\nWith current Comfy Kitchen INT8, LongMedia can switch the projection lifetime to an **exact query-streaming** path when the fused full QKV tensor itself cannot fit on a 16 GB-class GPU. This preserves the existing Comfy Kitchen attention contract rather than silently replacing it with Sol.\n\n### `sol`\nUses the embedded H3 Sol path with bounded long-sequence execution.\n\n### `scheduled_sol`\nUses the Sol path with the explicit sigma/tau scheduling controls.\n\n## 16 GB-Class Native INT8\n\nCurrent LongMedia treats native INT8 H3 on <=18.5 GB GPUs as a constrained-residency case.\n\nIn this situation:\n\n- speculative `prefetch_dynamic_vbars` is disabled;\n- blocks are faulted on demand;\n- the next block does not reserve a competing VBAR/cast destination while the current activation set is still live;\n- full-model RAM pinning is rejected when it would consume too much physical memory or leave insufficient headroom.\n\nThis protects both VRAM and system RAM on Windows/portable ComfyUI builds.\n\n## Repeat Runs\n\nChanging only the seed can cause ComfyUI to reuse cached Setup output.\n\nLongMedia therefore applies a Sampler execution memory boundary on every invocation before `prepare_sampling()`:\n\n- synchronize active CUDA work;\n- cleanup stale prefetch queues;\n- reset cast buffers;\n- reset AIMDO/VBAR watermark state;\n- release prior registered model residency;\n- release dead allocator cache.\n\nA second or third seed run should therefore start from the same residency assumptions as the first run.\n\n## Manual VRAM Controls\n\nThe Sampler still exposes detailed controls for controlled tuning:\n\n```text\nmlp_chunk_tokens\nsol_qkv_chunk_tokens\nsol_out_proj_chunk_tokens\nvram_activation_reserve_mb\ninter_block_vram_guard_mb\ninter_block_guard_cooldown_blocks\ninter_block_guard_emergency_mb\nlate_block_guard_start\nlate_block_guard_target_mb\nstep_boundary_cleanup_mb\n```\n\nDo not shrink every chunk pre-emptively. Start with Auto and change one pressure point at a time.\n\n## Latent Hi-Res\n\nSpatial latent upscaling increases token count quickly.\n\nFor 16 GB-class GPUs:\n\n- begin with `latent_hires_scale=1.2–1.5`;\n- keep `memory_mode=auto`;\n- keep reference payload reasonable;\n- increase toward 2× only after the smaller high-resolution pass is stable.\n\nSee [Two-Stage Sampling, Latent Hi-Res and Refiner](TWO_PASS_LATENT_HIRES_REFINER_GUIDE.md).\n\n## Reference Budget\n\nLarge Picture, Video, and Audio references add packed conditioning rows.\n\nStart with:\n\n```text\nreference_budget = low\n```\n\nfor long or memory-constrained runs. Increase only when the additional identity/style/reference fidelity is needed.\n\n## Segmentation vs One Giant Pass\n\nWhen the content is one continuous scene, shorter fixed segments often provide better throughput and stability than forcing an enormous single packed sequence through extreme streaming.\n\nStarting points:\n\n- 16 GB: 5–10 s segments depending on references and edit complexity;\n- 12 GB: 5–8 s with low reference budget;\n- 8 GB: 4–6 s and expect transfer-bound execution.\n\nThese are starting points, not model limits.\n\n## Windows Triton / RTX 50-Series\n\nLongMedia includes a process-local Triton TinyCC compatibility bootstrap for embedded Windows Python environments where Triton's bundled TCC fails to find its own WinAPI headers.\n\nIt does not patch `site-packages` permanently.\n\n## Preview Compatibility\n\nA broken external latent-preview hook should not terminate a successful H3 denoise pass. LongMedia isolates VideoHelperSuite animated-preview exceptions only when the traceback actually originates in VHS preview code; unrelated callback errors remain fatal.\n\n## Debugging OOM\n\nUseful facts to capture:\n\n```text\nGPU total/free\nPyTorch allocated/reserved\nAIMDO/VBAR residency\npinned RAM\nactive attention backend\npacked sequence geometry\nwhether failure happens before block 0, in QKV, MLP, or final output\n```\n\nA failure inside `prefetch_queue_pop` is different from a fused-QKV allocation failure and should be treated as a transport/residency issue, not \"fixed\" by changing attention math."
+        "# Sampler, VRAM and Performance Guide\n\nThese recommendations apply to the 0.5.40 release.\n\n## Production Default\n\nStart with:\n\n```text\nsampler_mode   = auto\nmemory_mode    = auto\nattention_mode = auto\n```\n\nKeep ComfyUI Dynamic VRAM enabled.\n\nDo not launch with:\n\n```text\n--disable-dynamic-vram\n```\n\nLongMedia's large-model execution relies on coordinated dynamic residency.\n\n## Memory Modes\n\n### `auto`\nRecommended. Chooses an effective profile from model size, quantization/backend, GPU VRAM, and packed sequence geometry.\n\n### `normal`\nUse only when the model and activation workspace fit comfortably.\n\n### `low_vram`\nUses tighter activation/residency limits and more aggressive chunking.\n\n### `ultra_low_vram`\nLast-resort execution for very constrained GPUs or extreme sequence geometry. Expect additional transfer overhead.\n\n## Attention Modes\n\n### `auto`\nRecommended. LongMedia selects a compatible exact/bounded path from the active backend and sequence geometry.\n\n### `existing`\nKeeps the installed/selected ComfyUI attention family.\n\nWith current Comfy Kitchen INT8, LongMedia can switch the projection lifetime to an **exact query-streaming** path when the fused full QKV tensor itself cannot fit on a 16 GB-class GPU. This preserves the existing Comfy Kitchen attention contract rather than silently replacing it with Sol.\n\n### `sol`\nUses the embedded H3 Sol path with bounded long-sequence execution.\n\n### `scheduled_sol`\nUses the Sol path with the explicit sigma/tau scheduling controls.\n\n## 16 GB-Class Native INT8\n\nCurrent LongMedia treats native INT8 H3 on <=18.5 GB GPUs as a constrained-residency case.\n\nIn this situation:\n\n- speculative `prefetch_dynamic_vbars` is disabled;\n- blocks are faulted on demand;\n- the next block does not reserve a competing VBAR/cast destination while the current activation set is still live;\n- full-model RAM pinning is rejected when it would consume too much physical memory or leave insufficient headroom.\n\nThis protects both VRAM and system RAM on Windows/portable ComfyUI builds.\n\n## Repeat Runs\n\nChanging only the seed can cause ComfyUI to reuse cached Setup output.\n\nLongMedia therefore applies a Sampler execution memory boundary on every invocation before `prepare_sampling()`:\n\n- synchronize active CUDA work;\n- cleanup stale prefetch queues;\n- reset cast buffers;\n- reset AIMDO/VBAR watermark state;\n- release prior registered model residency;\n- release dead allocator cache.\n\nA second or third seed run should therefore start from the same residency assumptions as the first run.\n\n## Manual VRAM Controls\n\nThe Sampler still exposes detailed controls for controlled tuning:\n\n```text\nmlp_chunk_tokens\nsol_qkv_chunk_tokens\nsol_out_proj_chunk_tokens\nvram_activation_reserve_mb\ninter_block_vram_guard_mb\ninter_block_guard_cooldown_blocks\ninter_block_guard_emergency_mb\nlate_block_guard_start\nlate_block_guard_target_mb\nstep_boundary_cleanup_mb\n```\n\nDo not shrink every chunk pre-emptively. Start with Auto and change one pressure point at a time.\n\n## Latent Hi-Res\n\nSpatial latent upscaling increases token count quickly.\n\nFor 16 GB-class GPUs:\n\n- begin with `latent_hires_scale=1.2–1.5`;\n- keep `memory_mode=auto`;\n- keep reference payload reasonable;\n- increase toward 2× only after the smaller high-resolution pass is stable.\n\nSee [Two-Stage Sampling, Latent Hi-Res and Refiner](TWO_PASS_LATENT_HIRES_REFINER_GUIDE_EN.md).\n\n## Reference Budget\n\nLarge Picture, Video, and Audio references add packed conditioning rows.\n\nStart with:\n\n```text\nreference_budget = low\n```\n\nfor long or memory-constrained runs. Increase only when the additional identity/style/reference fidelity is needed.\n\n## Segmentation vs One Giant Pass\n\nWhen the content is one continuous scene, shorter fixed segments often provide better throughput and stability than forcing an enormous single packed sequence through extreme streaming.\n\nStarting points:\n\n- 16 GB: 5–10 s segments depending on references and edit complexity;\n- 12 GB: 5–8 s with low reference budget;\n- 8 GB: 4–6 s and expect transfer-bound execution.\n\nThese are starting points, not model limits.\n\n## Windows Triton / RTX 50-Series\n\nLongMedia includes a process-local Triton TinyCC compatibility bootstrap for embedded Windows Python environments where Triton's bundled TCC fails to find its own WinAPI headers.\n\nIt does not patch `site-packages` permanently.\n\n## Preview Compatibility\n\nA broken external latent-preview hook should not terminate a successful H3 denoise pass. LongMedia isolates VideoHelperSuite animated-preview exceptions only when the traceback actually originates in VHS preview code; unrelated callback errors remain fatal.\n\n## Debugging OOM\n\nUseful facts to capture:\n\n```text\nGPU total/free\nPyTorch allocated/reserved\nAIMDO/VBAR residency\npinned RAM\nactive attention backend\npacked sequence geometry\nwhether failure happens before block 0, in QKV, MLP, or final output\n```\n\nA failure inside `prefetch_queue_pop` is different from a fused-QKV allocation failure and should be treated as a transport/residency issue, not \"fixed\" by changing attention math."
       ],
       "widgets_values_named": {
-        "text": "# Sampler, VRAM and Performance Guide\n\nThese recommendations apply to the 0.5.40 release.\n\n## Production Default\n\nStart with:\n\n```text\nsampler_mode   = auto\nmemory_mode    = auto\nattention_mode = auto\n```\n\nKeep ComfyUI Dynamic VRAM enabled.\n\nDo not launch with:\n\n```text\n--disable-dynamic-vram\n```\n\nLongMedia's large-model execution relies on coordinated dynamic residency.\n\n## Memory Modes\n\n### `auto`\nRecommended. Chooses an effective profile from model size, quantization/backend, GPU VRAM, and packed sequence geometry.\n\n### `normal`\nUse only when the model and activation workspace fit comfortably.\n\n### `low_vram`\nUses tighter activation/residency limits and more aggressive chunking.\n\n### `ultra_low_vram`\nLast-resort execution for very constrained GPUs or extreme sequence geometry. Expect additional transfer overhead.\n\n## Attention Modes\n\n### `auto`\nRecommended. LongMedia selects a compatible exact/bounded path from the active backend and sequence geometry.\n\n### `existing`\nKeeps the installed/selected ComfyUI attention family.\n\nWith current Comfy Kitchen INT8, LongMedia can switch the projection lifetime to an **exact query-streaming** path when the fused full QKV tensor itself cannot fit on a 16 GB-class GPU. This preserves the existing Comfy Kitchen attention contract rather than silently replacing it with Sol.\n\n### `sol`\nUses the embedded H3 Sol path with bounded long-sequence execution.\n\n### `scheduled_sol`\nUses the Sol path with the explicit sigma/tau scheduling controls.\n\n## 16 GB-Class Native INT8\n\nCurrent LongMedia treats native INT8 H3 on <=18.5 GB GPUs as a constrained-residency case.\n\nIn this situation:\n\n- speculative `prefetch_dynamic_vbars` is disabled;\n- blocks are faulted on demand;\n- the next block does not reserve a competing VBAR/cast destination while the current activation set is still live;\n- full-model RAM pinning is rejected when it would consume too much physical memory or leave insufficient headroom.\n\nThis protects both VRAM and system RAM on Windows/portable ComfyUI builds.\n\n## Repeat Runs\n\nChanging only the seed can cause ComfyUI to reuse cached Setup output.\n\nLongMedia therefore applies a Sampler execution memory boundary on every invocation before `prepare_sampling()`:\n\n- synchronize active CUDA work;\n- cleanup stale prefetch queues;\n- reset cast buffers;\n- reset AIMDO/VBAR watermark state;\n- release prior registered model residency;\n- release dead allocator cache.\n\nA second or third seed run should therefore start from the same residency assumptions as the first run.\n\n## Manual VRAM Controls\n\nThe Sampler still exposes detailed controls for controlled tuning:\n\n```text\nmlp_chunk_tokens\nsol_qkv_chunk_tokens\nsol_out_proj_chunk_tokens\nvram_activation_reserve_mb\ninter_block_vram_guard_mb\ninter_block_guard_cooldown_blocks\ninter_block_guard_emergency_mb\nlate_block_guard_start\nlate_block_guard_target_mb\nstep_boundary_cleanup_mb\n```\n\nDo not shrink every chunk pre-emptively. Start with Auto and change one pressure point at a time.\n\n## Latent Hi-Res\n\nSpatial latent upscaling increases token count quickly.\n\nFor 16 GB-class GPUs:\n\n- begin with `latent_hires_scale=1.2–1.5`;\n- keep `memory_mode=auto`;\n- keep reference payload reasonable;\n- increase toward 2× only after the smaller high-resolution pass is stable.\n\nSee [Two-Stage Sampling, Latent Hi-Res and Refiner](TWO_PASS_LATENT_HIRES_REFINER_GUIDE.md).\n\n## Reference Budget\n\nLarge Picture, Video, and Audio references add packed conditioning rows.\n\nStart with:\n\n```text\nreference_budget = low\n```\n\nfor long or memory-constrained runs. Increase only when the additional identity/style/reference fidelity is needed.\n\n## Segmentation vs One Giant Pass\n\nWhen the content is one continuous scene, shorter fixed segments often provide better throughput and stability than forcing an enormous single packed sequence through extreme streaming.\n\nStarting points:\n\n- 16 GB: 5–10 s segments depending on references and edit complexity;\n- 12 GB: 5–8 s with low reference budget;\n- 8 GB: 4–6 s and expect transfer-bound execution.\n\nThese are starting points, not model limits.\n\n## Windows Triton / RTX 50-Series\n\nLongMedia includes a process-local Triton TinyCC compatibility bootstrap for embedded Windows Python environments where Triton's bundled TCC fails to find its own WinAPI headers.\n\nIt does not patch `site-packages` permanently.\n\n## Preview Compatibility\n\nA broken external latent-preview hook should not terminate a successful H3 denoise pass. LongMedia isolates VideoHelperSuite animated-preview exceptions only when the traceback actually originates in VHS preview code; unrelated callback errors remain fatal.\n\n## Debugging OOM\n\nUseful facts to capture:\n\n```text\nGPU total/free\nPyTorch allocated/reserved\nAIMDO/VBAR residency\npinned RAM\nactive attention backend\npacked sequence geometry\nwhether failure happens before block 0, in QKV, MLP, or final output\n```\n\nA failure inside `prefetch_queue_pop` is different from a fused-QKV allocation failure and should be treated as a transport/residency issue, not \"fixed\" by changing attention math."
+        "text": "# Sampler, VRAM and Performance Guide\n\nThese recommendations apply to the 0.5.40 release.\n\n## Production Default\n\nStart with:\n\n```text\nsampler_mode   = auto\nmemory_mode    = auto\nattention_mode = auto\n```\n\nKeep ComfyUI Dynamic VRAM enabled.\n\nDo not launch with:\n\n```text\n--disable-dynamic-vram\n```\n\nLongMedia's large-model execution relies on coordinated dynamic residency.\n\n## Memory Modes\n\n### `auto`\nRecommended. Chooses an effective profile from model size, quantization/backend, GPU VRAM, and packed sequence geometry.\n\n### `normal`\nUse only when the model and activation workspace fit comfortably.\n\n### `low_vram`\nUses tighter activation/residency limits and more aggressive chunking.\n\n### `ultra_low_vram`\nLast-resort execution for very constrained GPUs or extreme sequence geometry. Expect additional transfer overhead.\n\n## Attention Modes\n\n### `auto`\nRecommended. LongMedia selects a compatible exact/bounded path from the active backend and sequence geometry.\n\n### `existing`\nKeeps the installed/selected ComfyUI attention family.\n\nWith current Comfy Kitchen INT8, LongMedia can switch the projection lifetime to an **exact query-streaming** path when the fused full QKV tensor itself cannot fit on a 16 GB-class GPU. This preserves the existing Comfy Kitchen attention contract rather than silently replacing it with Sol.\n\n### `sol`\nUses the embedded H3 Sol path with bounded long-sequence execution.\n\n### `scheduled_sol`\nUses the Sol path with the explicit sigma/tau scheduling controls.\n\n## 16 GB-Class Native INT8\n\nCurrent LongMedia treats native INT8 H3 on <=18.5 GB GPUs as a constrained-residency case.\n\nIn this situation:\n\n- speculative `prefetch_dynamic_vbars` is disabled;\n- blocks are faulted on demand;\n- the next block does not reserve a competing VBAR/cast destination while the current activation set is still live;\n- full-model RAM pinning is rejected when it would consume too much physical memory or leave insufficient headroom.\n\nThis protects both VRAM and system RAM on Windows/portable ComfyUI builds.\n\n## Repeat Runs\n\nChanging only the seed can cause ComfyUI to reuse cached Setup output.\n\nLongMedia therefore applies a Sampler execution memory boundary on every invocation before `prepare_sampling()`:\n\n- synchronize active CUDA work;\n- cleanup stale prefetch queues;\n- reset cast buffers;\n- reset AIMDO/VBAR watermark state;\n- release prior registered model residency;\n- release dead allocator cache.\n\nA second or third seed run should therefore start from the same residency assumptions as the first run.\n\n## Manual VRAM Controls\n\nThe Sampler still exposes detailed controls for controlled tuning:\n\n```text\nmlp_chunk_tokens\nsol_qkv_chunk_tokens\nsol_out_proj_chunk_tokens\nvram_activation_reserve_mb\ninter_block_vram_guard_mb\ninter_block_guard_cooldown_blocks\ninter_block_guard_emergency_mb\nlate_block_guard_start\nlate_block_guard_target_mb\nstep_boundary_cleanup_mb\n```\n\nDo not shrink every chunk pre-emptively. Start with Auto and change one pressure point at a time.\n\n## Latent Hi-Res\n\nSpatial latent upscaling increases token count quickly.\n\nFor 16 GB-class GPUs:\n\n- begin with `latent_hires_scale=1.2–1.5`;\n- keep `memory_mode=auto`;\n- keep reference payload reasonable;\n- increase toward 2× only after the smaller high-resolution pass is stable.\n\nSee [Two-Stage Sampling, Latent Hi-Res and Refiner](TWO_PASS_LATENT_HIRES_REFINER_GUIDE_EN.md).\n\n## Reference Budget\n\nLarge Picture, Video, and Audio references add packed conditioning rows.\n\nStart with:\n\n```text\nreference_budget = low\n```\n\nfor long or memory-constrained runs. Increase only when the additional identity/style/reference fidelity is needed.\n\n## Segmentation vs One Giant Pass\n\nWhen the content is one continuous scene, shorter fixed segments often provide better throughput and stability than forcing an enormous single packed sequence through extreme streaming.\n\nStarting points:\n\n- 16 GB: 5–10 s segments depending on references and edit complexity;\n- 12 GB: 5–8 s with low reference budget;\n- 8 GB: 4–6 s and expect transfer-bound execution.\n\nThese are starting points, not model limits.\n\n## Windows Triton / RTX 50-Series\n\nLongMedia includes a process-local Triton TinyCC compatibility bootstrap for embedded Windows Python environments where Triton's bundled TCC fails to find its own WinAPI headers.\n\nIt does not patch `site-packages` permanently.\n\n## Preview Compatibility\n\nA broken external latent-preview hook should not terminate a successful H3 denoise pass. LongMedia isolates VideoHelperSuite animated-preview exceptions only when the traceback actually originates in VHS preview code; unrelated callback errors remain fatal.\n\n## Debugging OOM\n\nUseful facts to capture:\n\n```text\nGPU total/free\nPyTorch allocated/reserved\nAIMDO/VBAR residency\npinned RAM\nactive attention backend\npacked sequence geometry\nwhether failure happens before block 0, in QKV, MLP, or final output\n```\n\nA failure inside `prefetch_queue_pop` is different from a fused-QKV allocation failure and should be treated as a transport/residency issue, not \"fixed\" by changing attention math."
       },
       "color": "#222",
       "bgcolor": "#000"
@@ -1759,10 +1761,10 @@
       "title": "# Long Media MultiClip — Quick Guide",
       "properties": {},
       "widgets_values": [
-        "# Long Media MultiClip — Quick Guide\n\n**MultiClip** creates one long sequence from multiple individually controlled clips.\n\nEach Planner clip has its own:\n\n- Name\n- Prompt\n- Duration\n- optional Seed\n\nLongMedia manages temporal continuation and clip handoff between neighboring clips.\n\n## Basic connection\n\n```text\nLong Media Planner\n        ↓ clip_plan\nLong Media Setup\n```\n\nWith dedicated camera control:\n\n```text\nLong Media Planner\n        ↓ clip_plan\nLong Media Cameras\n        ↓ clip_plan\nLong Media Setup\n```\n\nIn Setup select:\n\n```text\nTimeline Mode: multiclip\n```\n\nA connected Planner becomes authoritative only while `timeline=multiclip`.\n\n## Global Prompt\n\nUse **Global Prompt** for properties that should remain consistent across the whole sequence:\n\n- characters and identity;\n- clothing and persistent props;\n- persistent environment;\n- visual style;\n- lighting logic;\n- atmosphere;\n- other global continuity constraints.\n\nClip cards then describe the local timeline changes rather than repeating the complete world description.\n\n## Clip cards\n\nEach clip prompt should describe what happens during that part of the timeline.\n\n```text\nClip 1\nDuration: 6s\nThe woman walks slowly through the ruined city.\n\nClip 2\nDuration: 5s\nShe continues walking and gradually raises her right hand.\n\nClip 3\nDuration: 7s\nHer raised hand reaches her face as she looks toward the burning buildings.\n```\n\nDurations may be different for every clip.\n\nA practical starting range:\n\n```text\n4–8 seconds   — high control\n7–12 seconds  — good general-purpose range\n12+ seconds   — fewer boundaries, with more opportunity for visual drift\n```\n\n## Seed\n\nAn empty clip Seed means:\n\n```text\nauto\n```\n\nLongMedia derives a per-clip seed from the sampler base seed and clip identity/order.\n\nUse a fixed clip seed when repeatable A/B testing is useful.\n\n## Reordering clips\n\nPlanner cards can be reordered by dragging them.\n\nThe card keeps its:\n\n- prompt;\n- duration;\n- seed;\n- name;\n- `clip_id`.\n\nWhen Cameras is connected with **Auto Sync Planner**, the corresponding camera card follows the same `clip_id`.\n\n## Importing multiple prompts\n\nPlanner supports structured prompt import.\n\n```text\nclip_1:\nThe woman enters the hall.\n\nclip_2:\nShe approaches the central altar.\n\nclip_3:\nShe slowly raises both hands.\n```\n\nThe `shot_N:` alias is also supported:\n\n```text\nshot_1:\n...\n\nshot_2:\n...\n```\n\nUse **Import Prompt** to convert the structured text into normal editable cards.\n\n**Auto Import Prompt** is useful when the structured text comes from another node or an external LLM.\n\n## Presets\n\nClip cards support reusable presets, including JSON import/export.\n\nPresets are useful for recurring action structures, transition patterns, or production templates.\n\n## Audio\n\nAudio behavior is controlled by `audio_mode` in Setup. For source-video editing, read [Audio Modes and video_ref_edit](AUDIO_MODES_GUIDE.md)."
+        "# Long Media MultiClip — Quick Guide\n\n**MultiClip** creates one long sequence from multiple individually controlled clips.\n\nEach Planner clip has its own:\n\n- Name\n- Prompt\n- Duration\n- optional Seed\n\nLongMedia manages temporal continuation and clip handoff between neighboring clips.\n\n## Basic connection\n\n```text\nLong Media Planner\n        ↓ clip_plan\nLong Media Setup\n```\n\nWith dedicated camera control:\n\n```text\nLong Media Planner\n        ↓ clip_plan\nLong Media Cameras\n        ↓ clip_plan\nLong Media Setup\n```\n\nIn Setup select:\n\n```text\nTimeline Mode: multiclip\n```\n\nA connected Planner becomes authoritative only while `timeline=multiclip`.\n\n## Global Prompt\n\nUse **Global Prompt** for properties that should remain consistent across the whole sequence:\n\n- characters and identity;\n- clothing and persistent props;\n- persistent environment;\n- visual style;\n- lighting logic;\n- atmosphere;\n- other global continuity constraints.\n\nClip cards then describe the local timeline changes rather than repeating the complete world description.\n\n## Clip cards\n\nEach clip prompt should describe what happens during that part of the timeline.\n\n```text\nClip 1\nDuration: 6s\nThe woman walks slowly through the ruined city.\n\nClip 2\nDuration: 5s\nShe continues walking and gradually raises her right hand.\n\nClip 3\nDuration: 7s\nHer raised hand reaches her face as she looks toward the burning buildings.\n```\n\nDurations may be different for every clip.\n\nA practical starting range:\n\n```text\n4–8 seconds   — high control\n7–12 seconds  — good general-purpose range\n12+ seconds   — fewer boundaries, with more opportunity for visual drift\n```\n\n## Seed\n\nAn empty clip Seed means:\n\n```text\nauto\n```\n\nLongMedia derives a per-clip seed from the sampler base seed and clip identity/order.\n\nUse a fixed clip seed when repeatable A/B testing is useful.\n\n## Reordering clips\n\nPlanner cards can be reordered by dragging them.\n\nThe card keeps its:\n\n- prompt;\n- duration;\n- seed;\n- name;\n- `clip_id`.\n\nWhen Cameras is connected with **Auto Sync Planner**, the corresponding camera card follows the same `clip_id`.\n\n## Importing multiple prompts\n\nPlanner supports structured prompt import.\n\n```text\nclip_1:\nThe woman enters the hall.\n\nclip_2:\nShe approaches the central altar.\n\nclip_3:\nShe slowly raises both hands.\n```\n\nThe `shot_N:` alias is also supported:\n\n```text\nshot_1:\n...\n\nshot_2:\n...\n```\n\nUse **Import Prompt** to convert the structured text into normal editable cards.\n\n**Auto Import Prompt** is useful when the structured text comes from another node or an external LLM.\n\n## Presets\n\nClip cards support reusable presets, including JSON import/export.\n\nPresets are useful for recurring action structures, transition patterns, or production templates.\n\n## Audio\n\nAudio behavior is controlled by `audio_mode` in Setup. For source-video editing, read [Audio Modes and video_ref_edit](AUDIO_MODES_GUIDE_EN.md)."
       ],
       "widgets_values_named": {
-        "text": "# Long Media MultiClip — Quick Guide\n\n**MultiClip** creates one long sequence from multiple individually controlled clips.\n\nEach Planner clip has its own:\n\n- Name\n- Prompt\n- Duration\n- optional Seed\n\nLongMedia manages temporal continuation and clip handoff between neighboring clips.\n\n## Basic connection\n\n```text\nLong Media Planner\n        ↓ clip_plan\nLong Media Setup\n```\n\nWith dedicated camera control:\n\n```text\nLong Media Planner\n        ↓ clip_plan\nLong Media Cameras\n        ↓ clip_plan\nLong Media Setup\n```\n\nIn Setup select:\n\n```text\nTimeline Mode: multiclip\n```\n\nA connected Planner becomes authoritative only while `timeline=multiclip`.\n\n## Global Prompt\n\nUse **Global Prompt** for properties that should remain consistent across the whole sequence:\n\n- characters and identity;\n- clothing and persistent props;\n- persistent environment;\n- visual style;\n- lighting logic;\n- atmosphere;\n- other global continuity constraints.\n\nClip cards then describe the local timeline changes rather than repeating the complete world description.\n\n## Clip cards\n\nEach clip prompt should describe what happens during that part of the timeline.\n\n```text\nClip 1\nDuration: 6s\nThe woman walks slowly through the ruined city.\n\nClip 2\nDuration: 5s\nShe continues walking and gradually raises her right hand.\n\nClip 3\nDuration: 7s\nHer raised hand reaches her face as she looks toward the burning buildings.\n```\n\nDurations may be different for every clip.\n\nA practical starting range:\n\n```text\n4–8 seconds   — high control\n7–12 seconds  — good general-purpose range\n12+ seconds   — fewer boundaries, with more opportunity for visual drift\n```\n\n## Seed\n\nAn empty clip Seed means:\n\n```text\nauto\n```\n\nLongMedia derives a per-clip seed from the sampler base seed and clip identity/order.\n\nUse a fixed clip seed when repeatable A/B testing is useful.\n\n## Reordering clips\n\nPlanner cards can be reordered by dragging them.\n\nThe card keeps its:\n\n- prompt;\n- duration;\n- seed;\n- name;\n- `clip_id`.\n\nWhen Cameras is connected with **Auto Sync Planner**, the corresponding camera card follows the same `clip_id`.\n\n## Importing multiple prompts\n\nPlanner supports structured prompt import.\n\n```text\nclip_1:\nThe woman enters the hall.\n\nclip_2:\nShe approaches the central altar.\n\nclip_3:\nShe slowly raises both hands.\n```\n\nThe `shot_N:` alias is also supported:\n\n```text\nshot_1:\n...\n\nshot_2:\n...\n```\n\nUse **Import Prompt** to convert the structured text into normal editable cards.\n\n**Auto Import Prompt** is useful when the structured text comes from another node or an external LLM.\n\n## Presets\n\nClip cards support reusable presets, including JSON import/export.\n\nPresets are useful for recurring action structures, transition patterns, or production templates.\n\n## Audio\n\nAudio behavior is controlled by `audio_mode` in Setup. For source-video editing, read [Audio Modes and video_ref_edit](AUDIO_MODES_GUIDE.md)."
+        "text": "# Long Media MultiClip — Quick Guide\n\n**MultiClip** creates one long sequence from multiple individually controlled clips.\n\nEach Planner clip has its own:\n\n- Name\n- Prompt\n- Duration\n- optional Seed\n\nLongMedia manages temporal continuation and clip handoff between neighboring clips.\n\n## Basic connection\n\n```text\nLong Media Planner\n        ↓ clip_plan\nLong Media Setup\n```\n\nWith dedicated camera control:\n\n```text\nLong Media Planner\n        ↓ clip_plan\nLong Media Cameras\n        ↓ clip_plan\nLong Media Setup\n```\n\nIn Setup select:\n\n```text\nTimeline Mode: multiclip\n```\n\nA connected Planner becomes authoritative only while `timeline=multiclip`.\n\n## Global Prompt\n\nUse **Global Prompt** for properties that should remain consistent across the whole sequence:\n\n- characters and identity;\n- clothing and persistent props;\n- persistent environment;\n- visual style;\n- lighting logic;\n- atmosphere;\n- other global continuity constraints.\n\nClip cards then describe the local timeline changes rather than repeating the complete world description.\n\n## Clip cards\n\nEach clip prompt should describe what happens during that part of the timeline.\n\n```text\nClip 1\nDuration: 6s\nThe woman walks slowly through the ruined city.\n\nClip 2\nDuration: 5s\nShe continues walking and gradually raises her right hand.\n\nClip 3\nDuration: 7s\nHer raised hand reaches her face as she looks toward the burning buildings.\n```\n\nDurations may be different for every clip.\n\nA practical starting range:\n\n```text\n4–8 seconds   — high control\n7–12 seconds  — good general-purpose range\n12+ seconds   — fewer boundaries, with more opportunity for visual drift\n```\n\n## Seed\n\nAn empty clip Seed means:\n\n```text\nauto\n```\n\nLongMedia derives a per-clip seed from the sampler base seed and clip identity/order.\n\nUse a fixed clip seed when repeatable A/B testing is useful.\n\n## Reordering clips\n\nPlanner cards can be reordered by dragging them.\n\nThe card keeps its:\n\n- prompt;\n- duration;\n- seed;\n- name;\n- `clip_id`.\n\nWhen Cameras is connected with **Auto Sync Planner**, the corresponding camera card follows the same `clip_id`.\n\n## Importing multiple prompts\n\nPlanner supports structured prompt import.\n\n```text\nclip_1:\nThe woman enters the hall.\n\nclip_2:\nShe approaches the central altar.\n\nclip_3:\nShe slowly raises both hands.\n```\n\nThe `shot_N:` alias is also supported:\n\n```text\nshot_1:\n...\n\nshot_2:\n...\n```\n\nUse **Import Prompt** to convert the structured text into normal editable cards.\n\n**Auto Import Prompt** is useful when the structured text comes from another node or an external LLM.\n\n## Presets\n\nClip cards support reusable presets, including JSON import/export.\n\nPresets are useful for recurring action structures, transition patterns, or production templates.\n\n## Audio\n\nAudio behavior is controlled by `audio_mode` in Setup. For source-video editing, read [Audio Modes and video_ref_edit](AUDIO_MODES_GUIDE_EN.md)."
       },
       "color": "#222",
       "bgcolor": "#000"
@@ -1786,10 +1788,10 @@
       "title": "# MultiClip Prompting Rules",
       "properties": {},
       "widgets_values": [
-        "# MultiClip Prompting Rules\n\nFor the current quick-start guide, see [MultiClip Prompting Guide](MULTICLIP_PROMPTING_GUIDE.md).\n\n## Ownership\n\nUse MultiClip when:\n\n```text\ntimeline_mode = multiclip\n```\n\nThe Planner owns the clip timeline. A connected `clip_plan` is ignored by `single` and `segmented` timelines.\n\nRecommended camera workflow:\n\n```text\nPlanner → Cameras → Setup\n```\n\nWhen Cameras is connected, keep Planner prompts focused on diegetic content: subjects, actions, environment, lighting, atmosphere, continuity, and scene changes. Cameras owns framing, lens, rig, movement path, speed, and transition behavior.\n\n## Global Prompt vs Clip Prompt\n\n**Global Prompt** describes what should remain coherent across the sequence.\n\n**Clip Prompt** describes what changes during one clip.\n\nGlobal Prompt example:\n\n```text\nA monumental nocturnal city with wet black stone streets, deep blue atmosphere,\nconsistent architecture, realistic materials, and stable identity for the main subject.\n```\n\nClip prompts:\n\n```text\nclip_1:\nThe subject walks toward the central plaza while distant signs slowly illuminate.\n\nclip_2:\nThe same walk continues. The plaza lighting grows brighter and reflections spread across the wet road.\n\nclip_3:\nThe subject reaches the center while the surrounding architecture enters its fully illuminated state.\n```\n\n## Continue Actions Across Boundaries\n\nWhen an action crosses a clip boundary, continue it explicitly:\n\n```text\nclip_1:\nShe gradually raises her right hand toward the luminous surface.\n\nclip_2:\nHer right hand continues the same movement and gently touches the luminous surface.\n```\n\nThis gives H3 a temporal direction to carry through the continuation context.\n\n## Positive State Language\n\nDescribe the desired state directly:\n\n```text\nThe architecture preserves its proportions.\nThe same subjects remain in their established positions.\nThe movement continues smoothly at the same pace.\n```\n\nPositive state descriptions are preferable to long negative constraint lists.\n\n## Structured Import\n\nPlanner accepts contiguous sections beginning at 1:\n\n```text\nclip_1:\n...\n\nclip_2:\n...\n\nclip_3:\n...\n```\n\nor:\n\n```text\nshot_1:\n...\n\nshot_2:\n...\n```\n\nImport owns prompt text. Existing per-card duration/seed settings remain card-owned.\n\n## Audio-Reactive MultiClip\n\nConnected audio references can be addressed semantically:\n\n```text\n<Audio 2> defines the percussion timing.\nThe street lights brighten on the percussion accents.\nThe building surfaces develop short glitch pulses on the strongest hits.\n```\n\nTimeline duration, final-audio policy, and audio conditioning remain separate controls.\n\n## Camera Continuity\n\nFor a continuous shot across clips, use Cameras with `Continuous / Same Shot` and preserve the same-space/entity-continuity contract.\n\nFor intentional transitions, choose the transition in Cameras rather than describing competing camera edits inside each Planner prompt."
+        "# MultiClip Prompting Rules\n\nFor the current quick-start guide, see [MultiClip Prompting Guide](MULTICLIP_PROMPTING_GUIDE_EN.md).\n\n## Ownership\n\nUse MultiClip when:\n\n```text\ntimeline_mode = multiclip\n```\n\nThe Planner owns the clip timeline. A connected `clip_plan` is ignored by `single` and `segmented` timelines.\n\nRecommended camera workflow:\n\n```text\nPlanner → Cameras → Setup\n```\n\nWhen Cameras is connected, keep Planner prompts focused on diegetic content: subjects, actions, environment, lighting, atmosphere, continuity, and scene changes. Cameras owns framing, lens, rig, movement path, speed, and transition behavior.\n\n## Global Prompt vs Clip Prompt\n\n**Global Prompt** describes what should remain coherent across the sequence.\n\n**Clip Prompt** describes what changes during one clip.\n\nGlobal Prompt example:\n\n```text\nA monumental nocturnal city with wet black stone streets, deep blue atmosphere,\nconsistent architecture, realistic materials, and stable identity for the main subject.\n```\n\nClip prompts:\n\n```text\nclip_1:\nThe subject walks toward the central plaza while distant signs slowly illuminate.\n\nclip_2:\nThe same walk continues. The plaza lighting grows brighter and reflections spread across the wet road.\n\nclip_3:\nThe subject reaches the center while the surrounding architecture enters its fully illuminated state.\n```\n\n## Continue Actions Across Boundaries\n\nWhen an action crosses a clip boundary, continue it explicitly:\n\n```text\nclip_1:\nShe gradually raises her right hand toward the luminous surface.\n\nclip_2:\nHer right hand continues the same movement and gently touches the luminous surface.\n```\n\nThis gives H3 a temporal direction to carry through the continuation context.\n\n## Positive State Language\n\nDescribe the desired state directly:\n\n```text\nThe architecture preserves its proportions.\nThe same subjects remain in their established positions.\nThe movement continues smoothly at the same pace.\n```\n\nPositive state descriptions are preferable to long negative constraint lists.\n\n## Structured Import\n\nPlanner accepts contiguous sections beginning at 1:\n\n```text\nclip_1:\n...\n\nclip_2:\n...\n\nclip_3:\n...\n```\n\nor:\n\n```text\nshot_1:\n...\n\nshot_2:\n...\n```\n\nImport owns prompt text. Existing per-card duration/seed settings remain card-owned.\n\n## Audio-Reactive MultiClip\n\nConnected audio references can be addressed semantically:\n\n```text\n<Audio 2> defines the percussion timing.\nThe street lights brighten on the percussion accents.\nThe building surfaces develop short glitch pulses on the strongest hits.\n```\n\nTimeline duration, final-audio policy, and audio conditioning remain separate controls.\n\n## Camera Continuity\n\nFor a continuous shot across clips, use Cameras with `Continuous / Same Shot` and preserve the same-space/entity-continuity contract.\n\nFor intentional transitions, choose the transition in Cameras rather than describing competing camera edits inside each Planner prompt."
       ],
       "widgets_values_named": {
-        "text": "# MultiClip Prompting Rules\n\nFor the current quick-start guide, see [MultiClip Prompting Guide](MULTICLIP_PROMPTING_GUIDE.md).\n\n## Ownership\n\nUse MultiClip when:\n\n```text\ntimeline_mode = multiclip\n```\n\nThe Planner owns the clip timeline. A connected `clip_plan` is ignored by `single` and `segmented` timelines.\n\nRecommended camera workflow:\n\n```text\nPlanner → Cameras → Setup\n```\n\nWhen Cameras is connected, keep Planner prompts focused on diegetic content: subjects, actions, environment, lighting, atmosphere, continuity, and scene changes. Cameras owns framing, lens, rig, movement path, speed, and transition behavior.\n\n## Global Prompt vs Clip Prompt\n\n**Global Prompt** describes what should remain coherent across the sequence.\n\n**Clip Prompt** describes what changes during one clip.\n\nGlobal Prompt example:\n\n```text\nA monumental nocturnal city with wet black stone streets, deep blue atmosphere,\nconsistent architecture, realistic materials, and stable identity for the main subject.\n```\n\nClip prompts:\n\n```text\nclip_1:\nThe subject walks toward the central plaza while distant signs slowly illuminate.\n\nclip_2:\nThe same walk continues. The plaza lighting grows brighter and reflections spread across the wet road.\n\nclip_3:\nThe subject reaches the center while the surrounding architecture enters its fully illuminated state.\n```\n\n## Continue Actions Across Boundaries\n\nWhen an action crosses a clip boundary, continue it explicitly:\n\n```text\nclip_1:\nShe gradually raises her right hand toward the luminous surface.\n\nclip_2:\nHer right hand continues the same movement and gently touches the luminous surface.\n```\n\nThis gives H3 a temporal direction to carry through the continuation context.\n\n## Positive State Language\n\nDescribe the desired state directly:\n\n```text\nThe architecture preserves its proportions.\nThe same subjects remain in their established positions.\nThe movement continues smoothly at the same pace.\n```\n\nPositive state descriptions are preferable to long negative constraint lists.\n\n## Structured Import\n\nPlanner accepts contiguous sections beginning at 1:\n\n```text\nclip_1:\n...\n\nclip_2:\n...\n\nclip_3:\n...\n```\n\nor:\n\n```text\nshot_1:\n...\n\nshot_2:\n...\n```\n\nImport owns prompt text. Existing per-card duration/seed settings remain card-owned.\n\n## Audio-Reactive MultiClip\n\nConnected audio references can be addressed semantically:\n\n```text\n<Audio 2> defines the percussion timing.\nThe street lights brighten on the percussion accents.\nThe building surfaces develop short glitch pulses on the strongest hits.\n```\n\nTimeline duration, final-audio policy, and audio conditioning remain separate controls.\n\n## Camera Continuity\n\nFor a continuous shot across clips, use Cameras with `Continuous / Same Shot` and preserve the same-space/entity-continuity contract.\n\nFor intentional transitions, choose the transition in Cameras rather than describing competing camera edits inside each Planner prompt."
+        "text": "# MultiClip Prompting Rules\n\nFor the current quick-start guide, see [MultiClip Prompting Guide](MULTICLIP_PROMPTING_GUIDE_EN.md).\n\n## Ownership\n\nUse MultiClip when:\n\n```text\ntimeline_mode = multiclip\n```\n\nThe Planner owns the clip timeline. A connected `clip_plan` is ignored by `single` and `segmented` timelines.\n\nRecommended camera workflow:\n\n```text\nPlanner → Cameras → Setup\n```\n\nWhen Cameras is connected, keep Planner prompts focused on diegetic content: subjects, actions, environment, lighting, atmosphere, continuity, and scene changes. Cameras owns framing, lens, rig, movement path, speed, and transition behavior.\n\n## Global Prompt vs Clip Prompt\n\n**Global Prompt** describes what should remain coherent across the sequence.\n\n**Clip Prompt** describes what changes during one clip.\n\nGlobal Prompt example:\n\n```text\nA monumental nocturnal city with wet black stone streets, deep blue atmosphere,\nconsistent architecture, realistic materials, and stable identity for the main subject.\n```\n\nClip prompts:\n\n```text\nclip_1:\nThe subject walks toward the central plaza while distant signs slowly illuminate.\n\nclip_2:\nThe same walk continues. The plaza lighting grows brighter and reflections spread across the wet road.\n\nclip_3:\nThe subject reaches the center while the surrounding architecture enters its fully illuminated state.\n```\n\n## Continue Actions Across Boundaries\n\nWhen an action crosses a clip boundary, continue it explicitly:\n\n```text\nclip_1:\nShe gradually raises her right hand toward the luminous surface.\n\nclip_2:\nHer right hand continues the same movement and gently touches the luminous surface.\n```\n\nThis gives H3 a temporal direction to carry through the continuation context.\n\n## Positive State Language\n\nDescribe the desired state directly:\n\n```text\nThe architecture preserves its proportions.\nThe same subjects remain in their established positions.\nThe movement continues smoothly at the same pace.\n```\n\nPositive state descriptions are preferable to long negative constraint lists.\n\n## Structured Import\n\nPlanner accepts contiguous sections beginning at 1:\n\n```text\nclip_1:\n...\n\nclip_2:\n...\n\nclip_3:\n...\n```\n\nor:\n\n```text\nshot_1:\n...\n\nshot_2:\n...\n```\n\nImport owns prompt text. Existing per-card duration/seed settings remain card-owned.\n\n## Audio-Reactive MultiClip\n\nConnected audio references can be addressed semantically:\n\n```text\n<Audio 2> defines the percussion timing.\nThe street lights brighten on the percussion accents.\nThe building surfaces develop short glitch pulses on the strongest hits.\n```\n\nTimeline duration, final-audio policy, and audio conditioning remain separate controls.\n\n## Camera Continuity\n\nFor a continuous shot across clips, use Cameras with `Continuous / Same Shot` and preserve the same-space/entity-continuity contract.\n\nFor intentional transitions, choose the transition in Cameras rather than describing competing camera edits inside each Planner prompt."
       },
       "color": "#222",
       "bgcolor": "#000"
@@ -1835,7 +1837,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 56,
+      "order": 55,
       "mode": 0,
       "inputs": [
         {
@@ -1876,7 +1878,7 @@
         950
       ],
       "flags": {},
-      "order": 67,
+      "order": 66,
       "mode": 0,
       "inputs": [
         {
@@ -2008,7 +2010,7 @@
         110
       ],
       "flags": {},
-      "order": 70,
+      "order": 69,
       "mode": 0,
       "inputs": [
         {
@@ -2056,7 +2058,7 @@
       "flags": {
         "collapsed": false
       },
-      "order": 64,
+      "order": 63,
       "mode": 0,
       "inputs": [
         {
@@ -2107,7 +2109,7 @@
         60
       ],
       "flags": {},
-      "order": 50,
+      "order": 49,
       "mode": 0,
       "inputs": [
         {
@@ -2351,7 +2353,7 @@
         954
       ],
       "flags": {},
-      "order": 79,
+      "order": 78,
       "mode": 4,
       "inputs": [
         {
@@ -2582,7 +2584,7 @@
       "flags": {
         "collapsed": false
       },
-      "order": 65,
+      "order": 64,
       "mode": 0,
       "inputs": [
         {
@@ -2628,7 +2630,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 77,
+      "order": 76,
       "mode": 0,
       "inputs": [
         {
@@ -2666,10 +2668,10 @@
       ],
       "size": [
         450,
-        954
+        1285.8260869565217
       ],
       "flags": {},
-      "order": 78,
+      "order": 77,
       "mode": 0,
       "inputs": [
         {
@@ -2780,7 +2782,8 @@
           "refine_seed": 0,
           "refine_steps": 3,
           "memory_mode": "auto",
-          "sampler_mode": "auto"
+          "sampler_mode": "auto",
+          "vhslatentpreview": ""
         },
         "__lm_hires_model_last_v040": "minimax_h3_latent_upscaler_3d_bf16.safetensors"
       },
@@ -2911,7 +2914,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 73,
+      "order": 72,
       "mode": 0,
       "inputs": [
         {
@@ -2952,7 +2955,7 @@
         60
       ],
       "flags": {},
-      "order": 71,
+      "order": 70,
       "mode": 0,
       "inputs": [
         {
@@ -3094,7 +3097,7 @@
       "flags": {
         "collapsed": false
       },
-      "order": 74,
+      "order": 73,
       "mode": 0,
       "inputs": [
         {
@@ -3145,7 +3148,7 @@
         90
       ],
       "flags": {},
-      "order": 76,
+      "order": 75,
       "mode": 0,
       "inputs": [
         {
@@ -3220,7 +3223,7 @@
         90
       ],
       "flags": {},
-      "order": 51,
+      "order": 50,
       "mode": 0,
       "inputs": [
         {
@@ -3267,7 +3270,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 66,
+      "order": 65,
       "mode": 0,
       "inputs": [
         {
@@ -3310,7 +3313,7 @@
       "flags": {
         "collapsed": false
       },
-      "order": 72,
+      "order": 71,
       "mode": 0,
       "inputs": [
         {
@@ -3622,7 +3625,7 @@
       ],
       "size": [
         270,
-        90
+        82
       ],
       "flags": {},
       "order": 35,
@@ -3665,7 +3668,7 @@
         950
       ],
       "flags": {},
-      "order": 57,
+      "order": 56,
       "mode": 0,
       "inputs": [
         {
@@ -3780,7 +3783,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 54,
+      "order": 53,
       "mode": 0,
       "inputs": [
         {
@@ -3825,7 +3828,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 55,
+      "order": 54,
       "mode": 0,
       "inputs": [
         {
@@ -3863,7 +3866,7 @@
       ],
       "size": [
         250,
-        310
+        554
       ],
       "flags": {},
       "order": 37,
@@ -3921,20 +3924,7 @@
         "frame_load_cap": 0,
         "skip_first_frames": 0,
         "select_every_nth": 1,
-        "format": "AnimateDiff",
-        "videopreview": {
-          "hidden": false,
-          "paused": false,
-          "params": {
-            "filename": "REPLACE_ME_video.mp4",
-            "type": "input",
-            "format": "video/mp4",
-            "force_rate": 0,
-            "frame_load_cap": 0,
-            "skip_first_frames": 0,
-            "select_every_nth": 1
-          }
-        }
+        "format": "AnimateDiff"
       },
       "widgets_values_named": {
         "video": "REPLACE_ME_video.mp4",
@@ -3945,20 +3935,7 @@
         "skip_first_frames": 0,
         "select_every_nth": 1,
         "format": "AnimateDiff",
-        "choose video to upload": null,
-        "videopreview": {
-          "hidden": false,
-          "paused": false,
-          "params": {
-            "filename": "REPLACE_ME_video.mp4",
-            "type": "input",
-            "format": "video/mp4",
-            "force_rate": 0,
-            "frame_load_cap": 0,
-            "skip_first_frames": 0,
-            "select_every_nth": 1
-          }
-        }
+        "choose video to upload": null
       }
     },
     {
@@ -3970,10 +3947,10 @@
       ],
       "size": [
         850,
-        340
+        961.4782608695651
       ],
       "flags": {},
-      "order": 81,
+      "order": 80,
       "mode": 0,
       "inputs": [
         {
@@ -4037,8 +4014,7 @@
         "megabit": true,
         "save_metadata": false,
         "pingpong": false,
-        "save_output": true,
-        "videopreview": ""
+        "save_output": true
       },
       "widgets_values_named": {
         "frame_rate": 24,
@@ -4050,8 +4026,7 @@
         "megabit": true,
         "save_metadata": false,
         "pingpong": false,
-        "save_output": true,
-        "videopreview": ""
+        "save_output": true
       }
     },
     {
@@ -4066,7 +4041,7 @@
         240
       ],
       "flags": {},
-      "order": 80,
+      "order": 79,
       "mode": 0,
       "inputs": [
         {
@@ -4248,33 +4223,6 @@
       },
       "color": "#c09430",
       "bgcolor": "rgba(24,24,27,.9)"
-    },
-    {
-      "id": 332,
-      "type": "MarkdownNote",
-      "pos": [
-        -4600,
-        730
-      ],
-      "size": [
-        710,
-        920
-      ],
-      "flags": {},
-      "order": 41,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [],
-      "title": "# Two-Stage Sampling, Latent Hi-Res and Refiner",
-      "properties": {},
-      "widgets_values": [
-        "# Two-Stage Sampling, Latent Hi-Res and Refiner\n\nLongMedia supports a two-stage H3 workflow inside the **same model lifecycle**. It can either refine the low-noise tail at the original resolution or upscale the denoised video latent and run an independent high-resolution H3 pass.\n\nThe important controls are in **MiniMax H3 • Long Media Sampler**:\n\n```text\nlatent_hires_enabled\nlatent_hires_model\nlatent_hires_scale\nlatent_hires_precision\nlatent_hires_align\n\nrefine_enabled\nrefine_steps\n```\n\n## Recommended topology\n\n```text\nLong Media Setup\n      │\n      ├── positive ──> Basic Guider\n      │\n      ├── initial_av\n      │\n      └── long_media_plan\n                │\n                ▼\n        Long Media Sampler\n                │\n                ▼\n        Long Media Decode\n```\n\nYou do **not** need to load a second MiniMax H3 model for the high-resolution pass.\n\n---\n\n## Mode A — Refiner Only\n\nSettings:\n\n```text\nlatent_hires_enabled = false\nrefine_enabled       = true\n```\n\nLongMedia splits the connected SIGMAS schedule into two continuous parts.\n\nFor `T` denoise steps and `R` refine steps:\n\n```text\nstage 1 = the early/base part of the connected schedule\nstage 2 = the final R-step low-sigma tail\n```\n\nStage 1 starts from normal random noise.\n\nStage 2:\n\n- continues from the Stage-1 solver state;\n- uses zero added noise;\n- keeps the same effective seed;\n- stays at the same latent resolution.\n\nThis is a **continuous low-noise refinement**, not a second independent generation.\n\n---\n\n## Mode B — Latent Hi-Res Only\n\nSettings:\n\n```text\nlatent_hires_enabled = true\nrefine_enabled       = false\n```\n\nLongMedia completes the low-resolution H3 pass, takes the **denoised x0**, and sends only the video latent through the learned MiniMax H3 latent upscaler.\n\nThe audio latent is preserved exactly.\n\n```text\nlow-resolution H3 x0\n        │\n        ├── video latent ──> learned latent upscale\n        │\n        └── audio latent ──> preserved\n        │\n        ▼\nhigh-resolution AV latent\n```\n\nNo second H3 denoise pass is performed.\n\nThis is useful when the learned upscaler alone provides enough spatial detail.\n\n---\n\n## Mode C — Latent Hi-Res + Refiner\n\nSettings:\n\n```text\nlatent_hires_enabled = true\nrefine_enabled       = true\n```\n\nThis is the full two-stage high-resolution path.\n\n### Stage 1 — Low-resolution generation\n\nH3 generates the base movie at the original latent resolution.\n\nLongMedia takes the callback's **denoised x0** rather than the noisy in-progress solver state.\n\nFor segmented or MultiClip generation, clean low-resolution x0 is also the continuation source between units.\n\n### Learned latent upscale\n\nOnly the video latent is spatially upscaled.\n\n```text\nvideo x0 ──> learned MiniMax H3 latent upscaler\naudio x0 ──> unchanged\n```\n\n`latent_hires_scale` is continuous. A value such as `1.2` means a 1.2× spatial latent upscale; `2.0` means 2×.\n\nThe selected model is loaded from:\n\n```text\nComfyUI/models/latent_upscale_models/\n```\n\n### Conditioning rebuild\n\nNative H3 VIDEO keyframes are tied to the target spatial grid. After the latent resolution changes, low-resolution target-grid video keyframes cannot be reused directly.\n\nLongMedia therefore rebuilds the runtime conditioning for the new H/W:\n\n- incompatible low-resolution VIDEO keyframes are removed;\n- Ref2VA Picture/Video references remain available;\n- audio-only guides remain available;\n- audio reference timing remains preserved.\n\n### Stage 2 — Independent high-resolution H3 pass\n\nThe high-resolution pass is intentionally **not** the low-sigma continuation used by Refiner Only.\n\nIt starts from:\n\n- the learned-upscaled denoised x0;\n- fresh noise generated from the **same effective seed**;\n- an independent scheduler subset selected from the original connected SIGMAS curve.\n\nFor a typical 8-step scheduler and `refine_steps=3`, LongMedia selects every-other scheduler points after sigma-max, for example:\n\n```text\noriginal sigma indices: 0 1 2 3 4 5 6 7 8\nhi-res pass:              1   3   5       0\n```\n\nThe exact selected indices are reported in the console as:\n\n```text\n[TWO-PASS HIRES]\n[HIRES SECOND PASS]\n```\n\nThis gives H3 enough noise authority to re-author high-frequency structure at the new spatial resolution instead of merely polishing an interpolated latent.\n\n---\n\n## Why x0 Matters\n\nThe learned upscaler expects a clean denoised latent.\n\nLongMedia therefore refuses to feed the partial noisy solver state into the learned upscaler. The Stage-1 callback x0 is first converted through the normal H3 latent-output contract and only then upscaled.\n\nThis avoids carrying solver noise into spatial detail reconstruction.\n\n---\n\n## Seed Behavior\n\nThe integrated high-resolution second pass uses the **same effective seed** as Stage 1.\n\nThat does not make Stage 2 identical to Stage 1: the latent resolution, noise tensor, conditioning geometry, and sigma subset are different.\n\nThe shared seed keeps the two stages deterministically related.\n\n---\n\n## Suggested Starting Point\n\nA practical general-purpose setup:\n\n```text\nBasicScheduler steps       = 8\n\nlatent_hires_enabled       = true\nlatent_hires_scale         = 1.2–2.0\nlatent_hires_precision     = bf16\n\nrefine_enabled             = true\nrefine_steps               = 2–3\n\nsampler_mode               = auto\nmemory_mode                = auto\nattention_mode             = auto\n```\n\nFor 16 GB-class GPUs, start with a modest upscale such as `1.2–1.5` before attempting a large 2× pass. High-resolution H3 attention and QKV workspaces grow quickly with spatial token count.\n\nLongMedia's guarded Dynamic VRAM paths remain active, but a smaller target is still faster than proving that the allocator has philosophical depth.\n\n---\n\n## The Optional Explicit Second Sampler in the Example Workflow\n\nThe included workflow:\n\n```text\nworkflows/MiniMax-H3-LongMedia-LatentUpscale-Detailer.json\n```\n\nalso contains an **explicit second Long Media Sampler node** connected after the first sampler. It is shipped **bypassed by default**.\n\nThat node is an advanced chained-sampler option:\n\n```text\nSampler #1\n   │\n   ▼\nSampler #2 (bypassed by default)\n   │\n   ▼\nDecode\n```\n\nDo not confuse this with the integrated `latent_hires_enabled + refine_enabled` path.\n\n- **Integrated two-stage mode** runs the learned upscale/refiner inside one Long Media Sampler and one H3 model lifecycle.\n- **Explicit chained Sampler #2** is a separate sampling invocation with its own SIGMAS input and should be enabled only when you deliberately want another diffusion stage.\n\nAvoid enabling a chained Sampler #2 merely because the integrated refiner is enabled. That would add another denoise trajectory rather than \"finishing\" the existing one.\n\n---\n\n## FastVideo VSA 4-Step Checkpoints\n\nFor Kijai FastVideo VSA, the distilled base model owns exactly four transformer calls for **Sampler #1**.\n\nLongMedia does not split those four calls into an inferred 2+2 or similar schedule.\n\nWhen a workflow-owned refiner is allowed, the second-stage step count comes from `refine_steps` and its sigma selection comes from the workflow-connected SIGMAS schedule.\n\nH3ddle FastH3 Preview v1 has a stricter four-call contract and fails closed when extra latent-hires/refine denoise calls would be off-distribution.\n\n---\n\n## Troubleshooting\n\n### Latent Hi-Res enabled but no upscaler selected\n\nSelect a model from `models/latent_upscale_models`.\n\n### High-resolution pass OOMs while the low-resolution pass succeeds\n\nThe spatial token count has increased. Keep:\n\n```text\nmemory_mode = auto\n```\n\nand reduce `latent_hires_scale` first. On current native INT8 / Comfy Kitchen paths, LongMedia can also stream impossible full-QKV workloads rather than substituting approximate attention.\n\n### H3 layout mismatch after upscale\n\nCurrent LongMedia rebuilds the target layout and drops only incompatible target-grid VIDEO keyframes. Ref2VA references and audio guides remain intact.\n\n### Re-running with another seed OOMs before step 1\n\nCurrent LongMedia creates a sampler execution memory boundary before each run, including seed-only reruns that bypass cached Setup execution."
-      ],
-      "widgets_values_named": {
-        "text": "# Two-Stage Sampling, Latent Hi-Res and Refiner\n\nLongMedia supports a two-stage H3 workflow inside the **same model lifecycle**. It can either refine the low-noise tail at the original resolution or upscale the denoised video latent and run an independent high-resolution H3 pass.\n\nThe important controls are in **MiniMax H3 • Long Media Sampler**:\n\n```text\nlatent_hires_enabled\nlatent_hires_model\nlatent_hires_scale\nlatent_hires_precision\nlatent_hires_align\n\nrefine_enabled\nrefine_steps\n```\n\n## Recommended topology\n\n```text\nLong Media Setup\n      │\n      ├── positive ──> Basic Guider\n      │\n      ├── initial_av\n      │\n      └── long_media_plan\n                │\n                ▼\n        Long Media Sampler\n                │\n                ▼\n        Long Media Decode\n```\n\nYou do **not** need to load a second MiniMax H3 model for the high-resolution pass.\n\n---\n\n## Mode A — Refiner Only\n\nSettings:\n\n```text\nlatent_hires_enabled = false\nrefine_enabled       = true\n```\n\nLongMedia splits the connected SIGMAS schedule into two continuous parts.\n\nFor `T` denoise steps and `R` refine steps:\n\n```text\nstage 1 = the early/base part of the connected schedule\nstage 2 = the final R-step low-sigma tail\n```\n\nStage 1 starts from normal random noise.\n\nStage 2:\n\n- continues from the Stage-1 solver state;\n- uses zero added noise;\n- keeps the same effective seed;\n- stays at the same latent resolution.\n\nThis is a **continuous low-noise refinement**, not a second independent generation.\n\n---\n\n## Mode B — Latent Hi-Res Only\n\nSettings:\n\n```text\nlatent_hires_enabled = true\nrefine_enabled       = false\n```\n\nLongMedia completes the low-resolution H3 pass, takes the **denoised x0**, and sends only the video latent through the learned MiniMax H3 latent upscaler.\n\nThe audio latent is preserved exactly.\n\n```text\nlow-resolution H3 x0\n        │\n        ├── video latent ──> learned latent upscale\n        │\n        └── audio latent ──> preserved\n        │\n        ▼\nhigh-resolution AV latent\n```\n\nNo second H3 denoise pass is performed.\n\nThis is useful when the learned upscaler alone provides enough spatial detail.\n\n---\n\n## Mode C — Latent Hi-Res + Refiner\n\nSettings:\n\n```text\nlatent_hires_enabled = true\nrefine_enabled       = true\n```\n\nThis is the full two-stage high-resolution path.\n\n### Stage 1 — Low-resolution generation\n\nH3 generates the base movie at the original latent resolution.\n\nLongMedia takes the callback's **denoised x0** rather than the noisy in-progress solver state.\n\nFor segmented or MultiClip generation, clean low-resolution x0 is also the continuation source between units.\n\n### Learned latent upscale\n\nOnly the video latent is spatially upscaled.\n\n```text\nvideo x0 ──> learned MiniMax H3 latent upscaler\naudio x0 ──> unchanged\n```\n\n`latent_hires_scale` is continuous. A value such as `1.2` means a 1.2× spatial latent upscale; `2.0` means 2×.\n\nThe selected model is loaded from:\n\n```text\nComfyUI/models/latent_upscale_models/\n```\n\n### Conditioning rebuild\n\nNative H3 VIDEO keyframes are tied to the target spatial grid. After the latent resolution changes, low-resolution target-grid video keyframes cannot be reused directly.\n\nLongMedia therefore rebuilds the runtime conditioning for the new H/W:\n\n- incompatible low-resolution VIDEO keyframes are removed;\n- Ref2VA Picture/Video references remain available;\n- audio-only guides remain available;\n- audio reference timing remains preserved.\n\n### Stage 2 — Independent high-resolution H3 pass\n\nThe high-resolution pass is intentionally **not** the low-sigma continuation used by Refiner Only.\n\nIt starts from:\n\n- the learned-upscaled denoised x0;\n- fresh noise generated from the **same effective seed**;\n- an independent scheduler subset selected from the original connected SIGMAS curve.\n\nFor a typical 8-step scheduler and `refine_steps=3`, LongMedia selects every-other scheduler points after sigma-max, for example:\n\n```text\noriginal sigma indices: 0 1 2 3 4 5 6 7 8\nhi-res pass:              1   3   5       0\n```\n\nThe exact selected indices are reported in the console as:\n\n```text\n[TWO-PASS HIRES]\n[HIRES SECOND PASS]\n```\n\nThis gives H3 enough noise authority to re-author high-frequency structure at the new spatial resolution instead of merely polishing an interpolated latent.\n\n---\n\n## Why x0 Matters\n\nThe learned upscaler expects a clean denoised latent.\n\nLongMedia therefore refuses to feed the partial noisy solver state into the learned upscaler. The Stage-1 callback x0 is first converted through the normal H3 latent-output contract and only then upscaled.\n\nThis avoids carrying solver noise into spatial detail reconstruction.\n\n---\n\n## Seed Behavior\n\nThe integrated high-resolution second pass uses the **same effective seed** as Stage 1.\n\nThat does not make Stage 2 identical to Stage 1: the latent resolution, noise tensor, conditioning geometry, and sigma subset are different.\n\nThe shared seed keeps the two stages deterministically related.\n\n---\n\n## Suggested Starting Point\n\nA practical general-purpose setup:\n\n```text\nBasicScheduler steps       = 8\n\nlatent_hires_enabled       = true\nlatent_hires_scale         = 1.2–2.0\nlatent_hires_precision     = bf16\n\nrefine_enabled             = true\nrefine_steps               = 2–3\n\nsampler_mode               = auto\nmemory_mode                = auto\nattention_mode             = auto\n```\n\nFor 16 GB-class GPUs, start with a modest upscale such as `1.2–1.5` before attempting a large 2× pass. High-resolution H3 attention and QKV workspaces grow quickly with spatial token count.\n\nLongMedia's guarded Dynamic VRAM paths remain active, but a smaller target is still faster than proving that the allocator has philosophical depth.\n\n---\n\n## The Optional Explicit Second Sampler in the Example Workflow\n\nThe included workflow:\n\n```text\nworkflows/MiniMax-H3-LongMedia-LatentUpscale-Detailer.json\n```\n\nalso contains an **explicit second Long Media Sampler node** connected after the first sampler. It is shipped **bypassed by default**.\n\nThat node is an advanced chained-sampler option:\n\n```text\nSampler #1\n   │\n   ▼\nSampler #2 (bypassed by default)\n   │\n   ▼\nDecode\n```\n\nDo not confuse this with the integrated `latent_hires_enabled + refine_enabled` path.\n\n- **Integrated two-stage mode** runs the learned upscale/refiner inside one Long Media Sampler and one H3 model lifecycle.\n- **Explicit chained Sampler #2** is a separate sampling invocation with its own SIGMAS input and should be enabled only when you deliberately want another diffusion stage.\n\nAvoid enabling a chained Sampler #2 merely because the integrated refiner is enabled. That would add another denoise trajectory rather than \"finishing\" the existing one.\n\n---\n\n## FastVideo VSA 4-Step Checkpoints\n\nFor Kijai FastVideo VSA, the distilled base model owns exactly four transformer calls for **Sampler #1**.\n\nLongMedia does not split those four calls into an inferred 2+2 or similar schedule.\n\nWhen a workflow-owned refiner is allowed, the second-stage step count comes from `refine_steps` and its sigma selection comes from the workflow-connected SIGMAS schedule.\n\nH3ddle FastH3 Preview v1 has a stricter four-call contract and fails closed when extra latent-hires/refine denoise calls would be off-distribution.\n\n---\n\n## Troubleshooting\n\n### Latent Hi-Res enabled but no upscaler selected\n\nSelect a model from `models/latent_upscale_models`.\n\n### High-resolution pass OOMs while the low-resolution pass succeeds\n\nThe spatial token count has increased. Keep:\n\n```text\nmemory_mode = auto\n```\n\nand reduce `latent_hires_scale` first. On current native INT8 / Comfy Kitchen paths, LongMedia can also stream impossible full-QKV workloads rather than substituting approximate attention.\n\n### H3 layout mismatch after upscale\n\nCurrent LongMedia rebuilds the target layout and drops only incompatible target-grid VIDEO keyframes. Ref2VA references and audio guides remain intact.\n\n### Re-running with another seed OOMs before step 1\n\nCurrent LongMedia creates a sampler execution memory boundary before each run, including seed-only reruns that bypass cached Setup execution."
-      },
-      "color": "#222",
-      "bgcolor": "#000"
     }
   ],
   "links": [
@@ -4955,12 +4903,12 @@
   ],
   "config": {},
   "extra": {
-    "workflow_name": "MiniMax-H3-LongMedia-SAFE-1080p-15s",
+    "workflow_name": "MiniMax-H3-LongMedia-LatentUpscale-Detailer",
     "ds": {
-      "scale": 0.47362440744769635,
+      "scale": 0.6934334949441721,
       "offset": [
-        3479.173035785756,
-        580.2042581446804
+        3574.4997947150596,
+        258.09469152569994
       ]
     },
     "frontendVersion": "1.51.9",

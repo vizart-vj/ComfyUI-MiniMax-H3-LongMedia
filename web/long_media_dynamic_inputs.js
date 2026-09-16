@@ -170,13 +170,25 @@ function refreshSocketLabels(node) {
         }
     }
 
+    const director = get('director');
+    const directorConnected = Boolean(director && (director.link != null || (Array.isArray(director.links) && director.links.some((id) => id != null))));
+    if (directorConnected) {
+        const timelineWidget = widget(node, 'timeline_mode');
+        if (timelineWidget && timelineWidget.value !== 'multiclip') timelineWidget.value = 'multiclip';
+    }
+    if (directorConnected) {
+        pictures.forEach((input, idx) => setInputDisplay(input, `image_${idx + 1} • override Picture ${idx + 1}`));
+        videos.forEach((input, idx) => setInputDisplay(input, `video_${idx + 1} • override Video ${idx + 1}`));
+        audios.forEach((input, idx) => setInputDisplay(input, `audio_${idx + 1} • override Audio ${idx + 1}`));
+    }
+    if (director) setInputDisplay(director, directorConnected ? 'director • owns multiclip timeline' : 'director');
     const clipPlan = get('clip_plan');
-    if (clipPlan) setInputDisplay(clipPlan, timeline === 'multiclip' ? 'clip_plan • active' : 'clip_plan • ignored');
+    if (clipPlan) setInputDisplay(clipPlan, directorConnected ? 'clip_plan • ignored by director' : (timeline === 'multiclip' ? 'clip_plan • active' : 'clip_plan • ignored'));
 
     const audioMode = widget(node, 'audio_mode')?.value ?? 'auto';
-    if (audioMode === 'lip_sync') {
+    if (!directorConnected && audioMode === 'lip_sync') {
         setInputDisplay(audios[0], 'audio_1 • lip_sync');
-    } else if (h3Mode === 'video_ref_edit' && ['auto', 'preserve', 'preserve_reference'].includes(audioMode)) {
+    } else if (!directorConnected && h3Mode === 'video_ref_edit' && ['auto', 'preserve', 'preserve_reference'].includes(audioMode)) {
         setInputDisplay(audios[0], 'audio_1 • source soundtrack + sync');
     }
 }
@@ -187,11 +199,12 @@ const COMBOS = {
     reference_budget: { values: ["low", "medium", "high", "max"], fallback: "low" },
     video_mode: { values: ["auto", "preserve", "transform"], fallback: "auto" },
     audio_mode: { values: ["auto", "preserve", "generate", "reference_only", "preserve_reference", "lip_sync"], fallback: "auto" },
+    motion_repair: { values: ["off", "auto", "fluid", "strong"], fallback: "off" },
     generation_mode: { values: ["auto", "lip_sync"], fallback: "auto" },
     first_frame_mode: { values: ["native_keyframe", "latent_inject", "pixel_override", "blend"], fallback: "latent_inject" },
     conditioning_mode: { values: ["auto_refs", "hybrid_first_frame", "hybrid_first_last", "multiclip_ref2va"], fallback: "auto_refs" },
     workflow_mode: { values: ["hybrid_auto", "segmented_continuation", "multiclip", "reconstruct", "ref2va_full", "loop", "manual", "video_ref_edit"], fallback: "hybrid_auto" },
-    control_mode: { values: ["auto", "manual"], fallback: "auto" },
+    control_mode: { values: ["auto", "director", "manual"], fallback: "auto" },
     h3_mode: { values: ["t2va", "fl2va", "ref2va", "hybrid", "video_ref_edit"], fallback: "hybrid" },
     timeline_mode: { values: ["single", "segmented", "multiclip"], fallback: "single" },
 };

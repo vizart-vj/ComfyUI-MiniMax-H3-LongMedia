@@ -335,31 +335,40 @@ def upscale_video(video: torch.Tensor, model_name: str, scale: float, precision:
     out_w = max(1, int(round(px_w / 16)))
     effective_scale = ((out_h / h) + (out_w / w)) * 0.5
     dtype = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp32": torch.float32}[precision]
-    model = _get_model(model_name, precision).to(device=device)
-    mean = torch.tensor(LATENTS_MEAN, device=device, dtype=dtype).view(1, 24, 1, 1, 1)
-    std = torch.tensor(LATENTS_STD, device=device, dtype=dtype).view(1, 24, 1, 1, 1)
-    src = video.to(device=device, dtype=dtype)
-    with torch.inference_mode():
-        src_n = (src - mean) / std
-        if isinstance(model, LegacyLTXStyleLatentUpsampler):
-            native = float(model.native_scale)
-            if abs(effective_scale - native) > 0.075:
-                raise ValueError(
-                    f"Checkpoint {model_name} is a fixed {native:g}x LTX-style latent upscaler, "
-                    f"but requested effective scale is {effective_scale:.3f}x. "
-                    "Use the checkpoint's native scale for exact learned upscaling."
-                )
-            out = model(src_n)
-            if tuple(out.shape[-2:]) != (out_h, out_w):
-                # Alignment can move one latent cell; do not silently distort more than that.
-                dh, dw = abs(int(out.shape[-2]) - out_h), abs(int(out.shape[-1]) - out_w)
-                if dh <= 1 and dw <= 1:
-                    out = F.interpolate(out, size=(out.shape[2], out_h, out_w), mode="trilinear", align_corners=False)
-                else:
-                    raise RuntimeError(f"Upscaler produced {tuple(out.shape[-2:])}, expected {(out_h, out_w)}")
-        else:
-            out = model(src_n, effective_scale, (out_h, out_w))
-        out = out * std + mean
-    # Keep checkpoint cached in CPU RAM; free its GPU residency before high-res H3 refine.
-    model.to("cpu")
-    return out.to(device=video.device, dtype=video.dtype)
+    model = _get_model(model_name, precision)
+    try:
+        model.to(device=device)
+        mean = torch.tensor(LATENTS_MEAN, device=device, dtype=dtype).view(1, 24, 1, 1, 1)
+        std = torch.tensor(LATENTS_STD, device=device, dtype=dtype).view(1, 24, 1, 1, 1)
+        src = video.to(device=device, dtype=dtype)
+        with torch.inference_mode():
+            src_n = (src - mean) / std
+            if isinstance(model, LegacyLTXStyleLatentUpsampler):
+                native = float(model.native_scale)
+                if abs(effective_scale - native) > 0.075:
+                    raise ValueError(
+                        f"Checkpoint {model_name} is a fixed {native:g}x LTX-style latent upscaler, "
+                        f"but requested effective scale is {effective_scale:.3f}x. "
+                        "Use the checkpoint's native scale for exact learned upscaling."
+                    )
+                out = model(src_n)
+                if tuple(out.shape[-2:]) != (out_h, out_w):
+                    # Alignment can move one latent cell; do not silently distort more than that.
+                    dh, dw = abs(int(out.shape[-2]) - out_h), abs(int(out.shape[-1]) - out_w)
+                    if dh <= 1 and dw <= 1:
+                        out = F.interpolate(out, size=(out.shape[2], out_h, out_w), mode="trilinear", align_corners=False)
+                    else:
+                        raise RuntimeError(f"Upscaler produced {tuple(out.shape[-2:])}, expected {(out_h, out_w)}")
+            else:
+                out = model(src_n, effective_scale, (out_h, out_w))
+            out = out * std + mean
+        return out.to(device=video.device, dtype=video.dtype)
+    finally:
+        # _CACHE is intentionally CPU-resident.  Always restore that invariant,
+        # including checkpoint/shape errors, CUDA OOM and user cancellation.
+        # Do not empty the allocator here: the caller may immediately launch the
+        # H3 refiner and owns allocator policy.
+        try:
+            model.to("cpu")
+        except Exception:
+            pass

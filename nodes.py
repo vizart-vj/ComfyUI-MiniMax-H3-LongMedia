@@ -12,6 +12,7 @@ import sys
 import time
 import uuid as _uuid_mod
 import importlib.metadata as _importlib_metadata
+from typing import Any
 
 
 def _pkg_version_tuple(name: str):
@@ -102,6 +103,69 @@ except ImportError:
     from refine_policy import split_refine_sigmas
 
 try:
+    from .hires_refine import (
+        audio_window_bounds as _hires_audio_window_bounds,
+        default_chunk_tokens as _hires_default_chunk_tokens,
+        denoise_profile as _hires_denoise_profile,
+        fallback_chunk_tokens as _hires_fallback_chunk_tokens,
+        frames_for_tokens as _hires_frames_for_tokens,
+        merge_profile as _hires_merge_profile,
+        plan_refine_windows as _hires_plan_refine_windows,
+        tokens_covering_frames as _hires_tokens_covering_frames,
+    )
+except ImportError:
+    from hires_refine import (
+        audio_window_bounds as _hires_audio_window_bounds,
+        default_chunk_tokens as _hires_default_chunk_tokens,
+        denoise_profile as _hires_denoise_profile,
+        fallback_chunk_tokens as _hires_fallback_chunk_tokens,
+        frames_for_tokens as _hires_frames_for_tokens,
+        merge_profile as _hires_merge_profile,
+        plan_refine_windows as _hires_plan_refine_windows,
+        tokens_covering_frames as _hires_tokens_covering_frames,
+    )
+
+try:
+    from .h3_vae_decode import (
+        batched_h3_tiles as _batched_h3_tiles,
+        choose_h3_tile_batch as _choose_h3_tile_batch,
+        fallback_tile_batches as _fallback_h3_tile_batches,
+        is_minimax_h3_video_vae as _is_minimax_h3_video_vae,
+    )
+except ImportError:
+    from h3_vae_decode import (
+        batched_h3_tiles as _batched_h3_tiles,
+        choose_h3_tile_batch as _choose_h3_tile_batch,
+        fallback_tile_batches as _fallback_h3_tile_batches,
+        is_minimax_h3_video_vae as _is_minimax_h3_video_vae,
+    )
+
+try:
+    from .motion_repair import (
+        analyze_motion as _motion_repair_analyze,
+        build_dilated_latents as _motion_repair_build_dilated_latents,
+        choose_repair_sigmas as _motion_repair_choose_sigmas,
+        normalize_motion_repair_mode as _normalize_motion_repair_mode,
+        plan_repair_windows as _motion_repair_plan_windows,
+        recover_repaired_video as _motion_repair_recover_video,
+        remap_frame_index as _motion_repair_remap_frame_index,
+        slice_analysis_for_window as _motion_repair_slice_analysis,
+        slice_audio_for_token_window as _motion_repair_slice_audio_window,
+    )
+except ImportError:
+    from motion_repair import (
+        analyze_motion as _motion_repair_analyze,
+        build_dilated_latents as _motion_repair_build_dilated_latents,
+        choose_repair_sigmas as _motion_repair_choose_sigmas,
+        normalize_motion_repair_mode as _normalize_motion_repair_mode,
+        plan_repair_windows as _motion_repair_plan_windows,
+        recover_repaired_video as _motion_repair_recover_video,
+        remap_frame_index as _motion_repair_remap_frame_index,
+        slice_analysis_for_window as _motion_repair_slice_analysis,
+        slice_audio_for_token_window as _motion_repair_slice_audio_window,
+    )
+
+try:
     from comfy.patcher_extension import WrappersMP
 except Exception:  # pragma: no cover - only available inside ComfyUI
     WrappersMP = None
@@ -110,12 +174,985 @@ CATEGORY = 'MiniMax H3/LongMedia'
 CATEGORY_STREAMS = f'{CATEGORY}/Streams'
 CATEGORY_CONTINUATION = f'{CATEGORY}/Continuation'
 CATEGORY_LONGMEDIA = f'{CATEGORY}/LongMedia'
+
+try:
+    from .director_plan import (
+        default_document_json as _director_default_json,
+        compile_director_plan as _compile_director_plan,
+        normalize_document as _director_normalize_document,
+        director_frame_anchor_contract as _director_frame_anchor_contract,
+        director_picture_runtime_map as _director_picture_runtime_map,
+    )
+except ImportError:
+    from director_plan import (
+        default_document_json as _director_default_json,
+        compile_director_plan as _compile_director_plan,
+        normalize_document as _director_normalize_document,
+        director_frame_anchor_contract as _director_frame_anchor_contract,
+        director_picture_runtime_map as _director_picture_runtime_map,
+    )
+try:
+    from .director_cache import DirectorClipCache as _DirectorClipCache, canonical_hash as _director_canonical_hash
+except ImportError:
+    from director_cache import DirectorClipCache as _DirectorClipCache, canonical_hash as _director_canonical_hash
 CATEGORY_UTIL = f'{CATEGORY}/Utility'
 MAX_RESOLUTION = 16384
 CANVAS_MULTIPLE = 32
 NestedTensor = comfy.nested_tensor.NestedTensor
 
 NativeReferenceToVideo = None
+
+
+def _lm_call_core_node(name: str, **kwargs):
+    """Invoke a registered ComfyUI core node through its declared INPUT_TYPES contract."""
+    try:
+        from nodes import NODE_CLASS_MAPPINGS as _CORE_NODE_CLASS_MAPPINGS
+    except Exception as exc:
+        raise RuntimeError(f'Could not access ComfyUI core node registry while resolving {name}: {exc}') from exc
+    node_cls = _CORE_NODE_CLASS_MAPPINGS.get(name)
+    if node_cls is None:
+        raise RuntimeError(f'ComfyUI core node {name!r} is not registered in this build.')
+    spec = node_cls.INPUT_TYPES()
+    accepted = set(spec.get('required', {})) | set(spec.get('optional', {}))
+    payload = {k: v for k, v in kwargs.items() if v is not None and k in accepted}
+    output = getattr(node_cls(), node_cls.FUNCTION)(**payload)
+    result = getattr(output, 'result', None)
+    if result is not None:
+        return tuple(result)
+    return tuple(output)
+
+
+def _lm_director_media_path(record: dict) -> str:
+    subfolder = str(record.get('subfolder') or '').strip('/\\')
+    filename = str(record.get('filename') or '').strip()
+    return f'{subfolder}/{filename}' if subfolder else filename
+
+
+def _lm_director_usage_ranges(document: dict) -> dict[str, list[dict]]:
+    """Collect Director block-local source ranges per semantic media subject.
+
+    The same subject may be reused in several blocks. A single H3 reference slot can only
+    hold one tensor, so exact runtime slicing is applied when all uses agree on one range;
+    otherwise the full source stays loaded and the manifest records the distinct ranges.
+    """
+    out: dict[str, list[dict]] = {}
+    for shot in document.get('shots') or []:
+        shot_ids = []
+        for raw_sid in [shot.get('media_subject_id'), shot.get('cast_subject_id'), *(shot.get('subjects') or [])]:
+            sid = str(raw_sid or '').strip()
+            if sid and sid not in shot_ids:
+                shot_ids.append(sid)
+        for sid in shot_ids:
+            out.setdefault(sid, []).append({
+                'track': 'main',
+                'block_id': str(shot.get('clip_id') or ''),
+                'source_in': max(0.0, float(shot.get('source_in') or 0.0)),
+                'duration': max(0.0, float(shot.get('duration') or 0.0)),
+            })
+    for block in document.get('audio_blocks') or []:
+        if str(block.get('kind') or '') != 'reference':
+            continue
+        sid = str(block.get('subject_id') or '').strip()
+        if not sid:
+            continue
+        out.setdefault(sid, []).append({
+            'track': 'audio',
+            'block_id': str(block.get('block_id') or ''),
+            'source_in': max(0.0, float(block.get('source_in') or 0.0)),
+            'duration': max(0.0, float(block.get('duration') or 0.0)),
+        })
+    for track in document.get('extra_tracks') or []:
+        if track.get('enabled') is False:
+            continue
+        for clip in track.get('clips') or []:
+            sid = str(clip.get('subject_id') or '').strip()
+            if not sid:
+                continue
+            out.setdefault(sid, []).append({
+                'track': f"extra:{str(track.get('type') or 'layer')}",
+                'block_id': str(clip.get('clip_id') or ''),
+                'source_in': max(0.0, float(clip.get('source_in') or 0.0)),
+                'duration': max(0.0, float(clip.get('duration') or 0.0)),
+            })
+    return out
+
+
+def _lm_director_unique_trim(ranges: list[dict] | None) -> tuple[float, float] | None:
+    if not ranges:
+        return None
+    pairs = {
+        (round(float(item.get('source_in') or 0.0), 6), round(float(item.get('duration') or 0.0), 6))
+        for item in ranges
+        if float(item.get('duration') or 0.0) > 0.0
+    }
+    return next(iter(pairs)) if len(pairs) == 1 else None
+
+
+def _lm_trim_audio_seconds(audio, start_seconds: float, duration_seconds: float):
+    if audio is None or duration_seconds <= 0.0:
+        return audio
+    if not isinstance(audio, dict):
+        return audio
+    waveform = audio.get('waveform')
+    sample_rate = audio.get('sample_rate')
+    if not torch.is_tensor(waveform):
+        return audio
+    try:
+        sr = int(sample_rate)
+    except Exception:
+        sr = 0
+    if sr <= 0:
+        return audio
+    start = max(0, int(round(float(start_seconds) * sr)))
+    length = max(1, int(round(float(duration_seconds) * sr)))
+    end = min(int(waveform.shape[-1]), start + length)
+    start = min(start, max(0, int(waveform.shape[-1]) - 1))
+    trimmed = waveform[..., start:end].contiguous()
+    out = dict(audio)
+    out['waveform'] = trimmed
+    return out
+
+
+def _lm_trim_video_frames_seconds(frames, record: dict, start_seconds: float, duration_seconds: float, fps_hint=None):
+    if frames is None or not hasattr(frames, 'shape') or len(frames.shape) < 1 or duration_seconds <= 0.0:
+        return frames
+    frame_count = int(frames.shape[0])
+    if frame_count <= 1:
+        return frames
+    try:
+        source_seconds = float(record.get('seconds') or 0.0)
+    except Exception:
+        source_seconds = 0.0
+    try:
+        hinted_fps = float(fps_hint)
+    except Exception:
+        hinted_fps = 0.0
+    fps = hinted_fps if hinted_fps > 0.0 else ((frame_count / source_seconds) if source_seconds > 0.0 else 24.0)
+    start = max(0, min(frame_count - 1, int(round(float(start_seconds) * fps))))
+    length = max(1, int(round(float(duration_seconds) * fps)))
+    end = min(frame_count, start + length)
+    return frames[start:end].contiguous()
+
+
+def _lm_build_director_media_bundle(director_json) -> dict:
+    """Load Director-managed input-folder media into fixed LongMedia reference slots.
+
+    This is runtime-only. The workflow stores only lightweight filename/subfolder
+    records, while ComfyUI's own LoadImage/LoadAudio/LoadVideo nodes perform actual
+    decoding when the Director executes. Explicit Setup inputs can still override any
+    Director-owned slot downstream.
+    """
+    document = _director_normalize_document(director_json)
+    usage_ranges = _lm_director_usage_ranges(document)
+    picture_runtime = _director_picture_runtime_map(document)
+    picture_runtime_slots = dict(picture_runtime.get('runtime_slots') or {})
+    frame_anchor_contract = dict(picture_runtime.get('anchors') or _director_frame_anchor_contract(document))
+    anchor_subject_ids = set(str(v) for v in (frame_anchor_contract.get('anchor_subject_ids') or []) if str(v))
+    anchor_images_by_subject = {}
+    images = [None] * 9
+    videos = [None] * 3
+    audios = [None] * 3
+    manifest = []
+    loaded = []
+    for subject in document.get('subjects') or []:
+        record = subject.get('media') if isinstance(subject, dict) else None
+        if not isinstance(record, dict) or not str(record.get('filename') or '').strip():
+            continue
+        kind = str(subject.get('kind') or '').strip().title()
+        slot = max(1, int(subject.get('slot') or 1))
+        path = _lm_director_media_path(record)
+        entry = {
+            'subject_id': str(subject.get('subject_id') or ''),
+            'name': str(subject.get('name') or ''),
+            'kind': kind,
+            'slot': slot,
+            'editor_slot': slot,
+            'path': path,
+        }
+        ranges = list(usage_ranges.get(entry['subject_id']) or [])
+        trim = _lm_director_unique_trim(ranges)
+        if ranges:
+            entry['block_ranges'] = ranges
+        if trim is not None:
+            entry['source_in_seconds'] = float(trim[0])
+            entry['source_duration_seconds'] = float(trim[1])
+        try:
+            if kind == 'Picture':
+                sid = str(subject.get('subject_id') or '')
+                runtime_slot = picture_runtime_slots.get(sid)
+                is_anchor = sid in anchor_subject_ids
+                # WHO & WHAT is an asset library, not an implicit reference fan-out.
+                # Pictures that are neither used on the timeline nor assigned FIRST/LAST
+                # stay unloaded and cannot silently compete with the active shot.
+                if runtime_slot is None and not is_anchor:
+                    continue
+                image = _lm_call_core_node('LoadImage', image=path)[0]
+                if is_anchor:
+                    anchor_images_by_subject[sid] = image
+                    roles = []
+                    if sid == str(frame_anchor_contract.get('first_subject_id') or ''):
+                        roles.append('first')
+                    if sid == str(frame_anchor_contract.get('last_subject_id') or ''):
+                        roles.append('last')
+                    entry['frame_anchor_roles'] = roles
+                    entry['loaded_as'] = 'frame_anchor:' + '+'.join(roles)
+                else:
+                    runtime_slot = max(1, min(9, int(runtime_slot)))
+                    images[runtime_slot - 1] = image
+                    entry['runtime_slot'] = runtime_slot
+                    entry['loaded_as'] = f'image_{runtime_slot}'
+            elif kind == 'Audio':
+                record_kind = str(record.get('kind') or 'audio').strip().lower()
+                if record_kind == 'video':
+                    video_obj = _lm_call_core_node('LoadVideo', file=path)[0]
+                    components = _lm_call_core_node('GetVideoComponents', video=video_obj)
+                    audio = components[1] if len(components) > 1 else None
+                    if audio is None:
+                        raise RuntimeError('video file has no readable soundtrack')
+                    entry['source_kind'] = 'video_soundtrack'
+                else:
+                    audio = _lm_call_core_node('LoadAudio', audio=path)[0]
+                    entry['source_kind'] = 'audio'
+                if trim is not None:
+                    audio = _lm_trim_audio_seconds(audio, float(trim[0]), float(trim[1]))
+                    entry['trim_applied'] = True
+                elif ranges:
+                    entry['trim_applied'] = False
+                    entry['trim_reason'] = 'subject reused with different block ranges'
+                audios[min(2, slot - 1)] = audio
+                entry['loaded_as'] = f'audio_{slot}'
+            elif kind == 'Video':
+                video_obj = _lm_call_core_node('LoadVideo', file=path)[0]
+                components = _lm_call_core_node('GetVideoComponents', video=video_obj)
+                frames = components[0]
+                sound = components[1] if len(components) > 1 else None
+                source_fps = components[2] if len(components) > 2 else None
+                if trim is not None:
+                    frames = _lm_trim_video_frames_seconds(frames, record, float(trim[0]), float(trim[1]), source_fps)
+                    sound = _lm_trim_audio_seconds(sound, float(trim[0]), float(trim[1])) if sound is not None else None
+                    entry['trim_applied'] = True
+                elif ranges:
+                    entry['trim_applied'] = False
+                    entry['trim_reason'] = 'subject reused with different block ranges'
+                videos[min(2, slot - 1)] = frames
+                # A video's own soundtrack follows the same numbered slot unless an
+                # explicit Audio subject later owns that slot.
+                if sound is not None and audios[min(2, slot - 1)] is None:
+                    audios[min(2, slot - 1)] = sound
+                entry['loaded_as'] = f'video_{slot}'
+                try:
+                    entry['source_fps'] = float(source_fps) if source_fps is not None else None
+                except Exception:
+                    entry['source_fps'] = None
+                entry['paired_audio'] = sound is not None
+            else:
+                continue
+            loaded.append(entry)
+        except Exception as exc:
+            raise RuntimeError(
+                f"LongMedia Director could not load {kind} reference {slot} from {path!r}: {exc}"
+            ) from exc
+        manifest.append(entry)
+    first_anchor_image = anchor_images_by_subject.get(str(frame_anchor_contract.get('first_subject_id') or ''))
+    last_anchor_image = anchor_images_by_subject.get(str(frame_anchor_contract.get('last_subject_id') or ''))
+    return {
+        'version': 3,
+        'kind': 'h3_longmedia_director_media',
+        'images': images,
+        'videos': videos,
+        'audios': audios,
+        'frame_anchors': {
+            'contract': frame_anchor_contract,
+            'first': first_anchor_image,
+            'last': last_anchor_image,
+        },
+        'picture_runtime_slots': picture_runtime_slots,
+        'manifest': manifest,
+        'loaded': loaded,
+    }
+
+
+
+def _lm_tensor_fingerprint(tensor) -> dict:
+    """Cheap, stable content signature for Director override/reference tensors.
+
+    Full hashing of long video tensors would add large CPU bandwidth on every Setup
+    execution.  Geometry plus evenly-spaced samples catches ordinary file/override
+    changes while keeping the fingerprint cost effectively constant.
+    """
+    if tensor is None or not torch.is_tensor(tensor):
+        return {'present': False}
+    out = {
+        'present': True,
+        'shape': list(tensor.shape),
+        'dtype': str(tensor.dtype),
+    }
+    try:
+        flat = tensor.detach().reshape(-1)
+        count = int(flat.numel())
+        if count:
+            sample_count = min(17, count)
+            if sample_count == 1:
+                indices = torch.tensor([0], device=flat.device, dtype=torch.long)
+            else:
+                indices = torch.linspace(0, count - 1, steps=sample_count, device=flat.device).round().long()
+            values = flat.index_select(0, indices).float().cpu().tolist()
+            out['samples'] = [round(float(v), 7) for v in values]
+    except Exception as exc:
+        out['sample_error'] = type(exc).__name__
+    return out
+
+
+def _lm_audio_fingerprint(audio) -> dict:
+    if not isinstance(audio, dict):
+        return {'present': False}
+    return {
+        'present': True,
+        'sample_rate': int(audio.get('sample_rate') or 0),
+        'waveform': _lm_tensor_fingerprint(audio.get('waveform')),
+    }
+
+
+def _lm_director_reference_fingerprint(images, videos, audios, manifest=None, frame_anchors=None) -> str:
+    anchor_payload = frame_anchors if isinstance(frame_anchors, dict) else {}
+    payload = {
+        'manifest': manifest if isinstance(manifest, list) else [],
+        'images': [_lm_tensor_fingerprint(value) for value in list(images or [])],
+        'videos': [_lm_tensor_fingerprint(value) for value in list(videos or [])],
+        'audios': [_lm_audio_fingerprint(value) for value in list(audios or [])],
+        'frame_anchors': {
+            'first': _lm_tensor_fingerprint(anchor_payload.get('first')),
+            'last': _lm_tensor_fingerprint(anchor_payload.get('last')),
+        },
+    }
+    return _director_canonical_hash(payload)
+
+
+def _lm_cached_take_to_latent(take: dict, which: str = 'display') -> dict:
+    import comfy.nested_tensor
+    prefix = 'display' if which == 'display' else 'continuation'
+    video = take[f'{prefix}_video']
+    audio = take[f'{prefix}_audio']
+    return {'samples': comfy.nested_tensor.NestedTensor((video, audio))}
+
+
+def _lm_restore_cached_boundary(display_av, cached_display_av, overlap_frames: int,
+                                *, lock_head: bool, lock_tail: bool):
+    """Restore exact cached visible/display boundary tokens after a selective reroll."""
+    if display_av is None or cached_display_av is None:
+        return display_av
+    video, audio = unpack_av_samples(display_av)
+    old_video, old_audio = unpack_av_samples(cached_display_av)
+    if tuple(video.shape[:2]) != tuple(old_video.shape[:2]) or tuple(video.shape[3:]) != tuple(old_video.shape[3:]):
+        raise RuntimeError(
+            'Director clip-only boundary lock cannot restore display VIDEO geometry: '
+            f'new={tuple(video.shape)} cached={tuple(old_video.shape)}.'
+        )
+    if tuple(audio.shape[:3]) != tuple(old_audio.shape[:3]):
+        raise RuntimeError(
+            'Director clip-only boundary lock cannot restore display AUDIO geometry: '
+            f'new={tuple(audio.shape)} cached={tuple(old_audio.shape)}.'
+        )
+    video = video.clone()
+    audio = audio.clone()
+    ov_v = min(int(video_latent_t(int(overlap_frames))) if int(overlap_frames) > 0 else 0,
+               int(video.shape[2]), int(old_video.shape[2]))
+    ov_a = min(int(round(int(overlap_frames) / FPS * AUDIO_LATENT_FPS)) if int(overlap_frames) > 0 else 0,
+               int(audio.shape[-1]), int(old_audio.shape[-1]))
+    if lock_head and ov_v:
+        video[:, :, :ov_v] = old_video[:, :, :ov_v].to(video)
+    if lock_tail and ov_v:
+        video[:, :, -ov_v:] = old_video[:, :, -ov_v:].to(video)
+    if lock_head and ov_a:
+        audio[..., :ov_a] = old_audio[..., :ov_a].to(audio)
+    if lock_tail and ov_a:
+        audio[..., -ov_a:] = old_audio[..., -ov_a:].to(audio)
+    out = dict(display_av)
+    out['samples'] = NestedTensor((video, audio))
+    out.pop('noise_mask', None)
+    return out
+
+
+def _lm_apply_cached_tail_lock(segment_av, cached_continuation_av, overlap_frames: int,
+                               *, has_left_context: bool):
+    """Freeze the previous take's outgoing AV overlap inside the new target.
+
+    This is the core of seam-safe single-clip reroll: the target inherits its left
+    boundary from the previous active clip through the normal LongMedia continuation
+    path, while its right boundary is copied from the old take and receives noise-mask
+    zero.  The middle remains generative.
+    """
+    if segment_av is None or cached_continuation_av is None or int(overlap_frames) <= 0:
+        return segment_av, {'applied': False, 'reason': 'no_tail_lock_needed'}
+    video, audio = unpack_av_samples(segment_av)
+    old_video, old_audio = unpack_av_samples(cached_continuation_av)
+    ov_v = min(int(video_latent_t(int(overlap_frames))), int(video.shape[2]), int(old_video.shape[2]))
+    ov_a = min(int(round(int(overlap_frames) / FPS * AUDIO_LATENT_FPS)), int(audio.shape[-1]), int(old_audio.shape[-1]))
+    left_v = ov_v if bool(has_left_context) else 0
+    left_a = ov_a if bool(has_left_context) else 0
+    if ov_v <= 0 or int(video.shape[2]) <= left_v + ov_v:
+        raise RuntimeError(
+            'Director clip-only reroll has no free VIDEO middle after preserving both boundaries. '
+            'Use Regenerate From Here for this clip length/transition size.'
+        )
+    if ov_a > 0 and int(audio.shape[-1]) <= left_a + ov_a:
+        raise RuntimeError(
+            'Director clip-only reroll has no free AUDIO middle after preserving both boundaries. '
+            'Use Regenerate From Here for this clip length/transition size.'
+        )
+    if tuple(video.shape[:2]) != tuple(old_video.shape[:2]) or tuple(video.shape[3:]) != tuple(old_video.shape[3:]):
+        raise RuntimeError('Director clip-only reroll cached continuation VIDEO geometry changed; use Regenerate From Here.')
+    if tuple(audio.shape[:3]) != tuple(old_audio.shape[:3]):
+        raise RuntimeError('Director clip-only reroll cached continuation AUDIO geometry changed; use Regenerate From Here.')
+
+    video = video.clone()
+    audio = audio.clone()
+    video[:, :, -ov_v:] = old_video[:, :, -ov_v:].to(video)
+    if ov_a:
+        audio[..., -ov_a:] = old_audio[..., -ov_a:].to(audio)
+
+    noise_mask = segment_av.get('noise_mask')
+    if getattr(noise_mask, 'is_nested', False):
+        masks = list(noise_mask.unbind())
+        video_mask = masks[0].clone()
+        audio_mask = masks[1].clone() if len(masks) > 1 else torch.ones((1,1,1,audio.shape[-1]), dtype=torch.float32)
+    else:
+        video_mask = torch.ones((1, 1, video.shape[2], 1, 1), dtype=torch.float32)
+        audio_mask = torch.ones((1, 1, 1, audio.shape[-1]), dtype=torch.float32)
+    video_mask[:, :, -ov_v:] = 0.0
+    if ov_a:
+        audio_mask[..., -ov_a:] = 0.0
+
+    out = dict(segment_av)
+    out['samples'] = NestedTensor((video, audio))
+    out['noise_mask'] = NestedTensor((video_mask, audio_mask))
+    return out, {
+        'applied': True,
+        'overlap_frames': int(overlap_frames),
+        'video_tokens_locked': int(ov_v),
+        'audio_tokens_locked': int(ov_a),
+        'left_context_present': bool(has_left_context),
+        'middle_video_tokens': int(video.shape[2]) - left_v - ov_v,
+        'middle_audio_tokens': int(audio.shape[-1]) - left_a - ov_a,
+    }
+
+
+def _lm_recast_temporal_prefix_indices(
+    target_video_t: int, source_video_t: int,
+    target_audio_t: int, source_audio_t: int,
+    *, overlap_frames: int, segment_index: int,
+) -> dict:
+    """Resolve source/target visible tails while allowing hidden-prefix-only drift."""
+    target_v_t = int(target_video_t)
+    source_v_t = int(source_video_t)
+    target_a_t = int(target_audio_t)
+    source_a_t = int(source_audio_t)
+    is_continuation = int(segment_index) > 0 and int(overlap_frames) > 0
+
+    if not is_continuation:
+        if target_v_t != source_v_t or target_a_t != source_a_t:
+            raise RuntimeError(
+                'Director Recast source visible duration changed on a non-continuation clip: '
+                f'video target/source={target_v_t}/{source_v_t}, audio target/source={target_a_t}/{source_a_t}. '
+                'Recast preserves take timing; restore the take geometry or create a fresh take for this clip.'
+            )
+        return {
+            'mode': 'exact',
+            'target_video_head': 0, 'source_video_head': 0,
+            'target_audio_head': 0, 'source_audio_head': 0,
+        }
+
+    target_v_head = min(int(video_latent_t(int(overlap_frames))), target_v_t)
+    target_a_head = min(int(round(int(overlap_frames) / FPS * AUDIO_LATENT_FPS)), target_a_t)
+    target_v_visible = target_v_t - target_v_head
+    target_a_visible = target_a_t - target_a_head
+    source_v_head = source_v_t - target_v_visible
+    source_a_head = source_a_t - target_a_visible
+
+    if not (0 <= source_v_head <= source_v_t and 0 <= source_a_head <= source_a_t):
+        raise RuntimeError(
+            'Director Recast source visible duration changed: temporal mismatch exceeds the hidden continuation prefix. '
+            f'video target/source={target_v_t}/{source_v_t} (target hidden={target_v_head}), '
+            f'audio target/source={target_a_t}/{source_a_t} (target hidden={target_a_head}). '
+            'Recast will not time-stretch or truncate spoken content.'
+        )
+    if (source_v_t - source_v_head) != target_v_visible or (source_a_t - source_a_head) != target_a_visible:
+        raise RuntimeError('Director Recast internal temporal-prefix mapping invariant failed.')
+
+    mode = 'exact' if (target_v_t == source_v_t and target_a_t == source_a_t) else 'hidden_prefix_adapted'
+    return {
+        'mode': mode,
+        'target_video_head': int(target_v_head),
+        'source_video_head': int(source_v_head),
+        'target_audio_head': int(target_a_head),
+        'source_audio_head': int(source_a_head),
+    }
+
+
+def _lm_recast_hidden_prefix_map(
+    target_video, source_video, target_audio, source_audio,
+    *, overlap_frames: int, segment_index: int,
+):
+    """Map a cached Recast take onto the current MultiClip temporal geometry.
+
+    A continuation clip may legitimately have two cache geometries for the SAME
+    visible performance: the historical 5-frame native continuation head and the
+    current longer hidden head (22f by default).  Those geometries differ only in
+    hidden prefix tokens.  Recast must preserve the current branch's hidden head
+    while reusing the source take's visible performance/audio exactly.
+
+    This helper accepts a temporal mismatch only when it can be explained wholly
+    by hidden continuation-prefix tokens.  Any visible-duration/spatial change is
+    rejected instead of being silently stretched/cropped.
+    """
+    if tuple(target_video.shape[:2]) != tuple(source_video.shape[:2]) or tuple(target_video.shape[3:]) != tuple(source_video.shape[3:]):
+        raise RuntimeError(
+            'Director Recast source VIDEO spatial/channel geometry changed: '
+            f'target={tuple(target_video.shape)} source={tuple(source_video.shape)}.'
+        )
+    if tuple(target_audio.shape[:3]) != tuple(source_audio.shape[:3]):
+        raise RuntimeError(
+            'Director Recast source AUDIO channel geometry changed: '
+            f'target={tuple(target_audio.shape)} source={tuple(source_audio.shape)}.'
+        )
+
+    return _lm_recast_temporal_prefix_indices(
+        int(target_video.shape[2]), int(source_video.shape[2]),
+        int(target_audio.shape[-1]), int(source_audio.shape[-1]),
+        overlap_frames=int(overlap_frames), segment_index=int(segment_index),
+    )
+
+
+def _lm_apply_recast_source_lock(
+    segment_av, cached_continuation_av, video_denoise: float,
+    *, overlap_frames: int = 0, segment_index: int = 0,
+):
+    """Use a cached take as Recast performance source while freezing its speech.
+
+    Current branch seam/history remains authoritative in the hidden MultiClip
+    prefix.  The cached take is authoritative only for the visible performance
+    tail.  This is restart/cache-version safe and avoids treating hidden-context
+    growth as a visible-duration change.
+    """
+    if segment_av is None or cached_continuation_av is None:
+        raise RuntimeError('Director Recast requires a cached source take.')
+    video, audio = unpack_av_samples(segment_av)
+    source_video, source_audio = unpack_av_samples(cached_continuation_av)
+    mapping = _lm_recast_hidden_prefix_map(
+        video, source_video, audio, source_audio,
+        overlap_frames=int(overlap_frames), segment_index=int(segment_index),
+    )
+
+    strength = max(0.05, min(1.0, float(video_denoise)))
+    noise_mask = segment_av.get('noise_mask')
+    if getattr(noise_mask, 'is_nested', False):
+        masks = list(noise_mask.unbind())
+        video_mask = masks[0].clone().float()
+        audio_mask = masks[1].clone().float() if len(masks) > 1 else torch.ones((1,1,1,audio.shape[-1]), dtype=torch.float32)
+    else:
+        video_mask = torch.ones((1, 1, video.shape[2], 1, 1), dtype=torch.float32)
+        audio_mask = torch.ones((1, 1, 1, audio.shape[-1]), dtype=torch.float32)
+
+    # Preserve exact current-branch seam values before inserting the selected
+    # take.  Zero-mask rows are immutable history, regardless of cache version.
+    target_video = video.clone()
+    target_audio = audio.clone()
+    original_video = target_video.clone()
+    original_audio = target_audio.clone()
+    locked_video = video_mask <= 0.0
+    locked_audio = audio_mask <= 0.0
+
+    tvh = int(mapping['target_video_head'])
+    svh = int(mapping['source_video_head'])
+    tah = int(mapping['target_audio_head'])
+    sah = int(mapping['source_audio_head'])
+
+    target_video[:, :, tvh:] = source_video[:, :, svh:].to(target_video)
+    target_audio[..., tah:] = source_audio[..., sah:].to(target_audio)
+
+    # The current chain owns all pre-existing exact locks (notably the outgoing
+    # and inherited seam).  Reinsert them after source performance placement.
+    target_video = torch.where(locked_video.to(device=target_video.device), original_video, target_video)
+    target_audio = torch.where(locked_audio.to(device=target_audio.device), original_audio, target_audio)
+
+    # Free visible VIDEO starts from the cached performance with partial denoise.
+    # Existing stronger locks stay stronger.  Speech/audio is frozen exactly over
+    # the source-visible range; hidden current-branch audio keeps its prior mask.
+    if tvh < int(video_mask.shape[2]):
+        video_mask[:, :, tvh:] = torch.minimum(
+            video_mask[:, :, tvh:], torch.full_like(video_mask[:, :, tvh:], strength)
+        )
+    if tah < int(audio_mask.shape[-1]):
+        audio_mask[..., tah:] = 0.0
+
+    out = dict(segment_av)
+    out['samples'] = NestedTensor((target_video, target_audio))
+    out['noise_mask'] = NestedTensor((video_mask, audio_mask))
+    return out, {
+        'applied': True,
+        'geometry_mode': str(mapping['mode']),
+        'video_denoise': strength,
+        'audio_denoise': 0.0,
+        'preserved_audio_exact': True,
+        'preserved_source_speech_exact': True,
+        'source_video_shape': list(source_video.shape),
+        'source_audio_shape': list(source_audio.shape),
+        'target_video_shape': list(video.shape),
+        'target_audio_shape': list(audio.shape),
+        'target_video_hidden_tokens': tvh,
+        'source_video_hidden_tokens': svh,
+        'target_audio_hidden_tokens': tah,
+        'source_audio_hidden_tokens': sah,
+    }
+
+
+
+def _lm_resolve_recast_reference_scale(value, source_video) -> float:
+    """Resolve the Recast source-reference spatial scale without touching T.
+
+    ``auto`` deliberately becomes useful already around 0.35 MP because Recast
+    performance references do not own target detail/identity. Picture references
+    remain full quality and the target render keeps its original geometry.
+    """
+    text = str(value or 'auto').strip().lower()
+    explicit = {
+        '1': 1.0, '1.0': 1.0, '0.875': 0.875, '0.75': 0.75,
+        '0.625': 0.625, '0.5': 0.5,
+    }
+    if text in explicit:
+        return float(explicit[text])
+    try:
+        h = int(source_video.shape[-2])
+        w = int(source_video.shape[-1])
+    except Exception:
+        return 1.0
+    # H3 video latents use a 16x spatial pixel scale. Estimate the source
+    # reference pixel area only to choose a conservative automatic tier.
+    pixel_area = max(1, h * 16) * max(1, w * 16)
+    if pixel_area >= 1_500_000:
+        return 0.625
+    if pixel_area >= 350_000:
+        return 0.75
+    return 0.875
+
+
+def _lm_resize_recast_video_reference(source_video, scale: float):
+    """Spatial-only downscale of a cached [B,C,T,H,W] reference latent.
+
+    Temporal tokens are preserved exactly. Work is chunked across T so long takes
+    do not create a second full-resolution float32 staging tensor on CPU.
+    """
+    if source_video is None or not torch.is_tensor(source_video) or source_video.ndim != 5:
+        raise TypeError('Director Recast source VIDEO must be a [B,C,T,H,W] tensor.')
+    scale = max(0.5, min(1.0, float(scale)))
+    b, c, t, h, w = map(int, source_video.shape)
+    if scale >= 0.999:
+        return source_video.contiguous(), {
+            'scale': 1.0, 'original_hw': [h, w], 'effective_hw': [h, w],
+        }
+    # MiniMax patchifies the latent spatial grid by 2. Keep H/W even so the
+    # reference PackedLayout and patchification contract remain exact.
+    nh = max(2, int(round((h * scale) / 2.0)) * 2)
+    nw = max(2, int(round((w * scale) / 2.0)) * 2)
+    nh = min(h, nh); nw = min(w, nw)
+    if nh == h and nw == w:
+        return source_video.contiguous(), {
+            'scale': 1.0, 'original_hw': [h, w], 'effective_hw': [h, w],
+        }
+    import torch.nn.functional as F
+    # [B,C,T,H,W] -> [B*T,C,H,W], chunked to bound temporary memory.
+    frames = source_video.permute(0, 2, 1, 3, 4).reshape(b * t, c, h, w)
+    chunks = []
+    for start in range(0, int(frames.shape[0]), 32):
+        work = frames[start:start + 32]
+        original_dtype = work.dtype
+        if work.device.type == 'cpu' and original_dtype in (torch.float16, torch.bfloat16):
+            work = work.float()
+        resized = F.interpolate(work, size=(nh, nw), mode='area')
+        if resized.dtype != original_dtype:
+            resized = resized.to(dtype=original_dtype)
+        chunks.append(resized)
+    scaled = torch.cat(chunks, dim=0).reshape(b, t, c, nh, nw).permute(0, 2, 1, 3, 4).contiguous()
+    return scaled, {
+        'scale': float(scale), 'original_hw': [h, w], 'effective_hw': [nh, nw],
+    }
+
+
+def _lm_recast_video_token_count(video) -> int:
+    if video is None or not torch.is_tensor(video) or video.ndim != 5:
+        return 0
+    t, h, w = int(video.shape[2]), int(video.shape[-2]), int(video.shape[-1])
+    return int(t * max(1, h // 2) * max(1, w // 2))
+
+
+def _lm_recast_audio_passthrough_segment(plan, segment_index: int) -> bool:
+    """True when Recast owns exact cached audio for this target segment.
+
+    In this case NextSegment must not re-encode plan.source_audio with AudioVAE:
+    the sampled audio is disposable, cached source audio latent already conditions
+    the Recast reference, and exact cached audio is restored after sampling.
+    """
+    regen = getattr(plan, 'director_regeneration', None)
+    if not isinstance(regen, dict):
+        return False
+    mode = str(regen.get('mode') or 'none').strip().lower()
+    if mode not in ('recast', 'recast_range') or not bool(regen.get('preserve_audio', True)):
+        return False
+    clip_ids = tuple(str(v) for v in (getattr(plan, 'director_clip_ids', None) or ()))
+    idx = int(segment_index)
+    if idx < 0 or idx >= len(clip_ids):
+        return False
+    if mode == 'recast':
+        return clip_ids[idx] == str(regen.get('clip_id') or '')
+    targets = {str(v) for v in (regen.get('recast_clip_ids') or ())}
+    return clip_ids[idx] in targets
+
+
+def _lm_attach_recast_native_reference(
+    positive_list, segment_av, cached_continuation_av, *,
+    overlap_frames: int = 0, segment_index: int = 0, preserve_audio: bool = True,
+    reference_scale="auto",
+):
+    """Attach the selected cached take as conditioning-only native H3 AV reference.
+
+    Recast must never use the source take as target ``x0``. The current branch owns
+    target latent geometry and all exact seam locks; the cached take contributes only
+    performance/camera/scene timing through ``minimax_refs``. Existing Picture refs
+    (the replacement identity) stay in the conditioning payload and therefore remain
+    the explicit identity authority.
+
+    The cached continuation tensor can contain a historical hidden continuation head.
+    Strip that head before exposing the source as a native reference so only the
+    visible source performance is presented to H3. Audio is optionally paired into
+    the same native reference for lip/performance timing, while exact waveform
+    preservation is still enforced after sampling by ``_lm_restore_cached_audio``.
+    """
+    if not positive_list:
+        raise RuntimeError('Director Recast requires positive conditioning for native source reference.')
+    if segment_av is None or cached_continuation_av is None:
+        raise RuntimeError('Director Recast requires a cached source take.')
+
+    target_video, target_audio = unpack_av_samples(segment_av)
+    source_video, source_audio = unpack_av_samples(cached_continuation_av)
+    mapping = _lm_recast_hidden_prefix_map(
+        target_video, source_video, target_audio, source_audio,
+        overlap_frames=int(overlap_frames), segment_index=int(segment_index),
+    )
+
+    source_video_head = int(mapping['source_video_head'])
+    source_audio_head = int(mapping['source_audio_head'])
+    source_video_visible_full = source_video[:, :, source_video_head:]
+    source_audio_visible = source_audio[..., source_audio_head:].contiguous()
+    if int(source_video_visible_full.shape[2]) <= 0:
+        raise RuntimeError('Director Recast source VIDEO has no visible latent tail after hidden-prefix removal.')
+
+    resolved_scale = _lm_resolve_recast_reference_scale(reference_scale, source_video_visible_full)
+    original_ref_tokens = _lm_recast_video_token_count(source_video_visible_full)
+    source_video_visible, resize_report = _lm_resize_recast_video_reference(
+        source_video_visible_full, resolved_scale
+    )
+    effective_ref_tokens = _lm_recast_video_token_count(source_video_visible)
+    pair_audio = bool(preserve_audio and int(source_audio_visible.shape[-1]) > 0)
+    ref = {
+        'kind': 'video_audio' if pair_audio else 'video',
+        'latent_t': int(source_video_visible.shape[2]),
+        'latent_h': int(source_video_visible.shape[-2]),
+        'latent_w': int(source_video_visible.shape[-1]),
+        'ref_audio_t': int(source_audio_visible.shape[-1]) if pair_audio else 0,
+        'latent': source_video_visible,
+        'audio_latent': source_audio_visible if pair_audio else None,
+        'longmedia_recast_source_reference': True,
+        'longmedia_recast_identity_authority': 'existing_picture_refs',
+        'longmedia_recast_source_role': 'performance_camera_scene',
+        'longmedia_recast_source_segment_index': int(segment_index),
+    }
+
+    out = []
+    attached = False
+    for entry in positive_list:
+        if isinstance(entry, dict):
+            meta = dict(entry)
+            refs = [dict(item) for item in (meta.get('minimax_refs', []) or [])
+                    if not bool(item.get('longmedia_recast_source_reference'))]
+            refs.append(dict(ref))
+            meta['minimax_refs'] = refs
+            meta['longmedia_recast_native_reference'] = True
+            meta['longmedia_recast_target_x0_policy'] = 'fresh_target'
+            out.append(meta)
+            attached = True
+        elif isinstance(entry, (list, tuple)) and len(entry) >= 2 and isinstance(entry[1], dict):
+            new_entry = list(entry)
+            meta = dict(entry[1])
+            refs = [dict(item) for item in (meta.get('minimax_refs', []) or [])
+                    if not bool(item.get('longmedia_recast_source_reference'))]
+            refs.append(dict(ref))
+            meta['minimax_refs'] = refs
+            meta['longmedia_recast_native_reference'] = True
+            meta['longmedia_recast_target_x0_policy'] = 'fresh_target'
+            new_entry[1] = meta
+            out.append(new_entry)
+            attached = True
+        else:
+            out.append(entry)
+
+    if not attached:
+        raise RuntimeError('Director Recast could not attach native source reference to conditioning payload.')
+
+    return out, {
+        'applied': True,
+        'conditioning_mode': 'native_video_audio_reference' if pair_audio else 'native_video_reference',
+        'target_x0_policy': 'fresh_target',
+        'source_identity_policy': 'not_target_x0',
+        'replacement_identity_policy': 'existing_picture_refs_authoritative',
+        'source_role': 'performance_camera_scene',
+        'preserved_audio_exact': bool(preserve_audio),
+        'source_video_shape': list(source_video.shape),
+        'source_audio_shape': list(source_audio.shape),
+        'reference_video_shape': list(source_video_visible.shape),
+        'reference_audio_shape': list(source_audio_visible.shape) if pair_audio else None,
+        'recast_ref_scale_requested': str(reference_scale or 'auto'),
+        'recast_ref_scale': float(resize_report.get('scale', resolved_scale)),
+        'original_ref_tokens': int(original_ref_tokens),
+        'effective_ref_tokens': int(effective_ref_tokens),
+        'token_reduction_pct': round(100.0 * (1.0 - (effective_ref_tokens / max(1, original_ref_tokens))), 3),
+        'original_ref_hw': list(resize_report.get('original_hw') or []),
+        'effective_ref_hw': list(resize_report.get('effective_hw') or []),
+        'source_video_hidden_tokens_removed': source_video_head,
+        'source_audio_hidden_tokens_removed': source_audio_head,
+        'legacy_recast_video_denoise_ignored': True,
+        'reference_strength': 1.0,
+    }
+
+
+def _lm_restore_cached_audio(
+    target_av, cached_av, *, overlap_frames: int = 0, segment_index: int = 0,
+):
+    """Restore selected-take speech exactly while retaining current hidden history."""
+    if target_av is None or cached_av is None:
+        return target_av
+    video, audio = unpack_av_samples(target_av)
+    source_video, source_audio = unpack_av_samples(cached_av)
+    mapping = _lm_recast_hidden_prefix_map(
+        video, source_video, audio, source_audio,
+        overlap_frames=int(overlap_frames), segment_index=int(segment_index),
+    )
+    tah = int(mapping['target_audio_head'])
+    sah = int(mapping['source_audio_head'])
+    restored_audio = audio.clone()
+    restored_audio[..., tah:] = source_audio[..., sah:].to(restored_audio)
+    out = dict(target_av)
+    out['samples'] = NestedTensor((video, restored_audio))
+    out.pop('noise_mask', None)
+    return out
+
+
+def _lm_director_send_regeneration_done(plan, request_id: str, payload: dict):
+    node_id = str(getattr(plan, 'director_node_id', '') or '').strip()
+    request_id = str(request_id or '').strip()
+    if not node_id or not request_id:
+        return
+    try:
+        from server import PromptServer
+        PromptServer.instance.send_sync(
+            'minimax_h3_director_regeneration_done',
+            {'node_id': node_id, 'request_id': request_id, **dict(payload or {})},
+        )
+    except Exception:
+        pass
+
+
+def _lm_director_send_preview_ready(plan, payload: dict):
+    """Tell the Director UI that Decode has persisted fresh take previews."""
+    node_id = str(getattr(plan, 'director_node_id', '') or '').strip()
+    project_id = str(getattr(plan, 'director_project_id', '') or '').strip()
+    if not node_id or not project_id:
+        return
+    try:
+        from server import PromptServer
+        PromptServer.instance.send_sync(
+            'minimax_h3_director_preview_ready',
+            {'node_id': node_id, 'project_id': project_id, **dict(payload or {})},
+        )
+    except Exception:
+        pass
+
+
+def _lm_director_clip_geometry_fingerprint(plan, base_video, base_audio, index: int,
+                                           *, latent_hires_enabled: bool,
+                                           latent_hires_model: str,
+                                           latent_hires_scale: float,
+                                           latent_hires_precision: str,
+                                           latent_hires_align: int) -> str:
+    payload = {
+        'workflow': str(getattr(plan, 'workflow_mode', '') or ''),
+        'index': int(index),
+        'segment_length_frames': int(plan.segment_lengths[int(index)]),
+        'overlap_frames': int(getattr(plan, 'overlap_frames', 0) or 0),
+        'video_base': [int(base_video.shape[0]), int(base_video.shape[1]), int(base_video.shape[3]), int(base_video.shape[4])],
+        'audio_base': [int(base_audio.shape[0]), int(base_audio.shape[1]), int(base_audio.shape[2])],
+        'latent_hires_enabled': bool(latent_hires_enabled),
+        'latent_hires_model': str(latent_hires_model or '') if bool(latent_hires_enabled) else '',
+        'latent_hires_scale': round(float(latent_hires_scale), 6) if bool(latent_hires_enabled) else 1.0,
+        'latent_hires_precision': str(latent_hires_precision) if bool(latent_hires_enabled) else '',
+        'latent_hires_align': int(latent_hires_align) if bool(latent_hires_enabled) else 0,
+        'audio_locked': bool(getattr(plan, 'lip_sync_target_audio_locked', False)),
+    }
+    return _director_canonical_hash(payload)
+
+
+def _lm_director_outgoing_contract_fingerprint(plan, index: int) -> str:
+    metadata = getattr(plan, 'director_clip_metadata', None) or ()
+    item = metadata[int(index)] if int(index) < len(metadata) else None
+    camera = item.get('camera') if isinstance(item, dict) and isinstance(item.get('camera'), dict) else {}
+    clip_ids = getattr(plan, 'director_clip_ids', None) or ()
+    next_clip_id = (str(clip_ids[int(index) + 1]) if int(index) + 1 < len(clip_ids) else None)
+    payload = {
+        'clip_id': str(item.get('clip_id') or '') if isinstance(item, dict) else str(index),
+        'next_clip_id': next_clip_id,
+        'overlap_frames': int(getattr(plan, 'overlap_frames', 0) or 0),
+        'transition_type': str(camera.get('transition_type') or ''),
+        'space_relation': str(camera.get('space_relation') or ''),
+        'entity_continuity': str(camera.get('entity_continuity') or ''),
+        'transition_to_next': bool(camera.get('transition_to_next', False)),
+    }
+    return _director_canonical_hash(payload)
+
+
+def _lm_director_clip_semantic_fingerprint(plan, base_seed: int, index: int) -> str:
+    prompts = getattr(plan, 'segment_prompt_summaries', None)
+    prompt = ''
+    if isinstance(prompts, (list, tuple)) and int(index) < len(prompts):
+        prompt = str(prompts[int(index)] or '')
+    clip_ids = getattr(plan, 'director_clip_ids', None)
+    clip_id = str(clip_ids[int(index)] if isinstance(clip_ids, (list, tuple)) and int(index) < len(clip_ids) else int(index))
+    metadata = getattr(plan, 'director_clip_metadata', None)
+    clip_meta = metadata[int(index)] if isinstance(metadata, (list, tuple)) and int(index) < len(metadata) else None
+    effective_seed = (
+        _v85_segment_seed(plan, int(base_seed), int(index))
+        if getattr(plan, 'mode', None) == 'multiclip'
+        else int(base_seed) & 0xFFFFFFFFFFFFFFFF
+    )
+    payload = {
+        'clip_id': clip_id,
+        'prompt': prompt,
+        'effective_seed': int(effective_seed),
+        'clip_metadata': clip_meta,
+        'reference_fingerprint': str(getattr(plan, 'director_reference_fingerprint', '') or ''),
+        'audio_output_mode': str(getattr(plan, 'audio_output_mode', 'auto') or 'auto'),
+        'lip_sync_locked': bool(getattr(plan, 'lip_sync_target_audio_locked', False)),
+    }
+    return _director_canonical_hash(payload)
+
+
+def _lm_director_take_matches(metadata: dict | None, geometry_fingerprint: str,
+                              semantic_fingerprint: str | None = None) -> bool:
+    if not isinstance(metadata, dict):
+        return False
+    if str(metadata.get('geometry_fingerprint') or '') != str(geometry_fingerprint or ''):
+        return False
+    if semantic_fingerprint is not None and str(metadata.get('semantic_fingerprint') or '') != str(semantic_fingerprint or ''):
+        return False
+    return True
 
 
 def _clone_model_options_safe(model_options):
@@ -924,6 +1961,69 @@ def _h3_safe_reference_images(images, max_pixels: int = _H3_SAFE_REF_PIXELS):
     return prepared, reports
 
 
+def _lm_clamp_media_to_target_geometry(media: torch.Tensor, target_width: int, target_height: int, *, kind: str):
+    """Clamp one IMAGE/VIDEO tensor so it never exceeds target spatial geometry.
+
+    This is a global runtime safety contract: any external image/video input that
+    participates in conditioning is spatially bounded by the active target canvas.
+    Aspect ratio is preserved, upscaling is forbidden, and the result remains on the
+    standard 32px H3-safe grid.
+    """
+    if media is None:
+        return None, None
+    if not torch.is_tensor(media) or media.ndim < 3:
+        return media, None
+    h = int(media.shape[-3])
+    w = int(media.shape[-2])
+    target_w = max(int(CANVAS_MULTIPLE), int(target_width))
+    target_h = max(int(CANVAS_MULTIPLE), int(target_height))
+    scale = min(1.0, float(target_w) / float(max(1, w)), float(target_h) / float(max(1, h)))
+    tw = max(int(CANVAS_MULTIPLE), min(target_w, int(math.floor((w * scale) / CANVAS_MULTIPLE)) * int(CANVAS_MULTIPLE)))
+    th = max(int(CANVAS_MULTIPLE), min(target_h, int(math.floor((h * scale) / CANVAS_MULTIPLE)) * int(CANVAS_MULTIPLE)))
+    # Guard against tiny aspect-ratio edge cases where flooring one side to 0 would
+    # otherwise collapse the tensor. If that happens, keep the smallest legal H3-safe
+    # dimension on the short side and recompute the long side inside the target box.
+    if tw <= 0 or th <= 0:
+        if w >= h:
+            tw = min(target_w, max(int(CANVAS_MULTIPLE), int(math.floor(target_w / CANVAS_MULTIPLE)) * int(CANVAS_MULTIPLE)))
+            th = max(int(CANVAS_MULTIPLE), min(target_h, int(math.floor((h * (tw / float(max(1, w)))) / CANVAS_MULTIPLE)) * int(CANVAS_MULTIPLE)))
+        else:
+            th = min(target_h, max(int(CANVAS_MULTIPLE), int(math.floor(target_h / CANVAS_MULTIPLE)) * int(CANVAS_MULTIPLE)))
+            tw = max(int(CANVAS_MULTIPLE), min(target_w, int(math.floor((w * (th / float(max(1, h)))) / CANVAS_MULTIPLE)) * int(CANVAS_MULTIPLE)))
+    if tw == w and th == h:
+        clamped = media[..., :3]
+        changed = False
+    else:
+        clamped = _resize_frames(media, tw, th, 'stretch')
+        changed = True
+    return clamped, {
+        'kind': str(kind),
+        'source_width': w,
+        'source_height': h,
+        'target_width': target_w,
+        'target_height': target_h,
+        'safe_width': tw,
+        'safe_height': th,
+        'source_pixels': int(max(1, w * h)),
+        'safe_pixels': int(max(1, tw * th)),
+        'changed': bool(changed),
+        'policy': 'fit_inside_target_geometry_no_upscale',
+        'latent_width': tw // 16,
+        'latent_height': th // 16,
+    }
+
+
+def _lm_clamp_media_list_to_target_geometry(items, target_width: int, target_height: int, *, kind: str):
+    prepared, reports = [], []
+    for item in items or []:
+        if item is None:
+            continue
+        safe, report = _lm_clamp_media_to_target_geometry(item, target_width, target_height, kind=kind)
+        prepared.append(safe)
+        reports.append(report)
+    return prepared, reports
+
+
 def _fit_waveform(waveform: torch.Tensor, samples: int, mode: str) -> torch.Tensor:
     current = waveform.shape[-1]
     if current == 0:
@@ -1012,13 +2112,103 @@ def _release_model_memory_for_decode():
     return {'before': before, 'after': after, 'errors': errors}
 
 
-def _decode_video_vae_safe(video_vae, video, enable_tiling, tile_size, temporal_size):
-    """Decode H3 video latent without triggering ComfyUI's full-decode OOM path.
+def _decode_video_vae_safe(
+    video_vae, video, enable_tiling, tile_size, temporal_size,
+    batch_size=1, free_vram_bytes=None,
+):
+    """Decode H3 video latent with native-tile batching and OOM fallback.
 
-    When tiling is enabled, call the public VAE.decode_tiled API directly using
-    the same unit conversion as ComfyUI's VAEDecodeTiled node.  This avoids the
-    regular VAE.decode() attempt that may exhaust VRAM before fallback can run.
+    Current upstream MiniMaxH3VideoVAE owns its own 256px spatial tiling and
+    semantic 17-frame temporal chunking. Its ``decode_tiled`` ignores external
+    tile arguments, so LongMedia's old tile_size/temporal_size controls could not
+    speed it up. The expensive part was serially invoking the 36-block ViT decoder
+    once per native spatial tile.
+
+    For H3 only, preserve upstream tile geometry/blending exactly and batch
+    independent tiles along B. ``batch_size=1`` is interpreted as Auto because
+    this input was historically unused by LongMedia Decode. Any CUDA OOM retries
+    with progressively smaller tile batches down to the exact upstream path.
     """
+    is_h3_native = bool(_is_minimax_h3_video_vae(video_vae))
+    if is_h3_native:
+        chosen = _choose_h3_tile_batch(int(batch_size), free_vram_bytes)
+        attempts = _fallback_h3_tile_batches(chosen)
+        last_oom = None
+        stage = getattr(video_vae, 'first_stage_model', None)
+        native_tile_px = int(getattr(stage, 'tile_size', 256) or 256)
+        native_overlap_px = int(getattr(stage, 'tile_overlap_min', 64) or 64)
+        native_clip_frames = int(getattr(stage, 'clip_length', 17) or 17)
+        _lm_print(
+            '[MiniMaxH3 LongMedia][H3 VAE FAST DECODE] '
+            f'latent_shape={tuple(video.shape)}; native_tile={native_tile_px}px; '
+            f'native_overlap={native_overlap_px}px; native_temporal={native_clip_frames}f; '
+            f'tile_batch_requested={int(batch_size)}; tile_batch_auto={int(chosen)}; '
+            'external_tile_controls_ignored_by_upstream_h3=True',
+            flush=True,
+        )
+        native_compression = max(1, int(video_vae.spacial_compression_decode()))
+        native_tile_lat = max(1, native_tile_px // native_compression)
+        native_overlap_lat = max(0, native_overlap_px // native_compression)
+        native_tile_t = max(2, int(getattr(stage, 'tokens_chunk_size', 5) or 5) + int(getattr(stage, 'token_overlap', 2) or 0))
+        native_overlap_t = max(1, int(getattr(stage, 'token_overlap', 2) or 1))
+        for tile_batch in attempts:
+            try:
+                with _batched_h3_tiles(video_vae, int(tile_batch)) as tile_stats:
+                    # H3 decode_tiled() delegates to decode(), which is desirable here:
+                    # it keeps the reference temporal chunking and CPU output streaming.
+                    # Native tile hints are still passed to the outer ComfyUI VAE so its
+                    # memory reservation is bounded to the real internal tile geometry.
+                    images = video_vae.decode_tiled(
+                        video,
+                        tile_x=native_tile_lat,
+                        tile_y=native_tile_lat,
+                        overlap=native_overlap_lat,
+                        tile_t=native_tile_t,
+                        overlap_t=native_overlap_t,
+                    )
+                info = {
+                    'strategy': 'h3_native_batched_tiles',
+                    'native_tile_size_px': native_tile_px,
+                    'native_overlap_px': native_overlap_px,
+                    'native_temporal_chunk_frames': native_clip_frames,
+                    'tile_batch': int(tile_batch),
+                    'tile_batch_requested': int(batch_size),
+                    'tile_batch_auto_selected': int(chosen),
+                    'external_tile_size_ignored': True,
+                    'external_temporal_size_ignored': True,
+                    'tile_stats': dict(tile_stats),
+                }
+                _lm_print(
+                    '[MiniMaxH3 LongMedia][H3 VAE FAST DECODE DONE] '
+                    f'tile_batch={int(tile_batch)}; last_temporal_chunk_stats={dict(tile_stats)}',
+                    flush=True,
+                )
+                return images, info
+            except Exception as exc:
+                try:
+                    comfy.model_management.raise_non_oom(exc)
+                except Exception:
+                    raise
+                last_oom = exc
+                _lm_print(
+                    '[MiniMaxH3 LongMedia][H3 VAE TILE BATCH OOM] '
+                    f'tile_batch={int(tile_batch)} failed; retrying smaller batch',
+                    flush=True,
+                )
+                try:
+                    # An activation OOM can leave dynamically streamed VAE pages and
+                    # allocator blocks resident. Reset the decode lifecycle before retry.
+                    comfy.model_management.unload_all_models()
+                    gc.collect()
+                    comfy.model_management.soft_empty_cache()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except Exception:
+                    pass
+                continue
+        if last_oom is not None:
+            raise last_oom
+
     if not bool(enable_tiling):
         _lm_print('[MiniMaxH3 LongMedia][V316 DECODE] regular decode requested', flush=True)
         return video_vae.decode(video), {
@@ -1059,12 +2249,8 @@ def _decode_video_vae_safe(video_vae, video, enable_tiling, tile_size, temporal_
         flush=True,
     )
     images = video_vae.decode_tiled(
-        video,
-        tile_x=tile_x,
-        tile_y=tile_y,
-        overlap=overlap,
-        tile_t=tile_t,
-        overlap_t=overlap_t,
+        video, tile_x=tile_x, tile_y=tile_y, overlap=overlap,
+        tile_t=tile_t, overlap_t=overlap_t,
     )
     return images, {
         'strategy': 'direct_tiled',
@@ -1177,6 +2363,18 @@ def _aimdo_setup_boundary_reset(label: str):
     return events
 
 
+def _is_aimdo_hostbuffer_fault(exc: BaseException) -> bool:
+    """Recognize the Windows AIMDO file-streaming failure before CUDA sees the weight."""
+    text = str(exc).lower()
+    return (
+        'hostbuffer.read_file_slice failed' in text
+        or 'getoverlappedresult failed' in text
+        or 'error=1450' in text
+        or 'xfer_file_read' in text
+        or 'hostbuf_read_file_slice' in text
+    )
+
+
 def _is_aimdo_transient_fault(exc: BaseException) -> bool:
     text = str(exc).lower()
     return (
@@ -1188,12 +2386,34 @@ def _is_aimdo_transient_fault(exc: BaseException) -> bool:
 
 
 def _setup_clip_encode_retry(fn, *, label: str):
-    """Run one TE encode with one lifecycle-only retry for transient AIMDO VBAR races."""
+    """Run one TE encode with one bounded recovery attempt for AIMDO loader faults.
+
+    HostBuffer error 1450 is a Windows host/VMM resource failure, not an ordinary
+    PyTorch OOM.  Do not call unload_all_models() for that path: unload/reload is
+    itself part of the affected AIMDO lifecycle.  The caller may already hold the
+    TE inside the local unpinned-memory gate below, so only clear transient queues
+    and retry once.
+    """
     try:
         return fn()
     except RuntimeError as exc:
-        if not _is_aimdo_transient_fault(exc):
+        hostbuffer_fault = _is_aimdo_hostbuffer_fault(exc)
+        if not hostbuffer_fault and not _is_aimdo_transient_fault(exc):
             raise
+        if hostbuffer_fault:
+            _lm_print(
+                '[MiniMaxH3 LongMedia][AIMDO TE HOSTBUFFER RETRY] '
+                f'{label}: Windows AIMDO HostBuffer fault ({type(exc).__name__}: {exc}); '
+                'clearing prefetch/cast state and retrying once without model unload',
+                flush=True,
+            )
+            _aimdo_setup_boundary_reset(label + ':hostbuffer_retry')
+            try:
+                _soft_empty_cuda_cache()
+            except Exception:
+                pass
+            return fn()
+
         _lm_print(
             '[MiniMaxH3 LongMedia][AIMDO TE RETRY] '
             f'{label}: transient AIMDO fault ({type(exc).__name__}: {exc}); resetting loader state and retrying once',
@@ -1211,6 +2431,87 @@ def _setup_clip_encode_retry(fn, *, label: str):
         return fn()
 
 
+def _longmedia_hybrid_te_encode_safe(clip, fn, *, label: str):
+    """Encode MiniMax H3 hybrid conditioning under a local Windows AIMDO pin gate.
+
+    The hybrid path previously bypassed `_longmedia_native_reference_execute_safe`,
+    so adding a Character/Reference (including Director Recast) could stream the
+    ~15 GB MiniMaxH3TEModel through AIMDO pinned HostBuffer and hit Win32 error 1450.
+    Keep the workaround scoped strictly to this TE encode: unpin existing CLIP/TE
+    patchers, disable pinned-memory transfers, clear stale prefetch/cast state, run
+    the encode, then restore the user's global ComfyUI setting.  Sampling policy is
+    untouched.
+    """
+    if not (sys.platform.startswith('win') and _comfy_aimdo is not None):
+        return _setup_clip_encode_retry(fn, label=label)
+
+    try:
+        from comfy.cli_args import args as _args
+    except Exception:
+        return _setup_clip_encode_retry(fn, label=label)
+
+    previous = bool(getattr(_args, 'disable_pinned_memory', False))
+    changed = False
+    if not previous:
+        _args.disable_pinned_memory = True
+        changed = True
+
+    candidates = []
+    for obj in (
+        clip,
+        getattr(clip, 'patcher', None),
+        getattr(clip, 'model_patcher', None),
+        getattr(clip, 'cond_stage_model', None),
+        getattr(getattr(clip, 'cond_stage_model', None), 'patcher', None),
+        getattr(getattr(clip, 'cond_stage_model', None), 'model_patcher', None),
+    ):
+        if obj is not None and obj not in candidates:
+            candidates.append(obj)
+
+    unpinned = 0
+    for obj in candidates:
+        unpin = getattr(obj, 'unpin_all_weights', None)
+        if callable(unpin):
+            try:
+                unpin()
+                unpinned += 1
+            except Exception as exc:
+                _lm_print(
+                    '[MiniMaxH3 LongMedia][HYBRID TE PIN GATE] '
+                    f'unpin warning {type(exc).__name__}: {exc}',
+                    flush=True,
+                )
+
+    try:
+        _aimdo_setup_boundary_reset(label + ':pin_gate')
+        try:
+            _soft_empty_cuda_cache()
+        except Exception:
+            pass
+        _lm_print(
+            '[MiniMaxH3 LongMedia][HYBRID TE PIN GATE] '
+            f'{label}: disable_pinned_memory {previous}->True; '
+            f'unpinned_patchers={unpinned}; restore_after_encode=True',
+            flush=True,
+        )
+        return _setup_clip_encode_retry(fn, label=label)
+    finally:
+        if changed:
+            try:
+                _args.disable_pinned_memory = previous
+                _lm_print(
+                    '[MiniMaxH3 LongMedia][HYBRID TE PIN RESTORE] '
+                    f'{label}: disable_pinned_memory restored to {previous}',
+                    flush=True,
+                )
+            except Exception as exc:
+                _lm_print(
+                    '[MiniMaxH3 LongMedia][HYBRID TE PIN RESTORE] '
+                    f'{label}: warning {type(exc).__name__}: {exc}',
+                    flush=True,
+                )
+
+
 def _setup_memory_isolation(label, unload_models=True):
     """Create a clean VRAM boundary between Setup's heavy model stages.
 
@@ -1222,6 +2523,13 @@ def _setup_memory_isolation(label, unload_models=True):
     """
     before = _cuda_memory_snapshot()
     unload_error = None
+    try:
+        from .sol_h3_accel import restore_all_sol_h3_adaln
+        _restored_sol_h3 = restore_all_sol_h3_adaln(str(label) + ':setup_isolation')
+        if _restored_sol_h3:
+            _lm_print(f'[MiniMaxH3 LongMedia][SOL-H3 AdaLN] restored {_restored_sol_h3} cache controller(s) before Setup isolation', flush=True)
+    except Exception as _sol_h3_restore_exc:
+        _lm_print(f'[MiniMaxH3 LongMedia][SOL-H3 AdaLN] Setup restore warning: {_sol_h3_restore_exc}', flush=True)
     # v0.3.82: native AIMDO uses asynchronous VBAR/prefetch state that can
     # outlive the previous heavy stage. Clear it at Setup boundaries before
     # asking Qwen/CLIP to fault a different model into the same GPU.
@@ -1275,6 +2583,82 @@ def _setup_memory_isolation(label, unload_models=True):
     }
 
 
+def _release_longmedia_transient_cuda_refs(model_options, label: str):
+    """Drop only LongMedia-owned *transient* CUDA references from cached guider options.
+
+    ComfyUI can cache an upstream guider across seed-only reruns.  The LongMedia
+    MLP/residency wrapper intentionally stores its mutable runtime state inside
+    ``transformer_options`` so every H3 block can see it.  A failed/cancelled
+    execution can therefore leave a Sol workspace or FastH3 geometry tensors
+    reachable from that cached guider even after ``unload_all_models()``.
+
+    This helper is deliberately narrow: it does not unload models, alter
+    conditioning, clear CPU diagnostics, or reset persistent policy/config.
+    It only severs references to two LongMedia-owned CUDA caches whose contents
+    are reproducible on the next forward.  The normal sampler memory boundary
+    remains responsible for model unload / allocator cleanup.
+    """
+    before = _cuda_memory_snapshot()
+    released = []
+    warning = None
+    options = model_options if isinstance(model_options, dict) else {}
+    transformer_options = options.get('transformer_options')
+    if not isinstance(transformer_options, dict):
+        transformer_options = None
+
+    try:
+        if transformer_options is not None:
+            state = transformer_options.get('latentlab_h3_residency_state')
+            if isinstance(state, dict):
+                if state.get('int8_reusable_sol_storage') is not None:
+                    state['int8_reusable_sol_storage'] = None
+                    released.append('int8_sol_storage')
+                # The key/active flag are execution-local bookkeeping.  Resetting
+                # them together prevents a cached wrapper from believing a stale
+                # forward workspace is still valid after an exception/cancel.
+                if state.get('int8_reusable_sol_storage_key') is not None:
+                    state['int8_reusable_sol_storage_key'] = None
+                if bool(state.get('v12_int8_sol_forward_active', False)):
+                    state['v12_int8_sol_forward_active'] = False
+                    released.append('int8_sol_forward_scope')
+
+            # FastH3/VSA geometry is deterministic from layout+device and cheap to
+            # rebuild.  Its cache contains CUDA tensors, so it must not outlive a
+            # sampler execution when transformer_options itself is graph-cached.
+            geometry_cache = transformer_options.pop(
+                '_longmedia_fasth3_vsa_geometry_cache', None
+            )
+            if geometry_cache:
+                released.append('fasth3_vsa_geometry_cache')
+    except Exception as exc:
+        warning = f'{type(exc).__name__}: {exc}'
+
+    # Releasing a container can expose tensors that participate in Python cycles.
+    # GC is safe here; allocator cache release remains owned by the caller.
+    try:
+        gc.collect()
+    except Exception:
+        pass
+
+    after = _cuda_memory_snapshot()
+    if released or warning:
+        _lm_print(
+            '[MiniMaxH3 LongMedia][TRANSIENT CUDA REF RELEASE] '
+            f'{label}; released={released or ["none"]}; '
+            f'allocated_mb={(_mb(before["allocated"]) if before else 0.0):.1f}'
+            f'->{(_mb(after["allocated"]) if after else 0.0):.1f}'
+            + (f'; warning={warning}' if warning else ''),
+            flush=True,
+        )
+    return {
+        'label': str(label),
+        'released': list(released),
+        'warning': warning,
+        'allocated_before_mb': (_mb(before['allocated']) if before else None),
+        'allocated_after_mb': (_mb(after['allocated']) if after else None),
+    }
+
+
 def _sampler_memory_isolation(label: str = 'sampler_entry', unload_models: bool = True):
     """Create a hard execution boundary before every LongMedia sampler run.
 
@@ -1292,6 +2676,16 @@ def _sampler_memory_isolation(label: str = 'sampler_entry', unload_models: bool 
     before = _cuda_memory_snapshot()
     warning = None
     events = []
+
+    try:
+        from .sol_h3_accel import restore_all_sol_h3_adaln
+        _restored_sol_h3 = restore_all_sol_h3_adaln(str(label) + ':sampler_isolation')
+        if _restored_sol_h3:
+            events.append(f'sol_h3_adaln_restore:{_restored_sol_h3}')
+            _lm_print(f'[MiniMaxH3 LongMedia][SOL-H3 AdaLN] restored {_restored_sol_h3} cache controller(s) before sampler isolation', flush=True)
+    except Exception as _sol_h3_restore_exc:
+        msg = f'sol_h3_restore: {type(_sol_h3_restore_exc).__name__}: {_sol_h3_restore_exc}'
+        warning = msg if warning is None else warning + '; ' + msg
 
     try:
         events.extend(_aimdo_setup_boundary_reset(str(label) + ':pre'))
@@ -2019,6 +3413,37 @@ def _h3_sol_span_wrapper(executor, *args, **kwargs):
     options = call_args[5] if len(call_args) > 5 and isinstance(call_args[5], dict) else kwargs.get('transformer_options')
     options = options or {}
     payload = kwargs.get('minimax_payload')
+    _sol_h3_state = options.get('latentlab_h3_residency_state') if isinstance(options, dict) else None
+    if isinstance(_sol_h3_state, dict) and bool(_sol_h3_state.get('sol_h3_profile', False)):
+        try:
+            _runtime_x = call_args[0] if call_args else kwargs.get('x')
+            _runtime_video = _runtime_x[0] if isinstance(_runtime_x, (list, tuple)) and _runtime_x else _runtime_x
+            if torch.is_tensor(_runtime_video):
+                _sol_h3_state['sol_h3_runtime_device'] = _runtime_video.device
+            _context = call_args[3] if len(call_args) > 3 else kwargs.get('c_crossattn')
+            from .sol_h3_accel import ensure_sol_h3_adaln_cache
+            _adaln_stats = ensure_sol_h3_adaln_cache(
+                _sol_h3_state, context=_context, payload=payload, video=_runtime_video,
+                denoise_mask=kwargs.get('denoise_mask'),
+                audio_denoise_mask=kwargs.get('audio_denoise_mask'),
+            )
+            if _adaln_stats.installed and not _sol_h3_state.get('sol_h3_adaln_announced'):
+                _lm_print(
+                    '[MiniMaxH3 LongMedia][SOL-H3 AdaLN] trajectory cache ACTIVE: '
+                    f'rows={_adaln_stats.timestep_rows}, schedule_points={_adaln_stats.schedule_points}, blocks={_adaln_stats.blocks}, '
+                    f'cache={_adaln_stats.cached_mb:.1f}MB, detached_projection_weights={_adaln_stats.original_parameter_mb:.1f}MB; '
+                    'installed before H3 block prefetch queue', flush=True)
+                _sol_h3_state['sol_h3_adaln_announced'] = True
+                _sol_h3_state['sol_h3_adaln_cache_mb'] = float(_adaln_stats.cached_mb)
+                _sol_h3_state['sol_h3_adaln_original_parameter_mb'] = float(_adaln_stats.original_parameter_mb)
+            elif (not _adaln_stats.installed and not _sol_h3_state.get('sol_h3_adaln_skip_announced')):
+                _lm_print('[MiniMaxH3 LongMedia][SOL-H3 AdaLN] cache not installed: ' + _adaln_stats.reason, flush=True)
+                _sol_h3_state['sol_h3_adaln_skip_announced'] = True
+                _sol_h3_state['sol_h3_adaln_skip_reason'] = _adaln_stats.reason
+        except Exception as _adaln_exc:
+            if not _sol_h3_state.get('sol_h3_adaln_error_announced'):
+                _lm_print(f'[MiniMaxH3 LongMedia][SOL-H3 AdaLN] safe fallback: {type(_adaln_exc).__name__}: {_adaln_exc}', flush=True)
+                _sol_h3_state['sol_h3_adaln_error_announced'] = True
     layout = payload.get('layout') if isinstance(payload, dict) else None
     if layout is not None and hasattr(layout, 'segments'):
         try:
@@ -2884,12 +4309,55 @@ def _h3_runtime_prefetch_wrapper(executor, *args, _bound_residency_state=None, _
             if vbar is not None:
                 loaded_before = int(vbar.loaded_size()) if hasattr(vbar, 'loaded_size') else 0
                 residency_state['vbar_forward_loaded_before'] = loaded_before
-                if persistent_window and not residency_state.get('vbar_window_armed', False):
+                _existing_budget_owner = str(residency_state.get('sol_mode', '')).lower() == 'existing'
+                _existing_async = bool(
+                    residency_state.get('existing_native_async_pipeline_candidate', False)
+                    and transformer_options.get('prefetch_dynamic_vbars', False)
+                )
+                if _existing_async and not residency_state.get('vbar_window_armed', False):
+                    # Arm a one-block-equivalent cap BEFORE MiniMaxH3Model creates
+                    # its prefetch queue. This avoids changing the watermark under
+                    # already-pinned current/next-block pages inside block 0. The
+                    # packed-shape calibration may keep or relax this cap later.
+                    page = 32 * 1024**2
+                    max_size = max(0, int(getattr(vbar, 'max_size', 0) or 0))
+                    used_end = max(0, int(getattr(vbar, 'offset', 0) or 0))
+                    model_span = used_end if used_end > 0 else max_size
+                    if max_size > 0:
+                        model_span = min(model_span, max_size) if model_span > 0 else max_size
+                    max_blocks = max(1, int(residency_state.get('max_blocks', 50) or 50))
+                    block_eq = 0
+                    if model_span > 0:
+                        block_eq = ((model_span + max_blocks - 1) // max_blocks + page - 1) // page * page
+                    if block_eq > 0 and hasattr(vbar, 'set_watermark') and hasattr(vbar, 'set_watermark_limit'):
+                        vbar.set_watermark_limit(0)
+                        vbar.set_watermark(block_eq)
+                        vbar.set_watermark_limit(block_eq)
+                        residency_state['vbar_window_armed'] = True
+                        residency_state['vbar_window_target_bytes'] = int(block_eq)
+                        residency_state['vbar_window_armed_forward'] = fwd
+                        residency_state['existing_prearmed_block_equivalent_bytes'] = int(block_eq)
+                        _lm_print(
+                            '[MiniMaxH3 LongMedia][EXISTING ASYNC PREARM] '
+                            f'forward={fwd}; cap=1 block-equivalent={block_eq/(1024.0**2):.0f}MB; '
+                            f'loaded_before={loaded_before/(1024.0**2):.0f}MB; native one-ahead prefetch remains enabled',
+                            flush=True,
+                        )
+                elif persistent_window and _existing_budget_owner and not residency_state.get('vbar_window_armed', False):
+                    # 0.6.28: do not arm the old static 66%-VRAM eviction floor.
+                    # Exact Kitchen computes its real packed-shape activation peak
+                    # inside block 0 and installs one fixed VBAR cap/floor there.
+                    if not residency_state.get('vbar_existing_budget_deferred_announced', False):
+                        residency_state['vbar_existing_budget_deferred_announced'] = True
+                        _lm_print(
+                            '[MiniMaxH3 LongMedia][AIMDO PERSISTENT WINDOW] '
+                            f'DEFER forward={fwd}; attention=existing; loaded={loaded_before/(1024.0**2):.0f}MB; '
+                            'packed-shape budget will own VBAR cap',
+                            flush=True,
+                        )
+                elif persistent_window and not residency_state.get('vbar_window_armed', False):
                     target_b = int(residency_state.get('vbar_window_target_bytes', 0) or 0)
                     if target_b > 0 and hasattr(vbar, 'set_watermark_limit'):
-                        # Arm once.  set_watermark_limit does not fault data in; it
-                        # only prevents the protected prefix from being evicted
-                        # when those pages are subsequently touched.
                         vbar.set_watermark_limit(target_b)
                         residency_state['vbar_window_armed'] = True
                         residency_state['vbar_window_armed_forward'] = fwd
@@ -3728,6 +5196,12 @@ def _sol_schedule_tau(transformer_options, state):
     """
     mode = str(state.get('sol_mode', 'existing'))
     requested = str(state.get('requested_attention_mode', mode))
+    # NVIDIA Sol-H3's validated sparse policy uses tau=1.0.  LongMedia uses
+    # sparse attention only as a bounded fallback on one GPU; the validated
+    # one-GPU Sol-H3 profile itself is exact/dense.
+    if requested == 'sol_h3':
+        state['last_sol_tau'] = 1.0
+        return 1.0
 
     sigma = None
     opts = transformer_options or {}
@@ -4979,7 +6453,7 @@ class _INT8SolStorageOOM(RuntimeError):
     pass
 
 
-def _execute_h3_sol_attention(attn, x, rope_freqs, transformer_options, state, tau, measure=None):
+def _execute_h3_sol_attention(attn, x, rope_freqs, transformer_options, state, tau, measure=None, *, force_dense=False):
     """Execute embedded H3 Sol.
 
     When sol_qkv_chunk_tokens > 0, use a two-pass streamed-Q path:
@@ -5009,6 +6483,18 @@ def _execute_h3_sol_attention(attn, x, rope_freqs, transformer_options, state, t
             sink_blocks = (0, (int(video_start) + 63) // 64)
             if state.get('sol_sink_conditioning') == 'exact_kv_and_rows':
                 sink_q = sink_blocks
+
+    # 0.6.23: EXISTING on 16-GB-class GPUs can hit a structural fused-QKV
+    # allocation wall before Comfy Kitchen attention even starts.  The bounded
+    # fallback reuses the streamed compressed-K/V engine but marks every query
+    # program as a sink, which forces every K/V block through the token-level
+    # path.  There is no SOL block pruning in this mode: it is a dense
+    # memory-safety carrier, not sparse attention.
+    if force_dense:
+        all_blocks = (0, (s + 63) // 64)
+        sink_blocks = all_blocks
+        sink_q = all_blocks
+        state['existing_bounded_dense_force_all_blocks'] = True
 
     def _weights():
         qw = comfy.model_management.cast_to(attn.q_norm.weight, device=x.device)
@@ -6047,18 +7533,28 @@ def _fast_h3_native_sigmas(device, dtype=torch.float32):
 
 
 def _h3_existing_attention_backend_kind(transformer_options: dict) -> str:
-    """Identify the user-selected optimized-attention family without calling it.
+    """Identify the effective optimized-attention family without executing it.
 
-    ModelPatcher.set_model_optimized_attention wraps the selected function, but
-    preserves its container_function.  Comfy Kitchen's container function has a
-    stable descriptive name, which lets LongMedia budget its transient INT8
-    prequantization workspace while leaving the backend itself untouched.
+    A ModelPatcher override is authoritative when present.  When there is no
+    per-model override, ComfyUI still has a process-global ``optimized_attention``
+    selection (CLI/backend policy).  r3 looked only at the override, which meant
+    global Comfy Kitchen INT8 could be misclassified as ``selected_existing`` and
+    the exact streamed-QKV path never armed on 16 GB cards.
     """
     try:
         override = (transformer_options or {}).get('optimized_attention_override')
     except Exception:
         override = None
-    candidates = (override, getattr(override, 'container_function', None))
+
+    candidates = [override, getattr(override, 'container_function', None)]
+    if override is None:
+        try:
+            import comfy.ldm.modules.attention as _attn_mod
+            _global = getattr(_attn_mod, 'optimized_attention', None)
+            candidates.extend((_global, getattr(_global, 'container_function', None)))
+        except Exception:
+            pass
+
     labels: list[str] = []
     for fn in candidates:
         if fn is None:
@@ -6069,7 +7565,7 @@ def _h3_existing_attention_backend_kind(transformer_options: dict) -> str:
             str(getattr(fn, '__qualname__', '') or '').lower(),
         ))
     joined = ' '.join(labels)
-    if 'comfy_kitchen' in joined or 'kitchen_int8' in joined:
+    if 'attention_comfy_kitchen_int8' in joined or 'comfy_kitchen' in joined or 'kitchen_int8' in joined:
         return 'comfy_kitchen_int8'
     if 'sage' in joined:
         return 'sage'
@@ -6303,11 +7799,30 @@ def _h3_existing_ck_stream_needed(
     required, qkv_bytes, _backend_extra, _backend = _h3_existing_workspace_required_bytes(
         attn, x, transformer_options, state,
     )
+    headroom = _h3_existing_allocatable_headroom_bytes(snap)
     qkv_fraction = float(qkv_bytes) / float(total)
     dense_fraction = float(required) / float(total)
-    activate = qkv_fraction >= 0.40 or dense_fraction >= 0.68
+
+    # r3 used only fractions of total VRAM.  That misses the real failure mode:
+    # on a 16 GB card 5.4 GiB fused QKV is only ~34% of total, yet it cannot be
+    # allocated while ~12.9 GiB is already active.  Arm streaming from CURRENT
+    # allocatable headroom as well as structural ratios.  Keep 256 MiB breathing
+    # room so the projection kernel never consumes the allocator to the last byte.
+    headroom_guard = 256 * 1024**2
+    qkv_wont_fit_now = int(qkv_bytes) + headroom_guard > int(headroom)
+    dense_wont_fit_now = int(required) > int(headroom)
+    activate = (
+        qkv_wont_fit_now
+        or dense_wont_fit_now
+        or qkv_fraction >= 0.40
+        or dense_fraction >= 0.68
+        or bool(state.get('existing_ck_stream_force', False))
+    )
     state['existing_ck_stream_qkv_fraction'] = round(qkv_fraction, 4)
     state['existing_ck_stream_dense_fraction'] = round(dense_fraction, 4)
+    state['existing_ck_stream_headroom_mb'] = round(headroom / 1024**2, 1)
+    state['existing_ck_stream_qkv_wont_fit_now'] = bool(qkv_wont_fit_now)
+    state['existing_ck_stream_dense_wont_fit_now'] = bool(dense_wont_fit_now)
     return bool(activate)
 
 
@@ -6427,10 +7942,13 @@ def _run_h3_existing_ck_streamed_attention(
     """
     import comfy.model_management
     import comfy.quant_ops
-    from comfy_kitchen.sage_attention import (
-        int8_attention_from_prequantized,
-        prequantize_int8_attention,
-    )
+    import comfy_kitchen
+
+    # Use the public top-level API that current ComfyUI itself calls.  Older
+    # comfy-kitchen builds also exposed these from ``sage_attention``; relying
+    # on that private module path made the streamed fallback version-sensitive.
+    prequantize_int8_attention = comfy_kitchen.prequantize_int8_attention
+    int8_attention_from_prequantized = comfy_kitchen.int8_attention_from_prequantized
 
     seq = int(x.shape[0])
     heads = int(attn.heads)
@@ -6692,14 +8210,798 @@ def _run_h3_existing_ck_streamed_attention(
     return result
 
 
-def _run_h3_existing_attention_lowmem(attn, x, rope_freqs, transformer_options, state):
-    """Memory-restored H3 EXISTING attention path.
+def _lm_h3_temporal_embedding_route_plan(transformer_options, seq_len=None):
+    """Resolve tail embedding text rows and active target-video query groups.
 
-    Normal long sequences keep the selected optimized_attention backend.  On a
-    16-GB-class GPU, when Comfy Kitchen's *single fused QKV allocation itself*
-    becomes structurally too large (notably Latent Hi-Res), switch only its
-    lifetime schedule to exact query streaming.  The backend/math remains CK
-    INT8; SOL is never substituted.
+    Director keeps native embedding tokens at the tail of the Qwen presentation.
+    PackedLayout exposes the final text/video spans, so no Comfy core patch or
+    second text-encoder pass is required here.
+    """
+    options = transformer_options or {}
+    specs = tuple(options.get('latentlab_h3_temporal_embeddings') or ())
+    layout = options.get('latentlab_h3_packed_layout')
+    factorized_kinds = {'camera_control', 'embedding_control', 'temporal_control'}
+    if specs and all(str(item.get('kind') or '') in factorized_kinds for item in specs):
+        branch = options.get('cond_or_uncond', [0])
+        if branch and all(int(v) == 1 for v in branch):
+            return None  # Negative CFG presentation has no appended temporal-control rows.
+        if branch and len(branch) > 1:
+            raise ValueError('Director temporal H3 controls require unbatched CFG branches.')
+        if layout is None or seq_len is None:
+            raise RuntimeError('Director temporal H3 controls require the runtime H3 PackedLayout guard.')
+        from .director_timing import temporal_control_attention_route
+        from comfy.ldm.minimax.model import FRAME_PER_TOKEN
+        return temporal_control_attention_route(layout, specs, int(seq_len), FRAME_PER_TOKEN)
+    if specs and specs[0].get('kind') == 'conditioning_region':
+        branch = options.get('cond_or_uncond', [0])
+        if branch and all(int(v) == 1 for v in branch):
+            return None  # Negative CFG presentation has no appended regional rows.
+        if branch and len(branch) > 1:
+            raise ValueError('Director regional H3 attention requires unbatched CFG branches.')
+        if layout is None or seq_len is None:
+            raise RuntimeError('Director regional timing requires the runtime H3 PackedLayout guard.')
+        from .director_timing import regional_attention_route
+        from comfy.ldm.minimax.model import FRAME_PER_TOKEN
+        return regional_attention_route(layout, specs, int(seq_len), FRAME_PER_TOKEN)
+    if not specs or layout is None or not hasattr(layout, 'segments'):
+        return None
+    segments = list(layout.segments)
+    text_seg = next(((int(a), int(b)) for a, b, kind in segments if str(kind) == 'text'), None)
+    video_seg = next(((int(a), int(b)) for a, b, kind in segments if str(kind) == 'video'), None)
+    if text_seg is None or video_seg is None:
+        return None
+    text_start, text_stop = text_seg
+    video_start, video_stop = video_seg
+    if seq_len is not None and int(video_stop) > int(seq_len):
+        raise RuntimeError(
+            f'Temporal H3 embedding layout exceeds sequence length: video_stop={video_stop}, seq={int(seq_len)}.'
+        )
+
+    # Prompt order is stable and each embedding appears once at the prompt tail.
+    unique = []
+    counts = {}
+    for raw in sorted((dict(x) for x in specs), key=lambda x: (int(x.get('order', 0)), str(x.get('name', '')))):
+        name = str(raw.get('name') or '').strip()
+        count = max(0, int(raw.get('token_count', 0) or 0))
+        if not name or count <= 0:
+            continue
+        if name not in counts:
+            unique.append(name)
+            counts[name] = count
+        elif counts[name] != count:
+            raise RuntimeError(
+                f'Temporal H3 embedding token-count drift for {name!r}: {counts[name]} vs {count}.'
+            )
+    total_embedding_rows = sum(counts[name] for name in unique)
+    if total_embedding_rows <= 0:
+        return None
+    if total_embedding_rows > (text_stop - text_start):
+        raise RuntimeError(
+            'Temporal H3 embedding rows exceed the text presentation: '
+            f'embedding_rows={total_embedding_rows}, text_rows={text_stop-text_start}.'
+        )
+    cursor = text_stop - total_embedding_rows
+    row_ranges = {}
+    for name in unique:
+        n = int(counts[name])
+        row_ranges[name] = (int(cursor), int(cursor + n))
+        cursor += n
+
+    signature = getattr(layout, 'signature', None)
+    if not signature or len(signature) < 2:
+        raise RuntimeError('Temporal H3 embedding routing requires PackedLayout.signature latent_t.')
+    latent_t = int(signature[1])
+    if latent_t <= 0:
+        return None
+    video_rows = int(video_stop - video_start)
+    if video_rows % latent_t != 0:
+        raise RuntimeError(
+            f'Temporal H3 embedding video rows are not divisible by latent_t: rows={video_rows}, T={latent_t}.'
+        )
+    frame_rows = video_rows // latent_t
+
+    from comfy.ldm.minimax.model import FRAME_PER_TOKEN
+    frame_pattern = tuple(int(v) for v in FRAME_PER_TOKEN)
+    token_frame_spans = []
+    frame_cursor = 0
+    for tidx in range(latent_t):
+        span = int(frame_pattern[tidx % len(frame_pattern)])
+        token_frame_spans.append((frame_cursor, frame_cursor + span))
+        frame_cursor += span
+
+    # Full-span embeddings retain stock/native global behavior. Only genuinely
+    # partial ranges are masked from the baseline attention and selectively
+    # enabled for target-video queries inside their authored windows.
+    full_names = set()
+    temporal_names = set()
+    by_name = {name: [] for name in unique}
+    for raw in specs:
+        name = str(raw.get('name') or '').strip()
+        if name not in by_name:
+            continue
+        start_f = max(0, int(raw.get('start_frame', 0) or 0))
+        end_f = max(start_f, int(raw.get('end_frame', 0) or 0))
+        by_name[name].append((start_f, end_f))
+    for name, spans in by_name.items():
+        # One authored layer covering every decoded target frame is equivalent
+        # to ordinary native H3 embedding conditioning and needs no gate.
+        if any(a <= 0 and b >= frame_cursor for a, b in spans):
+            full_names.add(name)
+        else:
+            temporal_names.add(name)
+    if not temporal_names:
+        return None
+
+    active_per_t = []
+    for f0, f1 in token_frame_spans:
+        active = []
+        for name in unique:
+            if name in full_names:
+                continue
+            spans = by_name.get(name) or ()
+            if any(max(f0, a) < min(f1, b) for a, b in spans):
+                active.append(name)
+        active_per_t.append(tuple(active))
+
+    groups = []
+    group_start = 0
+    group_active = active_per_t[0] if active_per_t else tuple()
+    for tidx in range(1, latent_t + 1):
+        current = active_per_t[tidx] if tidx < latent_t else None
+        if current != group_active:
+            if group_active:
+                groups.append({
+                    'q_start': int(video_start + group_start * frame_rows),
+                    'q_stop': int(video_start + tidx * frame_rows),
+                    'active_names': tuple(group_active),
+                    'latent_start': int(group_start),
+                    'latent_stop': int(tidx),
+                })
+            group_start = tidx
+            group_active = current
+
+    return {
+        'row_ranges': row_ranges,
+        'full_names': tuple(name for name in unique if name in full_names),
+        'temporal_names': tuple(name for name in unique if name in temporal_names),
+        'groups': tuple(groups),
+        'text_span': (text_start, text_stop),
+        'video_span': (video_start, video_stop),
+        'latent_t': latent_t,
+        'frame_rows': frame_rows,
+        'decoded_frames': frame_cursor,
+    }
+
+
+def _run_h3_temporal_embedding_attention(attn, x, rope_freqs, transformer_options, state):
+    """Single-pass exact attention routing for Director temporal H3 embeddings.
+
+    Partial embedding KEY rows are masked or unmasked per contiguous query interval.
+    Every query row is evaluated once against the same full K/V, so this keeps one
+    H3 diffusion pass without a dense QxK temporal mask or duplicate full attention;
+    each routing mask is only 1xK.
+    """
+    import comfy.model_management
+    import comfy.quant_ops
+    from comfy.ldm.modules.attention import AttentionTensorContainer, optimized_attention, attention_pytorch
+
+    if x.ndim != 2:
+        raise ValueError(f'Director H3 attention requires packed [S,D] rows, got {tuple(x.shape)}.')
+    seq = int(x.shape[0])
+    specs = tuple(transformer_options.get('latentlab_h3_temporal_embeddings') or ())
+    layout = transformer_options.get('latentlab_h3_packed_layout')
+    route_key = (seq, tuple(getattr(layout, 'signature', ()) or ()),
+                 tuple(getattr(layout, 'segments', ()) or ()),
+                 tuple(tuple(sorted(item.items())) for item in specs),
+                 tuple(transformer_options.get('cond_or_uncond') or ()))
+    if state.get('director_route_key') == route_key:
+        route = state.get('director_route')
+    else:
+        route = _lm_h3_temporal_embedding_route_plan(transformer_options, seq_len=seq)
+        state['director_route_key'], state['director_route'] = route_key, route
+    if route is None:
+        return None
+
+    # Temporal routing needs one shared full Q/K/V because active video query
+    # ranges are replayed against the identical K/V sequence.  If the existing
+    # CK giant-sequence guard says dense QKV is structurally unsafe, fail clearly
+    # instead of silently splitting the MAIN shot or changing its semantics.
+    if _h3_existing_ck_stream_needed(attn, x, transformer_options, state):
+        raise RuntimeError(
+            'Single-pass temporal H3 embeddings require the dense exact Q/K/V path for this sequence, '
+            'but the current target is large enough to require streamed CK attention. Reduce target '
+            'resolution/length or remove temporal embedding layers; LongMedia will not silently split the MAIN shot.'
+        )
+
+    _ensure_h3_existing_workspace(attn, x, transformer_options, state)
+    heads = int(attn.heads)
+    head_dim = int(attn.head_dim)
+    inner = heads * head_dim
+    q, k, v = attn.qkv_proj(x).split(inner, dim=-1)
+    v = v.view(seq, heads, head_dim)
+    if rope_freqs is not None:
+        q = q.view(1, seq, heads, head_dim)
+        k = k.view(1, seq, heads, head_dim)
+        qw = comfy.model_management.cast_to(attn.q_norm.weight, device=x.device)
+        kw = comfy.model_management.cast_to(attn.k_norm.weight, device=x.device)
+        rot = int(rope_freqs.shape[-3]) * 2
+        if comfy.model_management.in_training:
+            q, k = comfy.quant_ops.ck.rms_rope_split_half(
+                q, k, rope_freqs, qw, kw, epsilon=attn.q_norm.eps, rot_dim=rot,
+            )
+        else:
+            comfy.quant_ops.ck.rms_rope_split_half_(
+                q, k, rope_freqs, qw, kw, epsilon=attn.q_norm.eps, rot_dim=rot,
+            )
+        q = q[0]
+        k = k[0]
+    else:
+        q = attn.q_norm(q.view(seq, heads, head_dim))
+        k = attn.k_norm(k.view(seq, heads, head_dim))
+
+    q_hnd = q.transpose(0, 1).unsqueeze(0)
+    k_hnd = k.transpose(0, 1).unsqueeze(0)
+    v_hnd = v.transpose(0, 1).unsqueeze(0)
+    neg = torch.finfo(q_hnd.dtype).min
+
+    base_mask = torch.zeros((1, 1, 1, seq), dtype=q_hnd.dtype, device=q_hnd.device)
+    if route.get('regional'):
+        for a, b, _name in route['key_ranges']:
+            base_mask[..., a:b] = neg
+    else:
+        for name in route['temporal_names']:
+            a, b = route['row_ranges'][name]
+            base_mask[..., a:b] = neg
+
+    def _attend(raw_q, mask):
+        if route.get('regional'):
+            # Use the mask-aware native PyTorch path explicitly. Optional
+            # overrides can accept **kwargs while silently discarding masks.
+            return attention_pytorch(raw_q, k_hnd, v_hnd, heads,
+                                     mask=mask, skip_reshape=True, transformer_options={})
+        # AttentionTensorContainer is intentionally single-owner in ComfyUI.
+        # Create fresh wrappers for every replay while keeping the same immutable
+        # raw Q/K/V tensors alive for the whole block.
+        try:
+            return optimized_attention(
+                AttentionTensorContainer(raw_q),
+                AttentionTensorContainer(k_hnd),
+                AttentionTensorContainer(v_hnd),
+                heads, mask=mask, skip_reshape=True,
+                transformer_options=transformer_options,
+            )
+        except Exception as exc:
+            # Some optional external attention overrides reject masks. PyTorch SDPA
+            # is the correctness fallback and accepts the broadcast 1xK mask.
+            if not state.get('temporal_embedding_mask_fallback_announced'):
+                _lm_print(
+                    '[MiniMaxH3 LongMedia][TEMPORAL H3 EMBEDDING] '
+                    f'active attention backend rejected broadcast mask ({type(exc).__name__}: {exc}); '
+                    'falling back to PyTorch SDPA for this temporal-embedding render',
+                    flush=True,
+                )
+                state['temporal_embedding_mask_fallback_announced'] = True
+            return attention_pytorch(
+                raw_q, k_hnd, v_hnd, heads,
+                mask=mask, skip_reshape=True,
+                transformer_options={},
+            )
+
+    # Partition the QUERY axis so every row is evaluated exactly once.  The
+    # mask is only 1xK and changes when the active embedding stack changes.
+    # This avoids both a dense QxK mask and the 1+N replay cost of rendering a
+    # full baseline attention before correcting active temporal regions.
+    query_intervals = []
+    cursor = 0
+    for group in (() if route.get('regional') else route['groups']):
+        qa, qb = int(group['q_start']), int(group['q_stop'])
+        if cursor < qa:
+            query_intervals.append((cursor, qa, tuple()))
+        query_intervals.append((qa, qb, tuple((str(name), 1.0) for name in group['active_names'])))
+        cursor = qb
+    if cursor < seq:
+        query_intervals.append((cursor, seq, tuple()))
+    if route.get('regional'):
+        if route.get('temporal_controls'):
+            query_intervals = [
+                (int(a), int(b), tuple((str(name), float(weight)) for name, weight in active))
+                for a, b, active in route['query_intervals']
+            ]
+        else:
+            query_intervals = [
+                (int(a), int(b), ((str(name), 1.0),) if name else tuple())
+                for a, b, name in route['query_intervals']
+            ]
+
+    # Route construction is host-only and cheap; fail before launching attention
+    # if a future PackedLayout change would make rows overlap or go uncovered.
+    _route_cursor = 0
+    for qa, qb, _active in query_intervals:
+        if int(qa) != int(_route_cursor) or int(qb) <= int(qa):
+            raise RuntimeError(
+                f'Director temporal query partition is not contiguous: expected={_route_cursor}, got={qa}:{qb}.'
+            )
+        _route_cursor = int(qb)
+    if _route_cursor != seq:
+        raise RuntimeError(
+            f'Director temporal query partition does not cover packed sequence: covered={_route_cursor}, seq={seq}.'
+        )
+
+    flat = x.new_empty((seq, inner))
+    for qa, qb, active_controls in query_intervals:
+        if qb <= qa:
+            continue
+        group_mask = base_mask.clone()
+        active_weights = {str(name): max(0.0, min(1.0, float(weight))) for name, weight in active_controls}
+        if route.get('regional'):
+            for a, b, name in route['key_ranges']:
+                weight = active_weights.get(str(name), 0.0)
+                if weight > 0.0:
+                    # Additive attention-logit bias.  w=1 is the ordinary
+                    # unmasked path; camera handoff weights softly multiply the
+                    # competing control's attention mass without blending model
+                    # outputs or duplicating the denoiser pass.
+                    group_mask[..., a:b] = 0.0 if weight >= 1.0 - 1e-7 else math.log(max(weight, 1e-4))
+        else:
+            for name in active_weights:
+                a, b = route['row_ranges'][name]
+                group_mask[..., a:b] = 0
+        q_slice = q_hnd[:, :, qa:qb, :]
+        group_out = _attend(q_slice, group_mask).squeeze(0)
+        flat[qa:qb].copy_(group_out)
+        del q_slice, group_out, group_mask
+
+    chunk_tokens = int(state.get('existing_out_proj_chunk_tokens', 16384) or 16384)
+    if seq <= chunk_tokens:
+        result = attn.out_proj(flat)
+    else:
+        result = torch.empty_like(x)
+        for start in range(0, seq, chunk_tokens):
+            end = min(seq, start + chunk_tokens)
+            part = attn.out_proj(flat[start:end])
+            result[start:end].copy_(part)
+            del part
+
+    if route.get('regional'):
+        if not state.get('director_regional_attention_announced'):
+            mode = 'factorized temporal controls + camera handoff' if route.get('temporal_controls') else 'legacy regional isolation'
+            _lm_print('[MiniMaxH3 LongMedia][DIRECTOR ATTENTION] single_pass=True; '
+                      f'mode={mode}; backend=PyTorch SDPA; '
+                      'mask=1xK; explicit_context_rows=True', flush=True)
+            state['director_regional_attention_announced'] = True
+        return result
+    if not state.get('temporal_embedding_announced'):
+        _lm_print(
+            '[MiniMaxH3 LongMedia][TEMPORAL H3 EMBEDDING] '
+            f'single_pass=True; text_tail_rows={sum(route["row_ranges"][n][1]-route["row_ranges"][n][0] for n in route["row_ranges"])}; '
+            f'temporal={list(route["temporal_names"])}; global={list(route["full_names"])}; '
+            f'video_groups={[(g["latent_start"], g["latent_stop"], list(g["active_names"])) for g in route["groups"]]}; '
+            'MAIN split=False; attention=exact masked query partition',
+            flush=True,
+        )
+        state['temporal_embedding_announced'] = True
+    return result
+
+
+
+def _h3_existing_calibrate_runtime_budget(
+    attn,
+    x: torch.Tensor,
+    transformer_options: dict,
+    state: dict,
+) -> dict:
+    """Fix EXISTING Kitchen residency once for the current packed shape.
+
+    The previous 0.6.25/0.6.26 policy called the one-shot calibration and then
+    still ran a workspace guard from every H3 block.  With AIMDO prefetch this
+    could synchronize CUDA and partially unload weights after the next block had
+    already been prefetched, turning a nominally fixed budget into block-by-block
+    residency churn.
+
+    For AIMDO/VBAR models the correct abstraction is the VBAR residency contract:
+    choose one prefix cap that leaves the measured exact-Kitchen activation peak
+    plus a guard, set both watermark and watermark_limit to that cap, and let the
+    remaining tail use Comfy's normal asynchronous cast-buffer path.  There is no
+    eager fault and no per-block residency mutation.  On older/non-VBAR dynamic
+    patchers we retain exactly one ``partially_unload`` calibration operation.
+    """
+    seq = max(1, int(x.shape[0]))
+    heads = max(1, int(attn.heads))
+    head_dim = max(1, int(attn.head_dim))
+    backend = _h3_existing_attention_backend_kind(transformer_options)
+    key = (seq, heads, head_dim, str(x.dtype), backend, str(x.device))
+    if state.get('existing_runtime_budget_key') == key:
+        return dict(state.get('existing_runtime_budget_info') or {})
+
+    required, qkv_bytes, backend_extra, backend = _h3_existing_workspace_required_bytes(
+        attn, x, transformer_options, state
+    )
+    snap_before = _cuda_memory_snapshot(x.device) if x.device.type == 'cuda' else {}
+    headroom_before = _h3_existing_allocatable_headroom_bytes(snap_before or {}) if snap_before else 0
+    total = max(0, int((snap_before or {}).get('total', 0) or 0))
+    guard = max(384 * 1024**2, min(768 * 1024**2, int(total * 0.04) if total else 0))
+
+    patcher = (transformer_options or {}).get('latentlab_h3_residency_patcher')
+    vbar = None
+    if patcher is not None:
+        try:
+            vbar_get = getattr(patcher, '_vbar_get', None)
+            vbar = vbar_get(create=False) if callable(vbar_get) else None
+        except Exception:
+            vbar = None
+
+    loaded_before = 0
+    loaded_after = 0
+    watermark_before = 0
+    watermark_after = 0
+    model_span = 0
+    residency_cap = 0
+    residency_mode = 'none'
+    one_shot_release = 0
+    block_equivalent = 0
+    residency_cap_blocks = 0
+    prefetch_reserve = 0
+    async_pipeline = bool(
+        state.get('existing_native_async_pipeline_candidate', False)
+        and (transformer_options or {}).get('prefetch_dynamic_vbars', False)
+    )
+
+    vbar_capable = bool(
+        vbar is not None
+        and hasattr(vbar, 'loaded_size')
+        and hasattr(vbar, 'set_watermark')
+        and hasattr(vbar, 'set_watermark_limit')
+    )
+    if vbar_capable:
+        try:
+            page = 32 * 1024**2
+            loaded_before = max(0, int(vbar.loaded_size()))
+            max_size = max(0, int(getattr(vbar, 'max_size', 0) or 0))
+            used_end = max(0, int(getattr(vbar, 'offset', 0) or 0))
+            model_span = used_end if used_end > 0 else max_size
+            if max_size > 0:
+                model_span = min(model_span, max_size) if model_span > 0 else max_size
+            get_watermark = getattr(vbar, 'get_watermark', None)
+            watermark_before = max(0, int(get_watermark())) if callable(get_watermark) else model_span
+
+            # v0.6.29 steady-state contract. 0.6.28 sized the persistent prefix
+            # from the *cold* block-0 snapshot. During the first forward that prefix
+            # warmed from ~0.6 GiB to its full ~2.1 GiB, so the second denoise step
+            # no longer had the activation budget that calibration had promised.
+            #
+            # For exact Kitchen + native async prefetch on 16 GB-class cards keep
+            # only a small block-equivalent prefix persistent and reserve one full
+            # future block for Comfy's one-ahead cast/prefetch buffer. This makes the
+            # budget invariant after warm-up instead of depending on cold residency.
+            max_blocks = max(1, int(state.get('max_blocks', 50) or 50))
+            if model_span > 0:
+                block_equivalent = ((model_span + max_blocks - 1) // max_blocks + page - 1) // page * page
+            if async_pipeline and block_equivalent > 0:
+                if total and total <= int(18.5 * 1024**3) and seq >= 90000:
+                    residency_cap_blocks = 1
+                elif total and total <= int(18.5 * 1024**3):
+                    residency_cap_blocks = 2
+                else:
+                    residency_cap_blocks = 4
+                prefetch_reserve = max(512 * 1024**2, int(block_equivalent * 1.25))
+                prefetch_reserve = ((prefetch_reserve + page - 1) // page) * page
+            raw_cap = loaded_before + headroom_before - required - guard - prefetch_reserve
+            residency_cap = max(0, min(model_span, int(raw_cap))) if model_span > 0 else max(0, int(raw_cap))
+            if async_pipeline and block_equivalent > 0:
+                residency_cap = min(residency_cap, block_equivalent * max(1, residency_cap_blocks))
+            residency_cap = (residency_cap // page) * page
+
+            # Cap is also the eviction floor for the low-address prefix. Pages above
+            # it remain executable through Comfy's async temporary cast buffers.
+            vbar.set_watermark_limit(0)
+            vbar.set_watermark(residency_cap)
+            vbar.set_watermark_limit(residency_cap)
+            watermark_after = max(0, int(get_watermark())) if callable(get_watermark) else residency_cap
+            loaded_after = max(0, int(vbar.loaded_size()))
+            residency_mode = (
+                'steady_vbar_prefix_native_async_tail'
+                if async_pipeline else 'fixed_vbar_prefix_async_tail'
+            )
+            state['vbar_window_armed'] = True
+            state['vbar_window_target_bytes'] = int(residency_cap)
+            state['vbar_window_owner'] = 'existing_runtime_budget'
+            state['vbar_window_armed_forward'] = int(state.get('vbar_forward_count', 0) or 0)
+        except Exception as exc:
+            vbar_capable = False
+            residency_mode = 'vbar_error_fallback'
+            if not state.get('existing_runtime_budget_vbar_error_announced'):
+                state['existing_runtime_budget_vbar_error_announced'] = True
+                _lm_print(
+                    '[MiniMaxH3 LongMedia][EXISTING AUTO BUDGET] fixed VBAR cap unavailable: '
+                    f'{type(exc).__name__}: {exc}; falling back to one-shot DynamicVRAM release',
+                    flush=True,
+                )
+
+    if not vbar_capable and x.device.type == 'cuda' and headroom_before:
+        # Compatibility path for older/non-AIMDO dynamic patchers.  This is the
+        # ONLY workspace guard call for the packed shape; the attention block
+        # path never calls it again.
+        target_required = required + guard
+        if headroom_before < target_required:
+            before_releases = int(state.get('existing_workspace_release_count', 0) or 0)
+            _ensure_h3_existing_workspace(
+                attn, x, transformer_options, state,
+                extra_reserve_mb=max(0, int((guard + 1024**2 - 1) // 1024**2)),
+            )
+            after_releases = int(state.get('existing_workspace_release_count', 0) or 0)
+            one_shot_release = max(0, after_releases - before_releases)
+            residency_mode = 'one_shot_partial_unload'
+        elif residency_mode == 'none':
+            residency_mode = 'native_headroom_already_safe'
+
+    snap_after = _cuda_memory_snapshot(x.device) if x.device.type == 'cuda' else {}
+    headroom_after = _h3_existing_allocatable_headroom_bytes(snap_after or {}) if snap_after else headroom_before
+    # The guard is a performance/stability margin, not a correctness gate.  If
+    # the exact predicted peak itself fits, keep native Kitchen.
+    steady_required = int(required + prefetch_reserve)
+    exact_safe = bool(
+        x.device.type != 'cuda'
+        or not headroom_after
+        or headroom_after >= steady_required
+    )
+
+    info = {
+        'key': key, 'seq': seq, 'heads': heads, 'head_dim': head_dim,
+        'backend': backend, 'required_bytes': int(required),
+        'qkv_bytes': int(qkv_bytes), 'backend_extra_bytes': int(backend_extra),
+        'headroom_before_bytes': int(headroom_before), 'headroom_bytes': int(headroom_after),
+        'total_bytes': int(total), 'guard_bytes': int(guard),
+        'loaded_before_bytes': int(loaded_before), 'loaded_after_bytes': int(loaded_after),
+        'watermark_before_bytes': int(watermark_before), 'watermark_after_bytes': int(watermark_after),
+        'model_span_bytes': int(model_span), 'residency_cap_bytes': int(residency_cap),
+        'residency_mode': str(residency_mode), 'one_shot_release_count': int(one_shot_release),
+        'block_equivalent_bytes': int(block_equivalent), 'residency_cap_blocks': int(residency_cap_blocks),
+        'prefetch_reserve_bytes': int(prefetch_reserve), 'steady_required_bytes': int(steady_required),
+        'async_prefetch': bool(async_pipeline), 'exact_path_safe': bool(exact_safe),
+        # Kept for old diagnostics; 0.6.28 deliberately never eager-faults.
+        'eager_faulted_bytes': 0, 'target_resident_bytes': int(residency_cap),
+    }
+    state['existing_runtime_budget_key'] = key
+    state['existing_runtime_budget_info'] = dict(info)
+    state['existing_exact_path_safe'] = bool(exact_safe)
+    state['existing_fixed_residency_fastpath'] = bool(
+        exact_safe and residency_mode in (
+            'fixed_vbar_prefix_async_tail', 'steady_vbar_prefix_native_async_tail'
+        )
+    )
+    state['existing_async_prefetch_enabled'] = bool(async_pipeline and exact_safe)
+    if state['existing_async_prefetch_enabled']:
+        # The ordinary geometry governor used to force a synchronize + allocator
+        # trim between attention and FFN on every one of ~50 blocks. With a
+        # steady-state exact-Kitchen budget this is pure serialization; emergency
+        # pressure guards remain authoritative and can re-enable the barrier.
+        state['ultra_stage_barrier_required'] = False
+        state['existing_stage_barrier_bypass'] = True
+    state['existing_dense_workspace_policy'] = True
+    _lm_print(
+        '[MiniMaxH3 LongMedia][EXISTING AUTO BUDGET] '
+        f'tokens={seq}; backend={backend}; QKV={qkv_bytes/1024**3:.2f}GiB; '
+        f'exact_peak={required/1024**3:.2f}GiB; '
+        f'headroom={headroom_before/1024**3:.2f}->{headroom_after/1024**3:.2f}GiB; '
+        f'VBAR={residency_mode}; cap={residency_cap/1024**3:.2f}GiB; '
+        f'block_eq={block_equivalent/1024**2:.0f}MiB cap_blocks={residency_cap_blocks}; '
+        f'prefetch_reserve={prefetch_reserve/1024**2:.0f}MiB; '
+        f'model_resident={loaded_before/1024**3:.2f}->{loaded_after/1024**3:.2f}GiB; '
+        f'exact_safe={exact_safe}; async_prefetch={async_pipeline}; fixed_for_shape=True; '
+        'eager_fault=OFF; per_block_unload=OFF; stage_barrier=PRESSURE_ONLY',
+        flush=True,
+    )
+    return info
+
+
+def _h3_existing_release_fixed_residency_floor(transformer_options: dict, state: dict) -> None:
+    """Release the fixed Existing VBAR floor after a real unexpected OOM."""
+    current_key = state.get('existing_runtime_budget_key')
+    if state.get('existing_vbar_floor_released_after_oom_key') == current_key:
+        return
+    patcher = (transformer_options or {}).get('latentlab_h3_residency_patcher')
+    if patcher is None:
+        return
+    try:
+        vbar_get = getattr(patcher, '_vbar_get', None)
+        vbar = vbar_get(create=False) if callable(vbar_get) else None
+        if vbar is None or not hasattr(vbar, 'set_watermark_limit'):
+            return
+        vbar.set_watermark_limit(0)
+        state['existing_vbar_floor_released_after_oom'] = True
+        state['existing_vbar_floor_released_after_oom_key'] = current_key
+        state['vbar_window_owner'] = 'released_after_exact_oom'
+        _lm_print(
+            '[MiniMaxH3 LongMedia][EXISTING OOM] released fixed VBAR residency floor; '
+            'bounded fallback may reclaim additional model pages',
+            flush=True,
+        )
+    except Exception:
+        pass
+
+def _h3_existing_fused_qkv_structurally_unsafe(
+    attn,
+    x: torch.Tensor,
+    transformer_options: dict,
+    state: dict,
+) -> tuple[bool, dict]:
+    """Return the calibrated, shape-stable exact-Kitchen decision.
+
+    Once `_h3_existing_calibrate_runtime_budget` fixes residency for a packed
+    geometry, later H3 blocks MUST NOT reinterpret temporary prefetch/pin state
+    as a new budget.  Doing so was the 0.6.26 performance regression.
+    """
+    seq = max(1, int(x.shape[0]))
+    heads = max(1, int(attn.heads))
+    head_dim = max(1, int(attn.head_dim))
+    inner = heads * head_dim
+    elem = max(1, int(x.element_size()))
+    one = seq * inner * elem
+    qkv = 3 * one
+
+    calibrated = dict(state.get('existing_runtime_budget_info') or {})
+    required, _qkv, backend_extra, backend = _h3_existing_workspace_required_bytes(
+        attn, x, transformer_options, state
+    )
+    if calibrated.get('key') == state.get('existing_runtime_budget_key'):
+        headroom = max(0, int(calibrated.get('headroom_bytes', 0) or 0))
+        total = max(0, int(calibrated.get('total_bytes', 0) or 0))
+        exact_safe = bool(calibrated.get('exact_path_safe', True))
+    else:
+        # Defensive compatibility only. Normal callers calibrate immediately
+        # before this function.
+        snap = _cuda_memory_snapshot(x.device) if x.device.type == 'cuda' else {}
+        total = max(0, int((snap or {}).get('total', 0) or 0))
+        headroom = _h3_existing_allocatable_headroom_bytes(snap or {}) if snap else 0
+        exact_safe = bool(not headroom or headroom >= required)
+
+    current_key = state.get('existing_runtime_budget_key')
+    forced = bool(
+        state.get('existing_force_bounded_dense_after_oom', False)
+        and state.get('existing_force_bounded_dense_key') == current_key
+    )
+    unsafe = bool(forced or (seq >= 32768 and not exact_safe))
+    info = {
+        'seq': seq, 'heads': heads, 'head_dim': head_dim,
+        'one_bytes': int(one), 'qkv_bytes': int(qkv),
+        'required_bytes': int(required), 'backend_extra_bytes': int(backend_extra),
+        'total_bytes': int(total), 'headroom_bytes': int(headroom),
+        'backend': backend, 'over_current': bool(not exact_safe),
+        'calibrated': bool(calibrated), 'forced_after_oom': forced,
+    }
+    state['existing_fused_qkv_last_mb'] = round(qkv / (1024.0**2), 1)
+    state['existing_fused_qkv_last_required_mb'] = round(required / (1024.0**2), 1)
+    state['existing_fused_qkv_last_headroom_mb'] = round(headroom / (1024.0**2), 1)
+    state['existing_fused_qkv_structurally_unsafe'] = bool(unsafe)
+    return unsafe, info
+
+def _h3_existing_auto_bounded_chunk_tokens(attn, x: torch.Tensor, state: dict) -> int:
+    """Choose one bounded-QKV chunk from the current physical memory budget.
+
+    The value is selected once per packed shape and then held.  There is no
+    4096->2048->1024 staircase.  Full compressed K/V and the block result are
+    reserved first; only the remaining budget is spent on the projection chunk.
+    """
+    seq = max(1, int(x.shape[0]))
+    heads = max(1, int(attn.heads))
+    head_dim = max(1, int(attn.head_dim))
+    inner = heads * head_dim
+    elem = max(1, int(x.element_size()))
+    key = (seq, heads, head_dim, str(x.dtype), str(x.device))
+    if state.get('existing_auto_chunk_key') == key:
+        return max(128, int(state.get('existing_auto_chunk_tokens', 4096) or 4096))
+    snap = _cuda_memory_snapshot(x.device) if x.device.type == 'cuda' else {}
+    headroom = _h3_existing_allocatable_headroom_bytes(snap or {}) if snap else 0
+    total = max(0, int((snap or {}).get('total', 0) or 0))
+    one_full = seq * inner * elem
+    # Approximate persistent streamed carrier: K/V INT8 + result + summaries/scales.
+    persistent = int(one_full * 2.20)
+    guard = max(512 * 1024**2, int(total * 0.04) if total else 512 * 1024**2)
+    usable = max(128 * 1024**2, int(headroom - persistent - guard)) if headroom else 512 * 1024**2
+    # One projection chunk plus normalized Q/K scratch and output staging.
+    per_row_peak = max(1, int(inner * elem * 4.5))
+    raw = max(128, int((usable * 0.72) // per_row_peak))
+    cap = 16384 if (not total or total <= int(20 * 1024**3)) else 32768
+    chosen = min(seq, cap, raw)
+    chosen = max(128, (chosen // 128) * 128)
+    state['existing_auto_chunk_key'] = key
+    state['existing_auto_chunk_tokens'] = int(chosen)
+    state['existing_auto_chunk_headroom_mb'] = round(headroom / 1024**2, 1)
+    state['existing_auto_chunk_persistent_mb'] = round(persistent / 1024**2, 1)
+    _lm_print(
+        '[MiniMaxH3 LongMedia][EXISTING AUTO CHUNK] '
+        f'tokens={seq}; headroom={headroom/1024**3:.2f}GiB; '
+        f'persistent_est={persistent/1024**3:.2f}GiB; qkv_chunk={chosen}; '
+        'selected_once=True; retry_staircase=False',
+        flush=True,
+    )
+    return int(chosen)
+
+
+def _run_h3_existing_bounded_dense_attention(
+    attn,
+    x: torch.Tensor,
+    rope_freqs,
+    transformer_options: dict,
+    state: dict,
+):
+    """OOM-proof dense fallback for EXISTING on very long H3 sequences.
+
+    It reuses LongMedia's streamed QKV + compressed K/V carrier but forces all
+    routing blocks to token-level evaluation.  Therefore no SOL sparsification
+    or tau-based block approximation is active.  Q stays BF16; K/V are stored
+    as INT8+scale, comparable in intent to the selected Comfy Kitchen INT8
+    backend, while avoiding the monolithic ``[S, 3*inner]`` projection output.
+
+    The function is intentionally used only when stock fused EXISTING is
+    structurally impossible on the current 16-GB-class geometry.
+    """
+    original_chunk = int(state.get('sol_qkv_chunk_tokens', 0) or 0)
+    original_out = int(state.get('sol_out_proj_chunk_tokens', 0) or 0)
+    selected = _h3_existing_auto_bounded_chunk_tokens(attn, x, state)
+    # The budget is computed before CUDA work.  Keep one emergency recalibration
+    # only; never walk a 4096->2048->1024 staircase through several dead minutes.
+    schedule = [int(selected)]
+    emergency = max(128, ((int(selected) // 2) // 128) * 128)
+    if emergency < selected:
+        schedule.append(emergency)
+
+    last_exc = None
+    state['existing_bounded_dense_calls'] = int(state.get('existing_bounded_dense_calls', 0) or 0) + 1
+    for attempt, chunk in enumerate(schedule, start=1):
+        try:
+            state['sol_qkv_chunk_tokens'] = int(chunk)
+            if original_out > 0:
+                state['sol_out_proj_chunk_tokens'] = min(original_out, max(4096, chunk * 3))
+            result, _ = _execute_h3_sol_attention(
+                attn, x, rope_freqs, transformer_options, state,
+                tau=0.0, measure=None, force_dense=True,
+            )
+            state['existing_bounded_dense_chunk_tokens'] = int(chunk)
+            state['existing_auto_chunk_tokens'] = int(chunk)
+            if not state.get('existing_bounded_dense_announced'):
+                _lm_print(
+                    '[MiniMaxH3 LongMedia][EXISTING BOUNDED DENSE] '
+                    'stock fused Kitchen QKV is structurally too large for this GPU; '
+                    f'using streamed QKV chunk={chunk}, K/V=INT8+scale, '
+                    'all KV blocks forced token-level (SOL pruning=off, tau routing=off)',
+                    flush=True,
+                )
+                state['existing_bounded_dense_announced'] = True
+            return result
+        except Exception as exc:
+            last_exc = exc
+            if not _sol_exception_is_oom(exc):
+                raise
+            state['existing_bounded_dense_oom_retries'] = int(
+                state.get('existing_bounded_dense_oom_retries', 0) or 0
+            ) + 1
+            try:
+                import comfy.model_management as _mm
+                _mm.soft_empty_cache()
+            except Exception:
+                try:
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
+            _lm_print(
+                '[MiniMaxH3 LongMedia][EXISTING BOUNDED DENSE] '
+                f'OOM with calibrated qkv_chunk={chunk}; one emergency half-size retry',
+                flush=True,
+            )
+    state['sol_qkv_chunk_tokens'] = int(original_chunk)
+    state['sol_out_proj_chunk_tokens'] = int(original_out)
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError('bounded dense EXISTING fallback exhausted without an exception')
+
+
+def _run_h3_existing_attention_lowmem(attn, x, rope_freqs, transformer_options, state):
+    """Exact, no-V-clone H3 EXISTING path with one-shot residency budgeting.
+
+    Full Comfy Kitchen remains the fast path whenever its fused QKV peak fits.
+    Residency is calibrated once per packed geometry; no CUDA synchronization or
+    DynamicVRAM unload is performed from individual transformer blocks.
     """
     import comfy.model_management
     import comfy.quant_ops
@@ -6710,22 +9012,49 @@ def _run_h3_existing_attention_lowmem(attn, x, rope_freqs, transformer_options, 
     head_dim = int(attn.head_dim)
     inner = heads * head_dim
 
-    if _h3_existing_ck_stream_needed(attn, x, transformer_options, state):
-        return _run_h3_existing_ck_streamed_attention(
+    _budget = _h3_existing_calibrate_runtime_budget(attn, x, transformer_options, state)
+    _structural_unsafe, _structural = _h3_existing_fused_qkv_structurally_unsafe(
+        attn, x, transformer_options, state
+    )
+    if _structural_unsafe:
+        state['existing_fused_qkv_preflight_bypass_count'] = int(
+            state.get('existing_fused_qkv_preflight_bypass_count', 0) or 0
+        ) + 1
+        if not state.get('existing_fused_qkv_preflight_announced'):
+            _lm_print(
+                '[MiniMaxH3 LongMedia][EXISTING QKV PREFLIGHT] '
+                f'tokens={_structural["seq"]}; fused_qkv={_structural["qkv_bytes"]/1024**3:.2f}GiB; '
+                f'exact_peak={_structural["required_bytes"]/1024**3:.2f}GiB; '
+                f'calibrated_headroom={_structural["headroom_bytes"]/1024**3:.2f}GiB; '
+                f'device={_structural["total_bytes"]/1024**3:.2f}GiB; '
+                'bounded dense selected BEFORE fused qkv_proj',
+                flush=True,
+            )
+            state['existing_fused_qkv_preflight_announced'] = True
+        return _run_h3_existing_bounded_dense_attention(
             attn, x, rope_freqs, transformer_options, state
         )
 
-    # Dense EXISTING attention has a large fused-QKV transient.  Preserve the
-    # selected backend/math, but make DynamicVRAM residency yield before the
-    # allocation instead of discovering the conflict through CUDA OOM.
-    _retry_extra_mb = max(0, int(state.pop('existing_workspace_retry_extra_mb', 0) or 0))
-    _ensure_h3_existing_workspace(
-        attn, x, transformer_options, state, extra_reserve_mb=_retry_extra_mb
-    )
+    state['existing_ck_pseudostream_disabled'] = True
+    state['existing_workspace_secured'] = bool(_budget.get('exact_path_safe', True))
+    if not state.get('existing_ck_pseudostream_disabled_announced'):
+        _lm_print(
+            '[MiniMaxH3 LongMedia][EXISTING CK FASTPATH] full fused QKV + native Comfy Kitchen; '
+            'legacy pseudo-stream=OFF; per-block workspace guard=OFF; no-V-clone=ON',
+            flush=True,
+        )
+        state['existing_ck_pseudostream_disabled_announced'] = True
 
-    # Keep stock projection semantics. q/k/v remain views of the one qkv buffer.
-    q, k, v = attn.qkv_proj(x).split(inner, dim=-1)
+    state['existing_lowmem_phase'] = 'qkv_proj'
+    try:
+        q, k, v = attn.qkv_proj(x).split(inner, dim=-1)
+    except torch.cuda.OutOfMemoryError:
+        state['existing_exact_qkv_oom_count'] = int(
+            state.get('existing_exact_qkv_oom_count', 0) or 0
+        ) + 1
+        raise
     v = v.view(seq, heads, head_dim)
+    state['existing_lowmem_phase'] = 'qk_norm_rope'
 
     if rope_freqs is not None:
         q = q.view(1, seq, heads, head_dim)
@@ -6749,24 +9078,49 @@ def _run_h3_existing_attention_lowmem(attn, x, rope_freqs, transformer_options, 
         q = attn.q_norm(q.view(seq, heads, head_dim))
         k = attn.k_norm(k.view(seq, heads, head_dim))
 
-    # IMPORTANT: deliberately no `v = v.clone()` here.
+    # The current ComfyUI AttentionTensorContainer is single-owner: the selected
+    # backend consumes q/k/v via take(), so the large fused-QKV backing storage is
+    # releasable as soon as optimized_attention returns. Deliberately no v.clone().
     q = AttentionTensorContainer(q.transpose(0, 1).unsqueeze(0))
     k = AttentionTensorContainer(k.transpose(0, 1).unsqueeze(0))
     v = AttentionTensorContainer(v.transpose(0, 1).unsqueeze(0))
-
+    state['existing_lowmem_phase'] = 'optimized_attention'
     out = optimized_attention(
         q, k, v, heads,
         mask=None,
         skip_reshape=True,
         transformer_options=transformer_options,
     )
+    del q, k, v
 
-    # Chunk only the point-wise output projection for long sequences.
+    # Exact Kitchen already survived a much larger concurrent QKV+INT8 peak.
+    # Restore stock one-GEMM out_proj throughput instead of paying 5 Python/GEMM
+    # launches for a 66k-token sequence.  If a backend-specific GEMM workspace
+    # still OOMs, retry ONLY the point-wise projection in chunks; attention is not
+    # recomputed.
     flat = out.squeeze(0)
-    chunk_tokens = int(state.get('existing_out_proj_chunk_tokens', 16384) or 16384)
-    if seq <= chunk_tokens:
+    state['existing_lowmem_phase'] = 'out_proj'
+    try:
         result = attn.out_proj(flat)
-    else:
+        state['existing_out_proj_monolithic_calls'] = int(
+            state.get('existing_out_proj_monolithic_calls', 0) or 0
+        ) + 1
+        if not state.get('existing_out_proj_monolithic_announced'):
+            state['existing_out_proj_monolithic_announced'] = True
+            _lm_print(
+                '[MiniMaxH3 LongMedia][EXISTING OUT_PROJ] monolithic GEMM restored on exact Kitchen fastpath',
+                flush=True,
+            )
+    except torch.cuda.OutOfMemoryError:
+        state['existing_out_proj_chunk_fallbacks'] = int(
+            state.get('existing_out_proj_chunk_fallbacks', 0) or 0
+        ) + 1
+        try:
+            import comfy.model_management as _mm
+            _mm.soft_empty_cache()
+        except Exception:
+            pass
+        chunk_tokens = max(1024, int(state.get('existing_out_proj_chunk_tokens', 16384) or 16384))
         result = torch.empty_like(x)
         for start in range(0, seq, chunk_tokens):
             end = min(seq, start + chunk_tokens)
@@ -6774,16 +9128,14 @@ def _run_h3_existing_attention_lowmem(attn, x, rope_freqs, transformer_options, 
             result[start:end].copy_(part)
             del part
         if not state.get('existing_lowmem_outproj_announced'):
+            state['existing_lowmem_outproj_announced'] = True
             _lm_print(
-                '[MiniMaxH3 LongMedia][EXISTING LOWMEM] '
-                f'out_proj {seq} tokens -> {(seq + chunk_tokens - 1)//chunk_tokens} '
-                f'chunks <= {chunk_tokens}; attention backend unchanged',
+                '[MiniMaxH3 LongMedia][EXISTING OUT_PROJ] monolithic workspace OOM; '
+                f'projection-only chunk fallback={chunk_tokens}; attention was NOT recomputed',
                 flush=True,
             )
-            state['existing_lowmem_outproj_announced'] = True
-
+    state['existing_lowmem_phase'] = 'done'
     return result
-
 
 def _should_use_h3_existing_lowmem(state, token_count):
     """Use the restored pre-clone path only where the clone is materially costly."""
@@ -6958,6 +9310,133 @@ class _H3MLPChunkPatch:
     @staticmethod
     def _mod_gate(x, gate, other, segments):
         return _H3BlockMemoryTracePatch._mod_gate(x, gate, other, segments)
+
+    @staticmethod
+    def _mod_row_selection(row, seg_a, seg_b, lo, hi, total_tokens, device):
+        if torch.is_tensor(row):
+            flat = row.reshape(-1)
+            if int(flat.numel()) == 1:
+                return int(flat[0].item()), None, 0
+            seg_len = int(seg_b) - int(seg_a)
+            if int(flat.numel()) == seg_len:
+                return None, flat.to(device=device, dtype=torch.long), int(lo) - int(seg_a)
+            if int(flat.numel()) == int(total_tokens):
+                return None, flat.to(device=device, dtype=torch.long), int(lo)
+            raise RuntimeError(
+                '[SOL-H3 NORM FUSION] unsupported modulation-row layout: '
+                f'row_numel={int(flat.numel())}, segment={int(seg_a)}:{int(seg_b)}, total={int(total_tokens)}'
+            )
+        return int(row), None, 0
+
+    def _sol_h3_norm_modulate(self, norm, x, shift, scale, segments, *, global_start=0, total_tokens=None):
+        """Fuse RMSNorm + AdaLN scale/shift on SM120 when the Sol-H3 gate passes.
+
+        This fusion is deliberately narrower than NVIDIA's resident B300 block
+        fusion: LongMedia retires the full attention output before entering the
+        chunked FFN to protect 16-GB cards, so fusing the preceding gated
+        residual would extend a multi-GiB activation lifetime.  The remaining
+        lossless norm+modulate fusion fits our memory contract.
+        """
+        state = self.state
+        if not bool(state.get('sol_h3_profile', False)):
+            return None
+        if comfy.model_management.in_training or not torch.cuda.is_available():
+            return None
+        try:
+            if x.device.type != 'cuda' or torch.cuda.get_device_capability(x.device) != (12, 0):
+                return None
+            if x.dtype not in (torch.float16, torch.bfloat16):
+                return None
+        except Exception:
+            return None
+
+        status = str(state.get('sol_h3_norm_fusion_status', 'unknown'))
+        if status == 'disabled':
+            return None
+        try:
+            from .sol_kernel.fusions_sm120 import fused_rmsnorm_modulate_segment
+            weight = comfy.model_management.cast_to(norm.weight, device=x.device)
+            total_tokens = int(total_tokens if total_tokens is not None else x.shape[0])
+
+            def fused_into(src, out, base):
+                stop = int(base) + int(src.shape[0])
+                covered = 0
+                for a, b, row in segments:
+                    lo = max(int(base), int(a))
+                    hi = min(stop, int(b))
+                    if lo >= hi:
+                        continue
+                    local_lo = lo - int(base)
+                    local_hi = hi - int(base)
+                    scalar_row, row_ids, row_offset = self._mod_row_selection(
+                        row, a, b, lo, hi, total_tokens, src.device
+                    )
+                    fused_rmsnorm_modulate_segment(
+                        src[local_lo:local_hi], weight, shift, scale, eps=float(norm.eps),
+                        scalar_row=scalar_row, row_ids=row_ids, row_offset=row_offset,
+                        out=out[local_lo:local_hi],
+                    )
+                    covered += local_hi - local_lo
+                if covered != int(src.shape[0]):
+                    raise RuntimeError(
+                        f'[SOL-H3 NORM FUSION] segments cover {covered}/{int(src.shape[0])} rows'
+                    )
+                return out
+
+            # First call: tiny numerical gate on real H3 width/layout.  No full
+            # duplicate activation is materialized.
+            if status == 'unknown':
+                probe_n = min(4, int(x.shape[0]))
+                probe = x[:probe_n].detach().clone()
+                reference = norm(probe.clone())
+                for a, b, row in segments:
+                    lo = max(int(global_start), int(a))
+                    hi = min(int(global_start) + probe_n, int(b))
+                    if lo >= hi:
+                        continue
+                    l0, l1 = lo - int(global_start), hi - int(global_start)
+                    scalar_row, row_ids, row_offset = self._mod_row_selection(
+                        row, a, b, lo, hi, total_tokens, probe.device
+                    )
+                    if scalar_row is not None:
+                        _shift = shift[scalar_row].to(reference.dtype)
+                        _scale = scale[scalar_row].to(reference.dtype)
+                    else:
+                        _ids = row_ids[row_offset:row_offset + (l1 - l0)]
+                        _shift = shift.index_select(0, _ids).to(reference.dtype)
+                        _scale = scale.index_select(0, _ids).to(reference.dtype)
+                    reference[l0:l1].mul_(1.0 + _scale).add_(_shift)
+                actual = torch.empty_like(probe)
+                fused_into(probe, actual, int(global_start))
+                atol = 5e-3 if x.dtype == torch.bfloat16 else 2e-3
+                rtol = 5e-3 if x.dtype == torch.bfloat16 else 2e-3
+                if not torch.allclose(reference, actual, atol=atol, rtol=rtol):
+                    delta = float((reference.float() - actual.float()).abs().max().item())
+                    state['sol_h3_norm_fusion_status'] = 'disabled'
+                    state['sol_h3_norm_fusion_reason'] = f'parity gate failed max_abs={delta:.6g}'
+                    _lm_print(
+                        '[MiniMaxH3 LongMedia][SOL-H3 FUSION] RMSNorm+AdaLN disabled: '
+                        + state['sol_h3_norm_fusion_reason'], flush=True
+                    )
+                    return None
+                state['sol_h3_norm_fusion_status'] = 'enabled'
+                _lm_print(
+                    '[MiniMaxH3 LongMedia][SOL-H3 FUSION] RMSNorm+AdaLN SM120 parity gate PASS; '
+                    'lossless fused path enabled', flush=True
+                )
+
+            out = torch.empty_like(x)
+            return fused_into(x, out, int(global_start))
+        except Exception as exc:
+            state['sol_h3_norm_fusion_status'] = 'disabled'
+            state['sol_h3_norm_fusion_reason'] = f'{type(exc).__name__}: {exc}'
+            if not state.get('sol_h3_norm_fusion_error_announced'):
+                _lm_print(
+                    '[MiniMaxH3 LongMedia][SOL-H3 FUSION] safe fallback to stock norm+modulate: '
+                    + state['sol_h3_norm_fusion_reason'], flush=True
+                )
+                state['sol_h3_norm_fusion_error_announced'] = True
+            return None
 
     def _inter_block_pressure_guard(self):
         """TEST FIXED: effective-headroom inter-block guard.
@@ -7242,14 +9721,21 @@ class _H3MLPChunkPatch:
 
         # V4: driver-free VRAM before demand loading is not enough evidence for a
         # FAST zone on a huge sequence. Cap the performance rung by geometry.
+        _exact_existing_pipeline = bool(
+            state.get('existing_fixed_residency_fastpath', False)
+            and state.get('existing_async_prefetch_enabled', False)
+            and state.get('existing_exact_path_safe', False)
+        )
         if total_mb <= 18.5 * 1024.0 and tokens >= 120000:
             target_idx = min(target_idx, 1)
             zone = 'CAUTION_GEOMETRY'
-            barrier = True
+            barrier = not (_exact_existing_pipeline and free_mb > soft_floor)
         elif total_mb <= 18.5 * 1024.0 and tokens >= 90000:
             target_idx = min(target_idx, 2)
             zone = 'BALANCED_GEOMETRY'
-            barrier = True
+            barrier = not (_exact_existing_pipeline and free_mb > soft_floor)
+        if _exact_existing_pipeline and not barrier and zone.endswith('_GEOMETRY'):
+            zone = 'PIPELINED_EXISTING_GEOMETRY'
 
         ci = 0
         for i, v in enumerate(ladder):
@@ -7469,17 +9955,21 @@ class _H3MLPChunkPatch:
             # This halves MLP chunk-loop count (125 -> ~63 at 127k tokens) while
             # preserving the same stock quantized math. HARD_SAFE/CAUTION can
             # still demote later if actual pressure appears.
-            if (
+            # Throughput promotions must win before the giant-sequence *minimum*
+            # floor. 0.6.28 checked the 2K floor first, so a 116K-token forward
+            # with >10 GB recoverable headroom could never reach the intended 8K
+            # chunk and paid ~29 MLP loop launches per block instead of ~15.
+            if recoverable_mb >= 8192.0 or headroom_ratio >= 0.50:
+                _target_mlp = max(_target_mlp, 8192)
+            elif recoverable_mb >= 5632.0 or headroom_ratio >= 0.34:
+                _target_mlp = max(_target_mlp, 6144)
+            elif (
                 90000 <= int(token_count) < 150000
                 and recoverable_mb >= 1800.0
                 and headroom_ratio >= 0.10
             ):
                 _target_mlp = max(_target_mlp, 2048)
                 _giant_floor_applied = True
-            elif recoverable_mb >= 8192.0 or headroom_ratio >= 0.50:
-                _target_mlp = max(_target_mlp, 8192)
-            elif recoverable_mb >= 5632.0 or headroom_ratio >= 0.34:
-                _target_mlp = max(_target_mlp, 6144)
 
             state['chunk_tokens'] = _target_mlp
             state['resident_int8_exact_mlp_floor'] = int(_target_mlp)
@@ -7523,16 +10013,26 @@ class _H3MLPChunkPatch:
                 and not bool(state.get('external_sla_direct_fastpath', False))
             )
             if _dense_existing_contract:
-                # v0.5.29: EXISTING has a fundamentally different workspace
-                # contract from bounded SOL.  Keep the user's SAFE reclamation
-                # policy alive; the pre-QKV workspace guard additionally sheds
-                # *active* DynamicVRAM residency when a dense allocation needs it.
-                state['inter_block_vram_guard_mb'] = before['guard']
-                state['inter_block_guard_cooldown_blocks'] = before['cooldown']
-                state['late_block_guard_start'] = before['late_start']
-                state['late_block_guard_target_mb'] = before['late_target']
-                state['step_boundary_cleanup_mb'] = before['step_cleanup']
-                state['existing_dense_workspace_policy'] = True
+                if bool(state.get('existing_fixed_residency_fastpath', False)):
+                    # 0.6.28: packed-shape VBAR cap already reserves the exact
+                    # Kitchen activation peak. Preserve PyTorch's QKV/GEMM cache
+                    # instead of soft_empty_cache() at block/late/step boundaries;
+                    # those trims were forcing allocator re-growth and could also
+                    # perturb the native one-ahead weight pipeline. Emergency INT8
+                    # and allocator-pressure guards remain active independently.
+                    state['inter_block_vram_guard_mb'] = 0
+                    state['late_block_guard_target_mb'] = 0
+                    state['step_boundary_cleanup_mb'] = 0
+                    state['existing_dense_workspace_policy'] = True
+                    state['existing_allocator_cache_preserved'] = True
+                else:
+                    # Compatibility path for non-VBAR DynamicVRAM runtimes.
+                    state['inter_block_vram_guard_mb'] = before['guard']
+                    state['inter_block_guard_cooldown_blocks'] = before['cooldown']
+                    state['late_block_guard_start'] = before['late_start']
+                    state['late_block_guard_target_mb'] = before['late_target']
+                    state['step_boundary_cleanup_mb'] = before['step_cleanup']
+                    state['existing_dense_workspace_policy'] = True
             else:
                 # Native QuantizedTensor residency is valuable on bounded SOL,
                 # where QKV workspace is streamed/chunked and cannot demand a
@@ -8173,20 +10673,29 @@ class _H3MLPChunkPatch:
         try:
             for start in range(0, token_count, chunk_tokens):
                 end = min(token_count, start + chunk_tokens)
-                # norm2 produces only a chunk-sized temporary.
-                h_chunk = block.norm2(x[start:end])
+                # norm2 produces only a chunk-sized temporary. Sol-H3 can
+                # fuse RMSNorm + AdaLN modulation while preserving the existing
+                # streamed MLP lifetime schedule.
+                h_chunk = self._sol_h3_norm_modulate(
+                    block.norm2, x[start:end], shift, scale, segments,
+                    global_start=start, total_tokens=token_count,
+                )
+                if h_chunk is not None:
+                    state['sol_h3_norm2_fused_calls'] = int(state.get('sol_h3_norm2_fused_calls', 0) or 0) + 1
+                else:
+                    h_chunk = block.norm2(x[start:end])
 
-                # Apply the same packed-segment AdaLN modulation as the stock full
-                # path, but only to intersections inside this chunk.
-                for a, b, row in segments:
-                    lo = max(start, int(a))
-                    hi = min(end, int(b))
-                    if lo >= hi:
-                        continue
-                    local_lo = lo - start
-                    local_hi = hi - start
-                    shift_row, scale_row, _gate_row = _segment_mod_params(row, a, b, lo, hi)
-                    h_chunk[local_lo:local_hi].mul_(1.0 + scale_row).add_(shift_row)
+                    # Apply the same packed-segment AdaLN modulation as the stock full
+                    # path, but only to intersections inside this chunk.
+                    for a, b, row in segments:
+                        lo = max(start, int(a))
+                        hi = min(end, int(b))
+                        if lo >= hi:
+                            continue
+                        local_lo = lo - start
+                        local_hi = hi - start
+                        shift_row, scale_row, _gate_row = _segment_mod_params(row, a, b, lo, hi)
+                        h_chunk[local_lo:local_hi].mul_(1.0 + scale_row).add_(shift_row)
 
                 if _v19_active:
                     for _offset in _v19_offsets:
@@ -8482,7 +10991,23 @@ class _H3MLPChunkPatch:
         _requested_mode = str(
             state.get('requested_attention_mode', state.get('sol_mode', 'existing'))
         )
-        if _requested_mode == 'auto':
+        if _requested_mode == 'sol_h3':
+            # NVIDIA's validated 1-GPU Sol-H3 profile is dense/exact.  Current
+            # Comfy H3 already provides fused Kitchen QK/RoPE and SwiGLU, and it
+            # was measurably faster than forcing sparse Sol on the user's RTX
+            # 5080.  Keep exact Kitchen primary; bounded SM120 Sol remains an
+            # emergency route only when exact low-memory execution cannot fit.
+            state['sol_mode'] = 'existing'
+            state['auto_attention_selected_mode'] = 'existing'
+            state['auto_attention_reason'] = 'Sol-H3 1-GPU profile: exact Comfy Kitchen primary'
+            if not state.get('sol_h3_attention_announced'):
+                _lm_print(
+                    '[MiniMaxH3 LongMedia][SOL-H3 1GPU] attention=EXACT Comfy Kitchen primary; '
+                    'AdaLN trajectory cache + existing H3 fusions active; embedded SM120 Sol=tau1.0 OOM fallback only',
+                    flush=True,
+                )
+                state['sol_h3_attention_announced'] = True
+        elif _requested_mode == 'auto':
             state['current_hidden_dim'] = int(_preblock_img.shape[-1])
             state['current_element_size'] = int(_preblock_img.element_size())
             _effective_mode, _auto_reason = _auto_select_h3_attention_mode(
@@ -8501,7 +11026,7 @@ class _H3MLPChunkPatch:
                     flush=True,
                 )
                 state['auto_attention_announced'] = True
-        else:
+        elif _requested_mode != 'sol_h3':
             state['sol_mode'] = _requested_mode
 
         # v0.4.35: explicit `existing` receives the same allocator-aware hard
@@ -8540,7 +11065,7 @@ class _H3MLPChunkPatch:
                 _est_b = _one_b = _free_b = _usable_b = 0
             if _unsafe:
                 _explicit_existing = (
-                    str(state.get('requested_attention_mode', '')).lower() == 'existing'
+                    str(state.get('requested_attention_mode', '')).lower() in ('existing', 'sol_h3')
                 )
                 if _explicit_existing and _should_use_h3_existing_lowmem(state, _preblock_tokens):
                     # v0.4.80: honor the user's explicit EXISTING backend.
@@ -8657,10 +11182,17 @@ class _H3MLPChunkPatch:
                 _v19_norm1_reference = torch.cat(_v19_norm1_parts, dim=0)
                 del _v19_norm1_parts
 
-            h = measure(
-                'norm1_mod',
-                lambda: self._mod_scale_shift(block.norm1(x), shift_msa, scale_msa, mod_segments),
-            )
+            def _norm1_mod_exec():
+                _fused = self._sol_h3_norm_modulate(
+                    block.norm1, x, shift_msa, scale_msa, mod_segments,
+                    global_start=0, total_tokens=_preblock_tokens,
+                )
+                if _fused is not None:
+                    state['sol_h3_norm1_fused_calls'] = int(state.get('sol_h3_norm1_fused_calls', 0) or 0) + 1
+                    return _fused
+                return self._mod_scale_shift(block.norm1(x), shift_msa, scale_msa, mod_segments)
+
+            h = measure('norm1_mod', _norm1_mod_exec)
             if _v19_block_active:
                 _v19_report(
                     state, 'NORM1-ADALN', _v19_norm1_reference,
@@ -8679,7 +11211,22 @@ class _H3MLPChunkPatch:
                     pass
                 _v30_attn_t0 = time.perf_counter()
             sol_mode = state.get('sol_mode', 'existing')
-            if bool(state.get('fasth3_vsa_active', False)) or bool(state.get('fastvideo_vsa_active', False)):
+            _temporal_embedding_attn = None
+            if transformer_options.get('latentlab_h3_temporal_embeddings'):
+                _temporal_embedding_attn = _run_h3_temporal_embedding_attention(
+                    block.attn, h, rope_freqs, transformer_options, state
+                )
+                if _temporal_embedding_attn is not None and sol_mode != 'existing' and not state.get('temporal_embedding_exact_override_announced'):
+                    _lm_print(
+                        '[MiniMaxH3 LongMedia][TEMPORAL H3 EMBEDDING] '
+                        f'attention_mode={sol_mode} -> exact EXISTING only for temporal embedding routing; '
+                        'one MAIN shot remains one sampler pass',
+                        flush=True,
+                    )
+                    state['temporal_embedding_exact_override_announced'] = True
+            if _temporal_embedding_attn is not None:
+                attn_out = _temporal_embedding_attn
+            elif bool(state.get('fasth3_vsa_active', False)) or bool(state.get('fastvideo_vsa_active', False)):
                 try:
                     attn_out = _run_h3_fasth3_vsa_attention(
                         block.attn, h, rope_freqs, transformer_options, state
@@ -8807,11 +11354,18 @@ class _H3MLPChunkPatch:
                     except torch.cuda.OutOfMemoryError as _exc:
                         _existing_exc = _exc
                         if _existing_attempt == 0:
-                            # A backend/version-specific transient can still exceed
-                            # the first budget.  Retry once with another 1.5 GiB of
-                            # DynamicVRAM headroom.  Giant CK workloads remain on the
-                            # exact streamed-EXISTING path; SOL is never substituted.
-                            state['existing_workspace_retry_extra_mb'] = 1536
+                            # Unexpected backend/version-specific OOM after preflight:
+                            # never launch the same giant fused qkv a second time.
+                            # Mark this geometry unsafe so the retry enters the bounded
+                            # dense streamed carrier immediately.
+                            state['existing_force_bounded_dense_after_oom'] = True
+                            state['existing_force_bounded_dense_key'] = state.get(
+                                'existing_runtime_budget_key'
+                            )
+                            state['existing_workspace_retry_extra_mb'] = 0
+                            _h3_existing_release_fixed_residency_floor(
+                                transformer_options, state
+                            )
                             try:
                                 import comfy.model_management as _mm
                                 _mm.soft_empty_cache()
@@ -8819,8 +11373,9 @@ class _H3MLPChunkPatch:
                                 torch.cuda.empty_cache()
                             _lm_print(
                                 '[MiniMaxH3 LongMedia][EXISTING LOWMEM OOM RECOVERY] '
-                                f'block={self.index}; retry budget +1536MB; '
-                                'same EXISTING backend/math retained; no SOL substitution',
+                                f'block={self.index}; phase={state.get("existing_lowmem_phase", "unknown")}; '
+                                'same fused exact path will NOT be retried; switching to bounded dense streamed carrier '
+                                '(SOL pruning=off)',
                                 flush=True,
                             )
                             continue
@@ -9451,7 +12006,7 @@ class MiniMaxH3LatentLabMLPChunking:
                 'guider': ('GUIDER',),
                 'chunk_tokens': ('INT', {'default': 8192, 'min': 256, 'max': 131072, 'step': 256}),
                 'max_blocks': ('INT', {'default': 128, 'min': 1, 'max': 256, 'step': 1}),
-                'sol_mode': (['auto', 'existing', 'sol', 'scheduled_sol'], {'default': 'existing'}),
+                'sol_mode': (['auto', 'existing', 'sol_h3', 'sol', 'scheduled_sol'], {'default': 'existing'}),
                 'sol_tau_start': ('FLOAT', {'default': 1.3, 'min': 0.0, 'max': 4.0, 'step': 0.05}),
                 'sol_tau_end': ('FLOAT', {'default': 0.8, 'min': 0.0, 'max': 4.0, 'step': 0.05}),
                 'sol_curve': (['linear', 'cosine', 'sqrt', 'smoothstep', 'exponential', 'step'], {'default': 'linear'}),
@@ -9471,7 +12026,10 @@ class MiniMaxH3LatentLabMLPChunking:
                 'step_boundary_cleanup_mb': ('INT', {'default': 2048, 'min': 0, 'max': 8192, 'step': 256}),
                 'sol_sigma_hi': ('FLOAT', {'default': 1.0, 'min': -1000.0, 'max': 1000.0, 'step': 0.0001}),
                 'sol_sigma_lo': ('FLOAT', {'default': 0.0, 'min': -1000.0, 'max': 1000.0, 'step': 0.0001}),
-            }
+            },
+            'optional': {
+                'sample_sigmas': ('SIGMAS',),
+            },
         }
 
     RETURN_TYPES = ('GUIDER', 'H3_BLOCK_MEMORY_TRACE_STATE')
@@ -9479,7 +12037,7 @@ class MiniMaxH3LatentLabMLPChunking:
     FUNCTION = 'wrap'
     CATEGORY = CATEGORY_LONGMEDIA
 
-    def wrap(self, guider, memory_mode='normal', requested_memory_mode='normal', chunk_tokens=8192, max_blocks=128, sol_mode='existing', sol_tau_start=1.3, sol_tau_end=0.8, sol_curve='linear', sol_min_tokens=4096, sol_dense_percent=0.0, sol_sink_conditioning='exact_kv', sol_qkv_chunk_tokens=8192, sol_out_proj_chunk_tokens=24576, vram_activation_reserve_mb=4096, inter_block_vram_guard_mb=2048, inter_block_guard_cooldown_blocks=4, inter_block_guard_emergency_mb=512, inter_block_guard_emergency_cooldown_blocks=3, late_block_guard_start=40, late_block_guard_target_mb=6144, late_block_guard_min_cached_mb=512, step_boundary_cleanup_mb=2048, sol_sigma_hi=1.0, sol_sigma_lo=0.0):
+    def wrap(self, guider, memory_mode='normal', requested_memory_mode='normal', chunk_tokens=8192, max_blocks=128, sol_mode='existing', sol_tau_start=1.3, sol_tau_end=0.8, sol_curve='linear', sol_min_tokens=4096, sol_dense_percent=0.0, sol_sink_conditioning='exact_kv', sol_qkv_chunk_tokens=8192, sol_out_proj_chunk_tokens=24576, vram_activation_reserve_mb=4096, inter_block_vram_guard_mb=2048, inter_block_guard_cooldown_blocks=4, inter_block_guard_emergency_mb=512, inter_block_guard_emergency_cooldown_blocks=3, late_block_guard_start=40, late_block_guard_target_mb=6144, late_block_guard_min_cached_mb=512, step_boundary_cleanup_mb=2048, sol_sigma_hi=1.0, sol_sigma_lo=0.0, sample_sigmas=None):
         wrapped = copy.copy(guider)
 
         # Detect the actual diffusion execution backend before ComfyUI performs
@@ -9702,6 +12260,20 @@ class MiniMaxH3LatentLabMLPChunking:
             and _runtime_quant_variant != 'w4a8'
             and not _int8_low_vram_streaming
         )
+        # v0.6.29: exact Existing/Comfy-Kitchen on 15-18.5 GB native INT8 is a
+        # different memory contract from bounded SOL. The 0.6.28 hard gate made
+        # every H3 block wait for its weight transfer synchronously. Once the
+        # exact-attention workspace is protected by a small steady-state VBAR
+        # prefix, Comfy's native one-ahead async prefetch is both safe and much
+        # faster. The prefix is sized later from the real packed geometry.
+        _existing_exact_async_candidate = bool(
+            _recent_aimdo
+            and _out_of_core_streaming
+            and _runtime_backend in ('int8', 'int8-convrot-w4a4')
+            and _runtime_quant_variant != 'w4a8'
+            and _int8_low_vram_streaming
+            and str(sol_mode).lower() == 'existing'
+        )
         # v0.4.41: decide the W4A8 resident-window candidate BEFORE the
         # prefetch hard-gate.  v0.4.40 armed a persistent VBAR floor but then
         # accidentally left W4A8 classified as the legacy guarded path, which
@@ -9736,7 +12308,9 @@ class MiniMaxH3LatentLabMLPChunking:
             _vbar_window_target_bytes = int(_target_mb * 1024.0 * 1024.0)
 
         _w4a8_resident_fastpath = bool(_persistent_window_candidate)
-        _native_transport_fastpath = bool(_native_aimdo_fastpath or _w4a8_resident_fastpath)
+        _native_transport_fastpath = bool(
+            _native_aimdo_fastpath or _w4a8_resident_fastpath or _existing_exact_async_candidate
+        )
         _disable_dynamic_vbar_prefetch = (
             (
                 _forced_streaming_mode or _out_of_core_streaming or (
@@ -9760,6 +12334,19 @@ class MiniMaxH3LatentLabMLPChunking:
         transformer_options['latentlab_disable_dynamic_vbar_prefetch'] = bool(_disable_dynamic_vbar_prefetch)
         if _runtime_backend in ('int8', 'int8-convrot-w4a4') or _forced_streaming_mode:
             transformer_options['prefetch_dynamic_vbars'] = not bool(_disable_dynamic_vbar_prefetch)
+        if _existing_exact_async_candidate:
+            transformer_options['latentlab_disable_dynamic_vbar_prefetch'] = False
+            transformer_options['prefetch_dynamic_vbars'] = True
+            transformer_options['latentlab_h3_true_lookahead'] = False
+            transformer_options['latentlab_h3_prefetch_depth'] = 2
+            transformer_options['latentlab_h3_prefetch_pipeline'] = 'native_one_ahead'
+            transformer_options['latentlab_h3_existing_async_pipeline'] = True
+            _lm_print(
+                '[MiniMaxH3 LongMedia][EXISTING ASYNC PIPELINE] native INT8 + exact Kitchen => '
+                'prefetch_dynamic_vbars=True; steady-state VBAR prefix will be packed-shape calibrated; '
+                'pipeline=native_one_ahead; H3 math=UNCHANGED',
+                flush=True,
+            )
         if _w4a8_resident_fastpath:
             # Hard invariant for the 16 GB W4A8 resident-window class: the
             # watermark floor without asynchronous transport only reduces VRAM
@@ -9789,6 +12376,11 @@ class MiniMaxH3LatentLabMLPChunking:
                 )
             elif _runtime_quant_variant == 'w4a8':
                 _residency_message = 'W4A8 legacy AIMDO: guarded demand streaming retained for safety'
+            elif _existing_exact_async_candidate:
+                _residency_message = (
+                    f'native INT8 on {_device_vram_gb:.1f} GB GPU: exact Existing steady-state pipeline; '
+                    'native one-ahead DynamicVRAM prefetch ENABLED with packed-shape VBAR residency cap'
+                )
             elif _int8_low_vram_streaming:
                 _residency_message = (
                     f'native INT8 on {_device_vram_gb:.1f} GB GPU: dynamic-VBAR prefetch DISABLED; '
@@ -9829,7 +12421,7 @@ class MiniMaxH3LatentLabMLPChunking:
             # residency state exists, so the wrapper can capture the real
             # ModelPatcher/state directly instead of relying on copied options.
 
-            if str(sol_mode) in ('auto', 'sol', 'scheduled_sol'):
+            if str(sol_mode) in ('auto', 'sol_h3', 'sol', 'scheduled_sol'):
                 apply_model = wrappers.setdefault(WrappersMP.APPLY_MODEL, {})
                 apply_model['MiniMaxH3LatentLabSolSpan'] = [_h3_sol_span_wrapper]
         patches_replace = transformer_options.setdefault('patches_replace', {})
@@ -9904,7 +12496,25 @@ class MiniMaxH3LatentLabMLPChunking:
             'int8_sol_storage_guard_cooldown_left': 0,
             'int8_sol_storage_trim_count': 0,
             'requested_attention_mode': str(sol_mode),
-            'sol_mode': str(sol_mode),
+            # Official Sol-H3 uses exact/dense attention on one GPU.  LongMedia
+            # therefore keeps the current Comfy Kitchen backend as the primary
+            # one-GPU path and retains embedded SM120 Sol only as an OOM-bounded
+            # fallback.  Multi-GPU Ulysses is intentionally not faked on a
+            # heterogeneous Comfy process.
+            'sol_mode': ('existing' if str(sol_mode) == 'sol_h3' else str(sol_mode)),
+            'sol_h3_profile': str(sol_mode) == 'sol_h3',
+            'sol_h3_attention_primary': ('existing_kitchen_exact' if str(sol_mode) == 'sol_h3' else None),
+            'sol_h3_sparse_fallback_tau': (1.0 if str(sol_mode) == 'sol_h3' else None),
+            'sol_h3_sample_sigmas': tuple(float(v) for v in (sample_sigmas.detach().float().cpu().tolist() if torch.is_tensor(sample_sigmas) else (sample_sigmas or ()))),
+            'sol_h3_adaln_announced': False,
+            'sol_h3_adaln_skip_announced': False,
+            'sol_h3_adaln_error_announced': False,
+            'sol_h3_fused_sparse_setup': str(sol_mode) == 'sol_h3',
+            'sol_h3_norm_fusion_status': ('unknown' if str(sol_mode) == 'sol_h3' else 'disabled'),
+            'sol_h3_norm1_fused_calls': 0,
+            'sol_h3_norm2_fused_calls': 0,
+            'sol_h3_qk_rope_owner': ('Comfy Kitchen fused rms_rope_split_half' if str(sol_mode) == 'sol_h3' else None),
+            'sol_h3_swiglu_owner': ('Comfy ops linear_input_act(swiglu)' if str(sol_mode) == 'sol_h3' else None),
             'existing_dense_workspace_policy': False,
             'existing_workspace_guard_calls': 0,
             'existing_workspace_release_count': 0,
@@ -9915,6 +12525,15 @@ class MiniMaxH3LatentLabMLPChunking:
             'existing_workspace_last_headroom_mb': 0.0,
             'existing_workspace_backend': 'unknown',
             'existing_workspace_retry_extra_mb': 0,
+            'existing_exact_path_safe': None,
+            'existing_fixed_residency_fastpath': False,
+            'existing_allocator_cache_preserved': False,
+            'existing_out_proj_monolithic_calls': 0,
+            'existing_out_proj_chunk_fallbacks': 0,
+            'existing_vbar_floor_released_after_oom': False,
+            'existing_vbar_floor_released_after_oom_key': None,
+            'existing_force_bounded_dense_after_oom': False,
+            'existing_force_bounded_dense_key': None,
             'auto_attention_selected_mode': None,
             'auto_attention_reason': None,
             'auto_attention_announced': False,
@@ -10033,6 +12652,7 @@ class MiniMaxH3LatentLabMLPChunking:
             'vbar_window_target_bytes': int(_vbar_window_target_bytes),
             'vbar_window_armed': False,
             'vbar_window_armed_forward': None,
+            'existing_native_async_pipeline_candidate': bool(_existing_exact_async_candidate),
         }
         # v0.4.35: preserve external SLA only when allocator preflight proves it fits.
         # The v0.4.32 in-place compatibility kernel removed the full-size output
@@ -10073,7 +12693,9 @@ class MiniMaxH3LatentLabMLPChunking:
         state['vbar_forward_promote_count'] = 0
         state['vbar_forward_skip_pressure'] = 0
 
-        if WrappersMP is not None and (_disable_dynamic_vbar_prefetch or _persistent_window_candidate):
+        if WrappersMP is not None and (
+            _disable_dynamic_vbar_prefetch or _persistent_window_candidate or _existing_exact_async_candidate
+        ):
             import functools
             wrappers = transformer_options.setdefault('wrappers', {})
             diffusion_model = wrappers.setdefault(WrappersMP.DIFFUSION_MODEL, {})
@@ -10597,6 +13219,15 @@ class MiniMaxH3LatentLabVRAMCacheCleanup:
     CATEGORY = CATEGORY_LONGMEDIA
 
     def cleanup(self, latent, sampler_report, vram_guard_state=None, memory_profile_state=None, block_trace_state=None):
+        _sol_h3_restored = False
+        if isinstance(block_trace_state, dict):
+            try:
+                from .sol_h3_accel import restore_sol_h3_adaln_for_state
+                _sol_h3_restored = restore_sol_h3_adaln_for_state(block_trace_state, 'post_sampling_cleanup')
+                if _sol_h3_restored:
+                    _lm_print('[MiniMaxH3 LongMedia][SOL-H3 AdaLN] original projection modules restored after sampling', flush=True)
+            except Exception as _restore_exc:
+                _lm_print(f'[MiniMaxH3 LongMedia][SOL-H3 AdaLN] cleanup restore warning: {_restore_exc}', flush=True)
         if not torch.cuda.is_available():
             return (latent, sampler_report)
 
@@ -11210,55 +13841,87 @@ def _visible_segment_start_frame(plan, segment_index):
     return int(_segment_timeline_contract(plan, segment_index)['visible_start'])
 
 
+def _lm_append_before_trailing_h3_embeddings(prompt, *extra_parts):
+    """Append prose while keeping native H3 embedding tokens at prompt tail.
+
+    Single-pass temporal embedding routing relies on Director-authored embedding
+    rows being the final Qwen context rows.  Later policy prompts (lip-sync,
+    video-edit timeline notes, etc.) therefore insert their prose immediately
+    before the trailing ``embedding:<name>`` block instead of after it.
+    """
+    text = str(prompt or '').strip()
+    lines = text.splitlines() if text else []
+    tail = []
+    while lines:
+        candidate = str(lines[-1]).strip()
+        if not candidate:
+            lines.pop()
+            continue
+        if candidate.lower().startswith('embedding:') and len(candidate.split()) == 1:
+            tail.insert(0, candidate)
+            lines.pop()
+            continue
+        break
+    body = '\n'.join(lines).strip()
+    extras = [str(x or '').strip() for x in extra_parts if str(x or '').strip()]
+    parts = [x for x in [body, *extras] if x]
+    if tail:
+        parts.append('\n'.join(tail))
+    return '\n'.join(parts).strip()
+
+
 def _build_lipsync_prompt(prompt, plan, has_image, has_audio):
-    """Build prompt for automatic lip sync mode."""
-    parts = [prompt]
-    if has_image:
-        parts.append('<Picture 1>')
+    """Build prompt for forced-target-audio lip sync.
+
+    Audio1 is intentionally NOT exposed as a native ``<Audio 1>`` Ref2VA item in
+    lip-sync mode.  Its exact waveform is encoded into the target H3 audio stream
+    and frozen, so the joint AV transformer receives one unambiguous speech clock.
+    """
+    extras = []
     if has_audio:
-        parts.append('<Audio 1>')
-    parts.append(
-        'Focus on natural mouth movement and lip synchronization with the audio.'
-    )
-    if plan.passes > 1:
-        parts.append(
-            'Maintain a single continuous uninterrupted shot. '
-            'No cuts. No scene reset. Consistent character and lighting throughout.'
+        extras.append(
+            'The locked target audio stream is the exact authoritative speech and singing clock. '
+            'Match every audible phoneme with precise mouth shape, jaw motion, facial articulation, '
+            'breath timing and expression timing throughout the complete audible performance.'
         )
-    return '\n'.join(parts)
+    if plan.passes > 1:
+        extras.append(
+            'Maintain temporal performance continuity across the complete sequence while each shot '
+            'follows its own authored camera and composition.'
+        )
+    return _lm_append_before_trailing_h3_embeddings(prompt, *extras)
 
 
 def _build_video_ref_edit_audio_sync_prompt(prompt):
     """Keep a replacement subject locked to the paired source performance audio."""
-    parts = [str(prompt or '').strip()]
-    parts.append(
+    extra = (
         'Preserve the exact facial performance, mouth articulation, speech timing, singing timing, '
         'breathing rhythm, head motion, body timing and expression timing from the paired <Video 1> and <Audio 1> source performance. '
         'Keep the replacement subject precisely synchronized to <Audio 1> throughout the shot. '
         'Continue mouth articulation through every audible phoneme of the final phrase, then let the mouth settle naturally after the final source phoneme.'
     )
-    return '\n'.join(part for part in parts if part)
+    return _lm_append_before_trailing_h3_embeddings(prompt, extra)
 
 
 def _build_video_ref_edit_timeline_prompt(prompt, *, source_video_seconds, target_seconds, duration_source):
     """Describe target/source horizon ownership without changing reference semantics."""
-    parts = [str(prompt or '').strip()]
+    extras = []
     src = max(0.0, float(source_video_seconds or 0.0))
     target = max(0.0, float(target_seconds or 0.0))
     # One 24 fps frame of tolerance avoids text churn from container rounding.
     eps = 1.0 / float(FPS)
     if src > 0.0 and target > src + eps:
-        parts.append(
+        extras.append(
             f'<Video 1> establishes the source scene, motion, camera path, composition and performance for its available {src:.3f} seconds. '
             f'The target timeline continues naturally to {target:.3f} seconds, preserving the established scene logic, replacement identity, camera continuity and ongoing actions after the source video reaches its end. '
             'Connected <Audio N> references remain available as temporal and semantic conditioning throughout their own audible ranges.'
         )
     elif src > 0.0 and target + eps < src:
-        parts.append(
+        extras.append(
             f'The target uses the opening {target:.3f} seconds of <Video 1> as the active edit horizon. '
             'Preserve the source motion, camera path, composition and performance timing across that target interval.'
         )
-    return '\n'.join(part for part in parts if part)
+    return _lm_append_before_trailing_h3_embeddings(prompt, *extras)
 
 
 _V57_SEGMENT_EVENT_RE = re.compile(
@@ -11431,6 +14094,8 @@ def _v57_attach_minimax_metadata(encoded_positive, source_positive, plan, segmen
         for key, value in source_meta.items():
             if not str(key).startswith('minimax_'):
                 continue
+            if key == 'minimax_token_tags':
+                continue  # Tags belong to this encoder output, not the previous prompt.
             if drop_image_refs and key == 'minimax_refs':
                 refs = [ref for ref in (value or [])
                         if not (isinstance(ref, dict) and str(ref.get('kind', '')).lower() == 'image')]
@@ -11533,6 +14198,335 @@ def _v43_strip_image_refs_from_conditioning_meta(encoded_positive, source_positi
     return encoded_positive, dropped_images
 
 
+_LM_H3_EMBEDDING_RE = re.compile(r"(?<!\S)embedding:([^\s]+)", re.IGNORECASE)
+
+
+def _lm_h3_embedding_names(prompt):
+    """Return native Comfy embedding identifiers authored in one H3 prompt."""
+    return tuple(dict.fromkeys(
+        str(name).strip() for name in _LM_H3_EMBEDDING_RE.findall(str(prompt or ''))
+        if str(name).strip()
+    ))
+
+
+def _lm_prepare_h3_embedding_prompt(prompt):
+    """Make start-of-prompt native embeddings visible to Comfy's tokenizer.
+
+    Comfy's SDTokenizer splits ``embedding:`` only when the identifier is
+    preceded by whitespace.  MiniMaxH3Tokenizer delegates each text segment to
+    that tokenizer, so ``embedding:foo`` at character 0 silently becomes normal
+    Qwen text.  Prepending one newline preserves prompt semantics while making
+    the first embedding resolvable.  Already-whitespace-prefixed prompts are
+    untouched.
+    """
+    text = str(prompt or '')
+    if text.lower().startswith('embedding:'):
+        return '\n' + text
+    return text
+
+
+def _lm_count_h3_embedding_tensor_tokens(tokens):
+    """Count 5120-wide tensor tokens inserted by the MiniMax-H3 tokenizer."""
+    count = 0
+
+    def walk(value):
+        nonlocal count
+        if torch.is_tensor(value):
+            if value.ndim >= 1 and int(value.shape[-1]) == 5120:
+                # Native textual-inversion rows arrive as individual [5120]
+                # tensors, but accept a 2D group too for forward compatibility.
+                count += int(value.shape[-2]) if value.ndim >= 2 else 1
+            return
+        if isinstance(value, dict):
+            for v in value.values():
+                walk(v)
+            return
+        if isinstance(value, (list, tuple)):
+            for v in value:
+                walk(v)
+
+    walk(tokens)
+    return int(count)
+
+
+def _lm_validate_h3_embedding_tokenization(prompt, tokens, *, label='conditioning'):
+    """Fail fast when Director selected embeddings were parsed as plain text."""
+    names = _lm_h3_embedding_names(prompt)
+    if not names:
+        return 0
+    inserted = _lm_count_h3_embedding_tensor_tokens(tokens)
+    if inserted <= 0:
+        raise RuntimeError(
+            'MiniMax-H3 embedding tokenization failed: selected embedding(s) '
+            f'{", ".join(names)} produced zero 5120-wide embedding tokens during {label}. '
+            'LongMedia will not silently render without the requested effect. '
+            'Verify the files are in ComfyUI/models/embeddings and update ComfyUI to a build '
+            'with MiniMax-H3 embedding: tokenizer support.'
+        )
+    _lm_print(
+        '[MiniMaxH3 LongMedia][H3 EMBEDDING] '
+        f'stage={label}; names={list(names)}; inserted_tensor_tokens={inserted}; tokenizer_inserted=True',
+        flush=True,
+    )
+    return inserted
+
+
+def _lm_h3_embedding_token_counts_by_name(clip, prompt):
+    """Return native tokenizer row counts for every embedding in prompt order.
+
+    This performs tokenizer-only probes (no Qwen/TE forward).  The files are tiny
+    and Comfy's native embedding loader is the authority for accepted dimensions.
+    """
+    counts = {}
+    for name in _lm_h3_embedding_names(prompt):
+        probe = clip.tokenize('\n embedding:' + str(name))
+        count = _lm_count_h3_embedding_tensor_tokens(probe)
+        if count <= 0:
+            raise RuntimeError(
+                f'MiniMax-H3 temporal embedding {name!r} produced zero native tensor rows. '
+                'LongMedia will not arm a temporal gate for an unresolved embedding.'
+            )
+        counts[str(name)] = int(count)
+    return counts
+
+
+def _lm_encode_director_regions(
+    clip: Any, positive: list, base_prompt: str, clip_spec: dict[str, Any],
+    plan: Any, segment_index: int,
+) -> tuple[list, tuple[dict[str, Any], ...]]:
+    """Independently encode regional text while the TE is resident in Setup.
+
+    Shared native vision/reference context stays single-copy. Each appended
+    regional presentation has its own exact row range and plain-text tags.
+    No CLIP/model objects or GPU-specific routing buffers enter the plan.
+    """
+    from .director_timing import region_frame_spans
+    if len(positive) != 1:
+        raise ValueError('Director regional timing requires one native H3 conditioning presentation.')
+    context, metadata = positive[0]
+    if context.ndim != 3 or context.shape[0] != 1:
+        raise ValueError(f'Director regional timing expects context [1,S,D], got {tuple(context.shape)}.')
+    regions = region_frame_spans(
+        clip_spec['director_conditioning_regions'],
+        context_start=int(plan.segment_starts[segment_index]),
+        segment_length=int(plan.segment_lengths[segment_index]),
+        shot_start_seconds=float(clip_spec.get('director_start_seconds') or 0.0), fps=FPS,
+    )
+    parts = [context]
+    cursor = int(context.shape[1])
+    specs = []
+    encoded_directions = {}
+    for idx, region in enumerate(regions):
+        direction = str(region.get('prompt') or '').strip()
+        if not direction:
+            continue  # neutral intervals use only the shared presentation
+        prompt = str(base_prompt).rstrip() + '\n\n' + direction
+        # Verify every embedding, including a missing member of an active stack.
+        if prompt not in encoded_directions:
+            _lm_h3_embedding_token_counts_by_name(clip, prompt)
+            encoded_directions[prompt] = _encode_prompt(clip, prompt)
+        encoded = encoded_directions[prompt]
+        if len(encoded) != 1:
+            raise ValueError('Director regional text encoder returned a scheduled conditioning list.')
+        rows = encoded[0][0]
+        if rows.ndim != 3 or rows.shape[0] != 1 or rows.shape[2] != context.shape[2]:
+            raise ValueError(f'Director regional context shape mismatch: {tuple(rows.shape)} vs {tuple(context.shape)}.')
+        rows = rows.to(device=context.device, dtype=context.dtype)
+        end = cursor + int(rows.shape[1])
+        parts.append(rows)
+        specs.append({
+            'kind': 'conditioning_region', 'name': f'region:{idx}', 'order': idx,
+            'text_start': cursor, 'text_stop': end, 'token_count': end - cursor,
+            'start_frame': int(region['start_frame']), 'end_frame': int(region['end_frame']),
+            'start_seconds': float(region['start_seconds']), 'end_seconds': float(region['end_seconds']),
+        })
+        cursor = end
+    meta = dict(metadata)
+    tags = meta.get('minimax_token_tags')
+    if tags is None:
+        tags = torch.ones(context.shape[1], dtype=torch.long, device=context.device)
+    elif not torch.is_tensor(tags):
+        tags = torch.as_tensor(tags, dtype=torch.long, device=context.device)
+    tags = tags.reshape(-1)
+    if tags.numel() != context.shape[1]:
+        raise ValueError('Director base context/token-tag length mismatch before regional append.')
+    meta['minimax_token_tags'] = torch.cat((tags, tags.new_ones(cursor - context.shape[1])))
+    combined = torch.cat(parts, dim=1)
+    _lm_print(
+        '[MiniMaxH3 LongMedia][DIRECTOR TIMING] '
+        f'clip={segment_index + 1}; clock=24fps; MAIN split=False; '
+        f'common_rows={context.shape[1]}; regional_rows={cursor-context.shape[1]}; '
+        f'routes={[(s["name"], s["start_frame"], s["end_frame"]) for s in specs]}; '
+        'conditioning=independent; attention=text/video/audio isolated', flush=True,
+    )
+    return [[combined, meta]], tuple(specs)
+
+
+def _lm_encode_director_controls(
+    clip: Any, positive: list, clip_spec: dict[str, Any],
+    plan: Any, segment_index: int,
+) -> tuple[list, tuple[dict[str, Any], ...]]:
+    """Encode factorized temporal controls without cloning the scene prompt.
+
+    The common H3 presentation remains the sole owner of scene/subject semantics.
+    Each camera block or partial embedding is encoded independently from its
+    *control text only* and appended once.  This prevents a temporal boundary
+    from swapping between multiple independently contextualized copies of the
+    whole prompt, which visually behaved like a hidden shot cut in 0.6.18.
+    """
+    from .director_timing import control_frame_spans
+
+    if len(positive) != 1:
+        raise ValueError('Director temporal controls require one native H3 conditioning presentation.')
+    context, metadata = positive[0]
+    if context.ndim != 3 or context.shape[0] != 1:
+        raise ValueError(f'Director temporal controls expect context [1,S,D], got {tuple(context.shape)}.')
+
+    controls = control_frame_spans(
+        clip_spec.get('director_temporal_controls') or (),
+        context_start=int(plan.segment_starts[int(segment_index)]),
+        segment_length=int(plan.segment_lengths[int(segment_index)]),
+        shot_start_seconds=float(clip_spec.get('director_start_seconds') or 0.0),
+        shot_duration=float(clip_spec.get('duration') or 0.0),
+        fps=FPS,
+    )
+    if not controls:
+        return positive, tuple()
+
+    parts = [context]
+    cursor = int(context.shape[1])
+    specs: list[dict[str, Any]] = []
+    encoded_cache: dict[str, list] = {}
+    control_tags: list[torch.Tensor] = []
+
+    for raw in controls:
+        direction = str(raw.get('prompt') or '').strip()
+        if not direction:
+            continue
+        if direction not in encoded_cache:
+            encoded_cache[direction] = _encode_prompt(clip, direction)
+        encoded = encoded_cache[direction]
+        if len(encoded) != 1:
+            raise ValueError('Director temporal control encoder returned a scheduled conditioning list.')
+        rows, row_meta = encoded[0]
+        if rows.ndim != 3 or rows.shape[0] != 1 or rows.shape[2] != context.shape[2]:
+            raise ValueError(
+                f'Director temporal control context shape mismatch: {tuple(rows.shape)} vs {tuple(context.shape)}.'
+            )
+        rows = rows.to(device=context.device, dtype=context.dtype)
+        start = cursor
+        stop = start + int(rows.shape[1])
+        parts.append(rows)
+
+        tags = (row_meta or {}).get('minimax_token_tags') if isinstance(row_meta, dict) else None
+        if tags is None:
+            tags = torch.ones(rows.shape[1], dtype=torch.long, device=context.device)
+        elif not torch.is_tensor(tags):
+            tags = torch.as_tensor(tags, dtype=torch.long, device=context.device)
+        tags = tags.to(device=context.device, dtype=torch.long).reshape(-1)
+        if int(tags.numel()) != int(rows.shape[1]):
+            raise ValueError('Director temporal control token-tag length mismatch.')
+        control_tags.append(tags)
+
+        item = {
+            'kind': str(raw.get('kind') or 'temporal_control'),
+            'name': str(raw.get('name') or f'control:{len(specs)}'),
+            'order': int(raw.get('order', len(specs)) or 0),
+            'text_start': int(start), 'text_stop': int(stop),
+            'token_count': int(stop - start),
+            'start_frame': int(raw['start_frame']), 'end_frame': int(raw['end_frame']),
+            'start_seconds': float(raw['start_seconds']), 'end_seconds': float(raw['end_seconds']),
+            'handoff_in_frames': int(raw.get('handoff_in_frames') or 0),
+            'handoff_out_frames': int(raw.get('handoff_out_frames') or 0),
+        }
+        if raw.get('embedding_name'):
+            item['embedding_name'] = str(raw['embedding_name'])
+        specs.append(item)
+        cursor = stop
+
+    if not specs:
+        return positive, tuple()
+
+    meta = dict(metadata)
+    base_tags = meta.get('minimax_token_tags')
+    if base_tags is None:
+        base_tags = torch.ones(context.shape[1], dtype=torch.long, device=context.device)
+    elif not torch.is_tensor(base_tags):
+        base_tags = torch.as_tensor(base_tags, dtype=torch.long, device=context.device)
+    base_tags = base_tags.to(device=context.device, dtype=torch.long).reshape(-1)
+    if int(base_tags.numel()) != int(context.shape[1]):
+        raise ValueError('Director base context/token-tag length mismatch before temporal controls.')
+    meta['minimax_token_tags'] = torch.cat((base_tags, *control_tags), dim=0)
+    combined = torch.cat(parts, dim=1)
+
+    _lm_print(
+        '[MiniMaxH3 LongMedia][DIRECTOR TEMPORAL CONTROLS] '
+        f'clip={int(segment_index)+1}; common_rows={int(context.shape[1])}; '
+        f'control_rows={int(combined.shape[1]-context.shape[1])}; '
+        f'controls={[(s["kind"], s["name"], s["start_frame"], s["end_frame"], s["handoff_in_frames"], s["handoff_out_frames"]) for s in specs]}; '
+        'scene_prompt_clones=0; factorized=True',
+        flush=True,
+    )
+    return [[combined, meta]], tuple(specs)
+
+
+def _lm_build_temporal_embedding_specs(clip, prompt, spans, *, plan, segment_index, authored_duration):
+    """Compile Director time spans to one-pass H3 local-frame routing metadata."""
+    if not spans:
+        return tuple()
+    counts = _lm_h3_embedding_token_counts_by_name(clip, prompt)
+    order = {name: idx for idx, name in enumerate(_lm_h3_embedding_names(prompt))}
+    segment_index = int(segment_index)
+    segment_length = int(plan.segment_lengths[segment_index])
+    hidden_prefix = int(plan.overlap_frames) if segment_index > 0 and getattr(plan, 'mode', None) == 'multiclip' else 0
+    authored_duration = max(1e-9, float(authored_duration or 0.0))
+    visible_segment_frames = max(1, int(segment_length) - int(hidden_prefix))
+    seconds_to_visible_frame = float(visible_segment_frames) / float(authored_duration)
+    specs = []
+    for raw in spans or ():
+        if not isinstance(raw, dict):
+            continue
+        name = str(raw.get('name') or '').strip()
+        if name not in counts:
+            continue
+        start_s = max(0.0, min(authored_duration, float(raw.get('start_seconds') or 0.0)))
+        end_s = max(start_s, min(authored_duration, float(raw.get('end_seconds') if raw.get('end_seconds') is not None else authored_duration)))
+        if end_s <= start_s + 1e-9:
+            continue
+        start_f = hidden_prefix + int(math.floor(start_s * seconds_to_visible_frame + 1e-9))
+        end_f = hidden_prefix + int(math.ceil(end_s * seconds_to_visible_frame - 1e-9))
+        # Include alignment padding when the authored embedding reaches the visible
+        # end of this MAIN clip; those tail frames are later trimmed/stitched.
+        if end_s >= authored_duration - (0.5 / float(FPS)):
+            end_f = segment_length
+        start_f = max(0, min(segment_length, start_f))
+        end_f = max(start_f + 1, min(segment_length, end_f))
+        specs.append({
+            'name': name,
+            'order': int(order.get(name, 0)),
+            'token_count': int(counts[name]),
+            'start_frame': int(start_f),
+            'end_frame': int(end_f),
+            'start_seconds': float(start_s),
+            'end_seconds': float(end_s),
+        })
+    specs.sort(key=lambda item: (int(item['order']), int(item['start_frame']), int(item['end_frame'])))
+    return tuple(specs)
+
+
+def _lm_tokenize_h3_prompt(clip, prompt, *, minimax_ref_items=None, images=None, label='conditioning'):
+    """Native H3 tokenizer wrapper with embedding compatibility + verification."""
+    prepared = _lm_prepare_h3_embedding_prompt(prompt)
+    if minimax_ref_items is not None:
+        tokens = clip.tokenize(prepared, minimax_ref_items=minimax_ref_items)
+    elif images is not None:
+        tokens = clip.tokenize(prepared, images=images)
+    else:
+        tokens = clip.tokenize(prepared)
+    _lm_validate_h3_embedding_tokenization(prepared, tokens, label=label)
+    return tokens
+
+
 def _v329_encode_continuation_native_refs(
     clip, prompt, positive, plan, segment_index, ref_items, ref_blocks,
 ):
@@ -11547,9 +14541,11 @@ def _v329_encode_continuation_native_refs(
     items = list(ref_items or [])
     blocks = list(ref_blocks or [])
     if items:
-        tokens = clip.tokenize(prompt, minimax_ref_items=items)
+        tokens = _lm_tokenize_h3_prompt(
+            clip, prompt, minimax_ref_items=items, label=f'continuation_pass_{int(segment_index)}_native_refs',
+        )
     else:
-        tokens = clip.tokenize(prompt)
+        tokens = _lm_tokenize_h3_prompt(clip, prompt, label=f'continuation_pass_{int(segment_index)}')
     scheduled = getattr(clip, 'encode_from_tokens_scheduled', None)
     encoded = scheduled(tokens) if callable(scheduled) else clip.encode(tokens)
 
@@ -11907,7 +14903,7 @@ def _v83_attach_native_motion_context(positive_list, previous_av, plan, segment_
     # previous VIDEO latent as Motion Context, but do not add a second sampled
     # audio clock when a native local-0 lip-sync guide is active.  Competing
     # sampled/source audio conditions weaken articulation and can drift.
-    if bool(getattr(plan, 'lip_sync_native_audio_guide', False)):
+    if bool(getattr(plan, 'lip_sync_target_audio_locked', False)):
         audio_t = 0
     if audio_t > 0:
         source_frames = frame_count_from_video_t(int(prev_video.shape[2]))
@@ -11975,7 +14971,7 @@ def _v83_attach_native_motion_context(positive_list, previous_av, plan, segment_
         _lm_print(
             '[MiniMaxH3 LongMedia][VIDEO MOTION CONTEXT + SOURCE AUDIO CLOCK] '
             f'segment0->1 context={run}f hidden_overlap={overlap}f guide_shift={guide_shift}f video_steps={context_t} indices={offsets}; '
-            f"audio_steps={audio_t}; source_audio_clock={bool(getattr(plan, 'lip_sync_native_audio_guide', False))}; target head is FRESH and generated under native minimax_keyframes; "
+            f"audio_steps={audio_t}; source_audio_clock={bool(getattr(plan, 'lip_sync_target_audio_locked', False))}; target head is FRESH and generated under native minimax_keyframes; "
             'existing stitch trims the repeated guide span',
             flush=True,
         )
@@ -12043,22 +15039,42 @@ def _v0322_attach_native_av_context_ref(positive_list, previous_av, plan, segmen
     if int(prev_video.shape[2]) < video_t or int(prev_audio.shape[-1]) < audio_t:
         return positive_list, 0
     video_tail = prev_video[:, :, -video_t:].contiguous()
-    audio_tail = prev_audio[..., -audio_t:].contiguous()
-    grid_offset = _v0322_audio_grid_offset(previous_frames, int(prev_audio.shape[-1]))
-    context_ref = {
-        'kind': 'video_audio',
-        'latent_t': int(video_tail.shape[2]),
-        'latent_h': int(video_tail.shape[-2]),
-        'latent_w': int(video_tail.shape[-1]),
-        'ref_audio_t': int(audio_tail.shape[-1]),
-        'latent': video_tail,
-        'audio_latent': audio_tail,
-        'longmedia_native_av_context': True,
-        'longmedia_context_frames': int(run),
-        'longmedia_audio_grid_offset': float(grid_offset),
-        'longmedia_source_segment_index': int(segment_index) - 1,
-        'longmedia_first_handoff_bridge': bool(first_handoff_bridge),
-    }
+    forced_audio = bool(getattr(plan, 'lip_sync_target_audio_locked', False))
+    if forced_audio:
+        # The previous clip's sampled audio must never become a second clock. Carry
+        # only visual motion history; the current pass gets its exact source waveform
+        # directly in the frozen target audio stream.
+        audio_t = 0
+        grid_offset = 0.0
+        context_ref = {
+            'kind': 'video',
+            'latent_t': int(video_tail.shape[2]),
+            'latent_h': int(video_tail.shape[-2]),
+            'latent_w': int(video_tail.shape[-1]),
+            'latent': video_tail,
+            'longmedia_native_av_context': True,
+            'longmedia_context_frames': int(run),
+            'longmedia_source_segment_index': int(segment_index) - 1,
+            'longmedia_first_handoff_bridge': bool(first_handoff_bridge),
+            'longmedia_forced_audio_video_only_context': True,
+        }
+    else:
+        audio_tail = prev_audio[..., -audio_t:].contiguous()
+        grid_offset = _v0322_audio_grid_offset(previous_frames, int(prev_audio.shape[-1]))
+        context_ref = {
+            'kind': 'video_audio',
+            'latent_t': int(video_tail.shape[2]),
+            'latent_h': int(video_tail.shape[-2]),
+            'latent_w': int(video_tail.shape[-1]),
+            'ref_audio_t': int(audio_tail.shape[-1]),
+            'latent': video_tail,
+            'audio_latent': audio_tail,
+            'longmedia_native_av_context': True,
+            'longmedia_context_frames': int(run),
+            'longmedia_audio_grid_offset': float(grid_offset),
+            'longmedia_source_segment_index': int(segment_index) - 1,
+            'longmedia_first_handoff_bridge': bool(first_handoff_bridge),
+        }
     out = []
     attached = False
     for entry in positive_list:
@@ -12089,8 +15105,8 @@ def _v0322_attach_native_av_context_ref(positive_list, previous_av, plan, segmen
             '[MiniMaxH3 LongMedia][V0322 NATIVE AV CONTEXT] '
             f'segment={int(segment_index)} context={run}f video_t={video_t} '
             f'audio_t={audio_t} audio_grid_offset={grid_offset:+.6f}; '
-            f'first_handoff_bridge={bool(first_handoff_bridge)}; '
-            'paired raw AV tail appended to minimax_refs',
+            f'first_handoff_bridge={bool(first_handoff_bridge)}; forced_audio={forced_audio}; ' +
+            ('video-only raw tail appended; target audio clock remains exclusive' if forced_audio else 'paired raw AV tail appended to minimax_refs'),
             flush=True,
         )
         if first_handoff_bridge:
@@ -12102,6 +15118,223 @@ def _v0322_attach_native_av_context_ref(positive_list, previous_av, plan, segmen
             )
         return out, int(run)
     return positive_list, 0
+
+class _H3RegionalTextAttentionOverride:
+    """Isolate Director temporal-control rows inside H3's pre-DiT TokenRefiner.
+
+    Common queries read common keys only.  A regional query reads common keys
+    plus its own region.  The override activates only when Q/K/V length exactly
+    matches the appended Director text presentation, so unrelated attention
+    calls keep their existing backend/override contract.
+    """
+
+    def __init__(self, specs, delegate=None):
+        self.specs = tuple(dict(item) for item in (specs or ()))
+        self.delegate = delegate
+        ranges = []
+        for raw in self.specs:
+            if str(raw.get('kind') or '') not in {
+                'conditioning_region', 'camera_control', 'embedding_control', 'temporal_control'
+            }:
+                continue
+            a = int(raw.get('text_start', 0) or 0)
+            b = int(raw.get('text_stop', 0) or 0)
+            name = str(raw.get('name') or '')
+            if b > a >= 0 and name:
+                ranges.append((a, b, name))
+        ranges.sort(key=lambda item: item[0])
+        self.ranges = tuple(ranges)
+        self.seq_len = max((b for _a, b, _name in self.ranges), default=0)
+        self.common_stop = min((a for a, _b, _name in self.ranges), default=self.seq_len)
+        self._announced = False
+
+    def _delegate(self, func, q, k, v, heads, mask=None, attn_precision=None,
+                  skip_reshape=False, skip_output_reshape=False, **kwargs):
+        if self.delegate is not None:
+            return self.delegate(
+                func, q, k, v, heads, mask=mask, attn_precision=attn_precision,
+                skip_reshape=skip_reshape, skip_output_reshape=skip_output_reshape, **kwargs,
+            )
+        return func(
+            q, k, v, heads, mask=mask, attn_precision=attn_precision,
+            skip_reshape=skip_reshape, skip_output_reshape=skip_output_reshape, **kwargs,
+        )
+
+    def __call__(self, func, q, k, v, heads, mask=None, attn_precision=None,
+                 skip_reshape=False, skip_output_reshape=False, **kwargs):
+        seq = int(q.shape[-2]) if getattr(q, 'ndim', 0) == 4 else -1
+        if (
+            not self.ranges or seq != self.seq_len or mask is not None
+            or not skip_reshape or getattr(k, 'ndim', 0) != 4 or getattr(v, 'ndim', 0) != 4
+            or int(k.shape[-2]) != seq or int(v.shape[-2]) != seq
+        ):
+            return self._delegate(
+                func, q, k, v, heads, mask=mask, attn_precision=attn_precision,
+                skip_reshape=skip_reshape, skip_output_reshape=skip_output_reshape, **kwargs,
+            )
+
+        import torch
+        if not q.dtype.is_floating_point:
+            return self._delegate(
+                func, q, k, v, heads, mask=mask, attn_precision=attn_precision,
+                skip_reshape=skip_reshape, skip_output_reshape=skip_output_reshape, **kwargs,
+            )
+
+        neg = torch.finfo(q.dtype).min
+        base_mask = torch.zeros((1, 1, 1, seq), dtype=q.dtype, device=q.device)
+        for a, b, _name in self.ranges:
+            base_mask[..., a:b] = neg
+
+        intervals = []
+        if self.common_stop > 0:
+            intervals.append((0, self.common_stop, None))
+        cursor = self.common_stop
+        for a, b, name in self.ranges:
+            if cursor < a:
+                intervals.append((cursor, a, None))
+            intervals.append((a, b, (a, b, name)))
+            cursor = b
+        if cursor < seq:
+            intervals.append((cursor, seq, None))
+
+        outputs = []
+        for qa, qb, owned in intervals:
+            if qb <= qa:
+                continue
+            local_mask = base_mask.clone()
+            if owned is not None:
+                ka, kb, _name = owned
+                local_mask[..., ka:kb] = 0
+            # TokenRefiner sequences are text-sized.  Use the selected core
+            # backend directly so a global sparse override cannot discard masks.
+            part = func(
+                q[..., qa:qb, :], k, v, heads, mask=local_mask,
+                attn_precision=attn_precision, skip_reshape=True,
+                skip_output_reshape=skip_output_reshape, **kwargs,
+            )
+            outputs.append(part)
+
+        if not self._announced:
+            _lm_print(
+                '[MiniMaxH3 LongMedia][DIRECTOR TOKEN REFINER] regional isolation active; '
+                f'common_rows=0:{self.common_stop}; regions={[(a, b, n) for a, b, n in self.ranges]}; '
+                'query_partition=True; mask=1xK',
+                flush=True,
+            )
+            self._announced = True
+
+        cat_dim = 2 if skip_output_reshape else 1
+        return torch.cat(outputs, dim=cat_dim)
+
+
+def _lm_apply_temporal_specs_runtime_option(guider, specs):
+    """Install one already-localized temporal-control spec set on a guider."""
+    options = getattr(guider, 'model_options', None)
+    if not isinstance(options, dict):
+        return guider
+    transformer_options = options.setdefault('transformer_options', {})
+    specs = tuple(dict(item) for item in (specs or ()))
+    existing_override = transformer_options.get('optimized_attention_override')
+    if isinstance(existing_override, _H3RegionalTextAttentionOverride):
+        base_override = existing_override.delegate
+    else:
+        base_override = existing_override
+
+    if specs:
+        transformer_options['latentlab_h3_temporal_embeddings'] = specs
+        transformer_options['latentlab_h3_temporal_embedding_single_pass'] = True
+        _temporal_refiner_kinds = {
+            'conditioning_region', 'camera_control', 'embedding_control', 'temporal_control'
+        }
+        if all(str(raw.get('kind') or '') in _temporal_refiner_kinds for raw in specs):
+            transformer_options['optimized_attention_override'] = _H3RegionalTextAttentionOverride(
+                specs, delegate=base_override,
+            )
+        elif isinstance(existing_override, _H3RegionalTextAttentionOverride):
+            if base_override is None:
+                transformer_options.pop('optimized_attention_override', None)
+            else:
+                transformer_options['optimized_attention_override'] = base_override
+    else:
+        transformer_options.pop('latentlab_h3_temporal_embeddings', None)
+        transformer_options.pop('latentlab_h3_temporal_embedding_single_pass', None)
+        if isinstance(existing_override, _H3RegionalTextAttentionOverride):
+            if base_override is None:
+                transformer_options.pop('optimized_attention_override', None)
+            else:
+                transformer_options['optimized_attention_override'] = base_override
+    return guider
+
+
+def _lm_apply_temporal_embedding_runtime_option(guider, plan, segment_index):
+    """Expose one segment's temporal routes to H3 attention."""
+    per_segment = getattr(plan, 'segment_temporal_embeddings', None)
+    specs = ()
+    idx = int(segment_index)
+    if per_segment and idx < len(per_segment):
+        specs = tuple(dict(item) for item in (per_segment[idx] or ()))
+    return _lm_apply_temporal_specs_runtime_option(guider, specs)
+
+
+def _lm_slice_temporal_specs_for_hires_refine(specs, *, window_start_frame, window_frame_count):
+    """Project one segment's Director controls onto a local hi-res refine window.
+
+    Text row ownership stays unchanged; only video-query frame windows move to
+    the local refine clock.  This preserves the existing regional TokenRefiner
+    contract while keeping camera/embedding timing on the authored segment clock.
+    """
+    start = max(0, int(window_start_frame))
+    count = max(1, int(window_frame_count))
+    stop = start + count
+    localized = []
+    for raw in specs or ():
+        if not isinstance(raw, dict):
+            continue
+        item = dict(raw)
+        a = max(start, int(item.get('start_frame', 0) or 0))
+        b = min(stop, int(item.get('end_frame', 0) or 0))
+        item['start_frame'] = max(0, a - start) if b > a else 0
+        item['end_frame'] = max(0, b - start) if b > a else 0
+        # Handoff widths are authored durations, not window-relative positions.
+        item['handoff_in_frames'] = max(0, int(item.get('handoff_in_frames', 0) or 0))
+        item['handoff_out_frames'] = max(0, int(item.get('handoff_out_frames', 0) or 0))
+        localized.append(item)
+    localized.sort(key=lambda item: (int(item.get('order', 0)), int(item.get('start_frame', 0)), int(item.get('end_frame', 0))))
+    return tuple(localized)
+
+
+def _lm_slice_temporal_embedding_specs_for_motion_repair(specs, dilation, *, source_frame_offset):
+    """Project segment-level temporal embedding windows onto one dilated repair window."""
+    if not specs:
+        return tuple()
+    frame_map = tuple(int(v) for v in (dilation.get('expanded_frame_to_source_frame') or ()))
+    if not frame_map:
+        return tuple()
+    source_offset = max(0, int(source_frame_offset))
+    local_specs = []
+    for raw in specs:
+        if not isinstance(raw, dict):
+            continue
+        explicit_rows = str(raw.get('kind') or '') in {
+            'conditioning_region', 'camera_control', 'embedding_control', 'temporal_control'
+        }
+        start_f = max(0, int(raw.get('start_frame', 0) or 0))
+        end_f = max(start_f, int(raw.get('end_frame', 0) or 0))
+        if end_f <= start_f and not explicit_rows:
+            continue
+        active_targets = [
+            idx for idx, local_source_frame in enumerate(frame_map)
+            if start_f <= source_offset + int(local_source_frame) < end_f
+        ]
+        if not active_targets and not explicit_rows:
+            continue
+        local_spec = dict(raw)
+        local_spec['start_frame'] = int(active_targets[0]) if active_targets else 0
+        local_spec['end_frame'] = int(active_targets[-1] + 1) if active_targets else 0
+        local_specs.append(local_spec)
+    local_specs.sort(key=lambda item: (int(item.get('order', 0)), int(item.get('start_frame', 0)), int(item.get('end_frame', 0))))
+    return tuple(local_specs)
+
 
 def _clone_guider_with_segment_audio(guider, plan, segment_index, previous_av=None):
     """Clone guider cheaply, select pass conditioning, and add previous motion context."""
@@ -12132,17 +15365,22 @@ def _clone_guider_with_segment_audio(guider, plan, segment_index, previous_av=No
         and int(segment_index) > 0
         and previous_av is not None
     ):
+        segmented_latent_only = getattr(plan, 'mode', None) == 'segmented_continuation'
         native_two_pass = (
-            (
-                getattr(plan, 'mode', None) == 'multiclip' and int(segment_index) > 0
-            )
-            or (
-                int(segment_index) == 1
-                and int(getattr(plan, 'passes', 0) or 0) == 2
-                and getattr(plan, 'mode', None) == 'segmented_continuation'
-            )
+            getattr(plan, 'mode', None) == 'multiclip' and int(segment_index) > 0
         ) and _v83_native_guide_api_supported()
-        if native_two_pass:
+        if segmented_latent_only:
+            # The frozen target prefix already contains the exact generated AV
+            # boundary and is visible to every target token through native H3
+            # self-attention. Re-inserting the same ~22f tail as keyframes/refs
+            # duplicates temporal authority and can seed a periodic motion loop.
+            _lm_print(
+                '[MiniMaxH3 LongMedia][SEGMENTED LATENT-FIRST CONTEXT] '
+                f'segment={int(segment_index) + 1}; auxiliary_refs=False; '
+                'auxiliary_motion_keyframes=False; frozen_target_prefix=True',
+                flush=True,
+            )
+        elif native_two_pass:
             motion_positive, _motion_frames = _v83_attach_native_motion_context(
                 shifted.original_conds.get('positive', []), previous_av, plan, segment_index,
             )
@@ -12169,7 +15407,9 @@ def _clone_guider_with_segment_audio(guider, plan, segment_index, previous_av=No
 
     # Only source/reference streams that genuinely change per pass require a tiny mutable
     # metadata shell. Hybrid global refs are read-only and remain shared with zero copies.
-    reference_audio = getattr(plan, 'reference_audio', None) or plan.source_audio
+    reference_audio = getattr(plan, 'reference_audio', None)
+    if reference_audio is None and not bool(getattr(plan, 'lip_sync_target_audio_locked', False)):
+        reference_audio = plan.source_audio
     positive_list = shifted.original_conds.get('positive', [])
     needs_mutable_refs = bool(
         reference_audio is not None
@@ -12278,11 +15518,12 @@ def _clone_guider_with_segment_audio(guider, plan, segment_index, previous_av=No
     shifted.original_conds['positive'] = _v041_normalize_minimax_audio_ref_geometry(
         shifted.original_conds.get('positive', [])
     )
+    _lm_apply_temporal_embedding_runtime_option(shifted, plan, segment_index)
     return shifted
 
 def _encode_prompt(clip, prompt):
     """Encode a text prompt into CONDITIONING across supported ComfyUI CLIP APIs."""
-    tokens = clip.tokenize(prompt)
+    tokens = _lm_tokenize_h3_prompt(clip, prompt, label='text_conditioning')
 
     # Current ComfyUI's canonical CONDITIONING path.  This keeps hook/LoRA
     # schedules attached to the conditioning and avoids relying on the old
@@ -13131,6 +16372,7 @@ def _build_longmedia_hybrid_conditioning(
     clip, vae, audio_vae, prompt, width, height, length, resolution_mode,
     first_frame=None, last_frame=None, ref_images=None, ref_videos=None,
     ref_audios=None, ref_video_audios=None, first_latent_override=None, last_latent_override=None,
+    shared_boundary_geometry=False,
 ):
     """Build H3 keyframes + Ref2VA references in one conditioning payload.
 
@@ -13172,8 +16414,36 @@ def _build_longmedia_hybrid_conditioning(
         keyframe_images.append(img)
         return entry
 
-    first_keyframe = add_keyframe(0, first_frame, 'disabled', first_latent_override)
-    add_keyframe(frame_count - 1, last_frame, 'center', last_latent_override)
+    if bool(shared_boundary_geometry) and first_frame is not None and last_frame is not None:
+        # A same-source FIRST+LAST loop must not inherit stock FL2VA's asymmetric
+        # boundary transforms (FIRST=stretch, LAST=center-crop). That asymmetry
+        # creates two slightly different geometries and H3 interpolates the whole
+        # composition between them even with a locked-off camera. Encode one
+        # target-canvas geometry exactly once and reuse the same latent/image rows
+        # on both timeline boundaries.
+        shared_img = _resize(first_frame[:1], int(width), int(height), 'disabled')
+        shared_latent = (
+            first_latent_override if first_latent_override is not None
+            else last_latent_override if last_latent_override is not None
+            else vae.encode(shared_img)
+        )
+        first_keyframe = {
+            'resolved_frame_index': 0,
+            mc_key: True,
+            MC_ANCHOR_KEY: 0,
+            'latent': shared_latent,
+        }
+        last_keyframe = {
+            'resolved_frame_index': int(frame_count - 1),
+            mc_key: True,
+            MC_ANCHOR_KEY: int(frame_count - 1),
+            'latent': shared_latent,
+        }
+        keyframes.extend((first_keyframe, last_keyframe))
+        keyframe_images.extend((shared_img, shared_img))
+    else:
+        first_keyframe = add_keyframe(0, first_frame, 'disabled', first_latent_override)
+        add_keyframe(frame_count - 1, last_frame, 'center', last_latent_override)
 
     ref_items = []
     ref_blocks = []
@@ -13264,11 +16534,16 @@ def _build_longmedia_hybrid_conditioning(
     # Same semantics as upstream minimax-h3-hybrid-cond: refs use the H3
     # minimax_ref_items tokenizer path; keyframes live in payload guides.
     if ref_items:
-        tokens = clip.tokenize(prompt, minimax_ref_items=ref_items)
+        tokens = _lm_tokenize_h3_prompt(
+            clip, prompt, minimax_ref_items=ref_items, label='hybrid_ref_conditioning',
+        )
     else:
-        tokens = clip.tokenize(prompt, images=keyframe_images)
+        tokens = _lm_tokenize_h3_prompt(
+            clip, prompt, images=keyframe_images, label='hybrid_keyframe_conditioning',
+        )
     scheduled = getattr(clip, 'encode_from_tokens_scheduled', None)
-    cond = _setup_clip_encode_retry(
+    cond = _longmedia_hybrid_te_encode_safe(
+        clip,
         lambda: (scheduled(tokens) if callable(scheduled) else clip.encode(tokens)),
         label='hybrid_conditioning',
     )
@@ -13615,15 +16890,18 @@ def _v043_join_global_local_prompt(global_prompt, local_prompt):
         return f'{global_text}\n\n{local_text}'
     return global_text or local_text
 
-def _v85_parse_multiclip_json(raw, fallback_prompt, fallback_duration):
+def _v85_parse_multiclip_json(raw, fallback_prompt, fallback_duration, *, min_clips=2):
     try:
         payload = json.loads(raw or '[]')
     except Exception as exc:
         raise ValueError(f"MultiClip JSON is invalid: {exc}") from exc
     if not isinstance(payload, list):
         raise ValueError('MultiClip JSON must be an array of clip objects.')
-    if len(payload) < 2:
-        raise ValueError('MultiClip requires at least 2 clips.')
+    min_clips = max(1, int(min_clips))
+    if len(payload) < min_clips:
+        if min_clips <= 1:
+            raise ValueError('Director timeline requires at least 1 MAIN shot.')
+        raise ValueError(f'MultiClip requires at least {min_clips} clips.')
     if len(payload) > 16:
         raise ValueError('MultiClip prototype supports at most 16 clips.')
     clips = []
@@ -13645,12 +16923,44 @@ def _v85_parse_multiclip_json(raw, fallback_prompt, fallback_duration):
                 raise ValueError(f'MultiClip clip {i+1} has invalid seed.')
         clip_id = str(item.get('clip_id') or item.get('id') or '').strip() or f"clip-{i+1}"
         name = str(item.get('name') or item.get('clip_name') or '').strip()[:120]
-        clips.append({'clip_id': clip_id, 'name': name, 'prompt': prompt, 'duration': duration, 'seed': seed})
+        temporal_embeddings = []
+        for raw_span in (item.get('director_embedding_spans') or []):
+            if not isinstance(raw_span, dict):
+                continue
+            emb_name = str(raw_span.get('name') or '').strip().replace('\\', '/')
+            if emb_name.lower().startswith('embedding:'):
+                emb_name = emb_name.split(':', 1)[1].strip()
+            if emb_name.lower().endswith('.safetensors'):
+                emb_name = emb_name[:-12]
+            try:
+                emb_start = max(0.0, float(raw_span.get('start_seconds') or 0.0))
+                emb_end = min(float(duration), float(raw_span.get('end_seconds') if raw_span.get('end_seconds') is not None else duration))
+            except Exception:
+                continue
+            if emb_name and emb_end > emb_start + 1e-9:
+                temporal_embeddings.append({
+                    'name': emb_name,
+                    'start_seconds': emb_start,
+                    'end_seconds': emb_end,
+                })
+        clips.append({
+            'clip_id': clip_id, 'name': name, 'prompt': prompt, 'duration': duration, 'seed': seed,
+            'director_embedding_spans': temporal_embeddings,
+            'director_conditioning_regions': [dict(r) for r in (item.get('director_conditioning_regions') or [])],
+            'director_temporal_controls': [dict(r) for r in (item.get('director_temporal_controls') or []) if isinstance(r, dict)],
+            'director_camera_spans': [dict(r) for r in (item.get('director_camera_spans') or []) if isinstance(r, dict)],
+            'director_timing_version': int(item.get('director_timing_version') or 0),
+            'director_start_seconds': float(item.get('director_start_seconds') or 0.0),
+            'director_end_seconds': float(item.get('director_end_seconds') or 0.0),
+        })
     return tuple(clips)
 
 
 def _v85_multiclip_geometry(clips, overlap_frames):
     overlap = int(overlap_frames)
+    if clips and all(int(c.get('director_timing_version') or 0) >= 2 for c in clips):
+        from .director_timing import native_timeline_geometry
+        return native_timeline_geometry(clips, overlap, FPS)
     # v0.4.56 continuity: MultiClip previously used the minimal 5-frame native
     # H3 continuation head. That is enough to keep the temporal lattice valid,
     # but too short to stabilize exposure/illumination across independently
@@ -13682,6 +16992,47 @@ def _v85_multiclip_geometry(clips, overlap_frames):
         starts.append(int(visible_end - overlap))
         visible_end += int(n - overlap)
     return lengths, tuple(starts), int(visible_end)
+
+
+def _v118_multiclip_requested_output_frames(clips, generated_frames):
+    """Return the user-visible output horizon for a MultiClip plan.
+
+    Director timing v2 deliberately separates the authored 24 fps clock from
+    the H3-native 5+17*k generation lattice. ``generated_frames`` therefore
+    includes only terminal lattice padding and must be trimmed back to the
+    cumulative authored duration. Legacy MultiClip keeps its historical
+    generated==visible contract.
+
+    Keep this decision adjacent to MultiClip geometry rather than deriving it
+    from ``director_cfg`` in Setup: the clip timing contract is the authoritative
+    owner and may also arrive through serialized/headless plans.
+    """
+    generated = int(generated_frames)
+    if generated <= 0:
+        raise ValueError(f'MultiClip generated frame count must be positive, got {generated}.')
+    director_clock = bool(clips) and all(
+        int(c.get('director_timing_version') or 0) >= 2 for c in clips
+    )
+    if not director_clock:
+        return generated
+    seconds = 0.0
+    for index, clip_spec in enumerate(clips):
+        try:
+            duration = float(clip_spec['duration'])
+        except Exception as exc:
+            raise ValueError(f'Director MAIN {index + 1} has invalid duration.') from exc
+        if not math.isfinite(duration) or duration <= 0.0:
+            raise ValueError(
+                f'Director MAIN {index + 1} duration must be finite and positive, got {duration!r}.'
+            )
+        seconds += duration
+    requested = max(1, int(round(seconds * float(FPS))))
+    if requested > generated:
+        raise RuntimeError(
+            'Director timeline geometry under-generated the authored output clock: '
+            f'requested={requested}f generated={generated}f.'
+        )
+    return requested
 
 
 
@@ -13757,8 +17108,8 @@ def _v104_attach_native_lipsync_guide(positive, audio_vae, source_audio, plan, s
     ``img_update`` rows with no matching video latent and fails before denoising.
 
     Therefore locked-target lip-sync deliberately does NOT add an audio-only
-    keyframe.  Audio1 may still remain a normal Ref2VA audio reference for
-    semantic/content conditioning; timing is owned by the frozen target audio.
+    keyframe. Since v0.6.11 Audio1 is also excluded from Ref2VA audio refs, so
+    the frozen target audio stream is the sole audio authority.
     """
     if source_audio is None or audio_vae is None:
         return positive
@@ -13810,7 +17161,7 @@ def _v104_attach_native_lipsync_guide(positive, audio_vae, source_audio, plan, s
         f'clip={int(segment_index)+1} local=0f global={start_frame}f '
         f'visible={int(timeline["visible_start"])}f length={length_frames}f '
         f'samples={start_sample}..{end_sample} latent_t={int(audio_latent.shape[-1])}; '
-        'Audio1 remains native Ref2VA reference',
+        'legacy guide path only',
         flush=True,
     )
     return out
@@ -13821,10 +17172,9 @@ def _v104_attach_native_lipsync_guide(positive, audio_vae, source_audio, plan, s
 def _v107_attach_visible_lipsync_guide(positive, audio_vae, source_audio, plan, segment_index):
     """Anchor only the NEW visible source-audio span on continuation passes.
 
-    Full Audio1 remains the untouched native Ref2VA reference on every clip.
-    The hidden overlap is owned by Extender-style AV Motion Context (video+audio
-    tail from the previous sampled AV latent).  This guide starts exactly at the
-    first visible local frame, so the two temporal conditions do not overlap.
+    Legacy fallback for pre-0.6.11 non-locked audio-guide experiments. New
+    lip-sync does not call this path: Audio1 lives only in the frozen target audio
+    stream and continuation carries visual motion context without sampled audio.
     """
     idx = int(segment_index)
     if idx <= 0 or source_audio is None or audio_vae is None:
@@ -13890,7 +17240,7 @@ def _v107_attach_visible_lipsync_guide(positive, audio_vae, source_audio, plan, 
     )
     return out
 
-def _v85_preencode_multiclip_conditionings(clip, positive, plan, prompts, v329_native_refs=None, lip_sync_audio=None, audio_vae=None):
+def _v85_preencode_multiclip_conditionings(clip, positive, plan, prompts, v329_native_refs=None, lip_sync_audio=None, audio_vae=None, director_clips=None):
     import comfy.sampler_helpers
     # pass 0 is attached once in Setup because the external guider samples that
     # exact CONDITIONING object. Continuation passes are attached below.
@@ -13912,13 +17262,23 @@ def _v85_preencode_multiclip_conditionings(clip, positive, plan, prompts, v329_n
                 encoded, audio_vae, lip_sync_audio, plan, idx,
             )
         raw.append(encoded)
+    temporal_specs = list(getattr(plan, 'segment_temporal_embeddings', None) or [() for _ in raw])
+    for idx, spec in enumerate(director_clips or ()):
+        if spec.get('director_temporal_controls'):
+            raw[idx], temporal_specs[idx] = _lm_encode_director_controls(
+                clip, raw[idx], spec, plan, idx,
+            )
+        elif spec.get('director_conditioning_regions'):
+            raw[idx], temporal_specs[idx] = _lm_encode_director_regions(
+                clip, raw[idx], prompts[idx], spec, plan, idx,
+            )
     converted = tuple(comfy.sampler_helpers.convert_cond(cond) for cond in raw)
     _lm_print(
         '[MiniMaxH3 LongMedia][MULTICLIP LIP SYNC CONDITIONING] '
-        f'pre-encoded {len(converted)} clips; shared native refs preserved; lip_sync_guide={bool(lip_sync_audio is not None)}',
+        f'pre-encoded {len(converted)} clips; shared native refs preserved; forced_target_audio={bool(getattr(plan, "lip_sync_target_audio_locked", False))}; legacy_lip_sync_guide={bool(lip_sync_audio is not None)}',
         flush=True,
     )
-    return converted, tuple(str(x) for x in prompts)
+    return converted, tuple(str(x) for x in prompts), raw[0], tuple(temporal_specs)
 
 
 def _v85_segment_seed(plan, base_seed, segment_index):
@@ -14590,6 +17950,317 @@ def _lm_camera_instruction(card, prev_card=None, next_card=None):
     return text
 
 
+def _lm_director_camera_instruction(card, prev_card=None, next_card=None):
+    """Positive-only interval camera compiler used by the Director timeline.
+
+    Endpoint-constrained moves (180/360 orbits) compile against the authored
+    interval.  Their UI pace becomes motion character/easing instead of a
+    contradictory request to barely move while also completing the orbit.
+    """
+    card = dict(card or {})
+    movement_key = str(card.get('movement') or 'Locked-Off / Static')
+    moving = movement_key != 'Locked-Off / Static'
+    if moving and str(card.get('speed') or 'Static') == 'Static':
+        card['speed'] = 'Controlled'
+    state = _lm_camera_state_text(card)
+    rig = state['rig']
+    stabilization = state['stabilization']
+    if moving and state['rig_key'] in ('Tripod / Locked Head', 'Static Security Mount'):
+        rig = 'controlled support following the specified viewpoint trajectory'
+    if moving and state['stabilization_key'] == 'Hard Locked':
+        stabilization = 'precise stabilized execution of the specified trajectory'
+    if not moving:
+        stabilization = 'fixed viewpoint position, orientation and framing throughout this interval'
+
+    interval = max(0.0, float(card.get('director_interval_seconds') or 0.0))
+    constrained = {
+        'Full 360 Orbit Clockwise': ('clockwise', 360),
+        'Full 360 Orbit Counterclockwise': ('counterclockwise', 360),
+        'Half Orbit Clockwise': ('clockwise', 180),
+        'Half Orbit Counterclockwise': ('counterclockwise', 180),
+    }.get(movement_key)
+    if constrained is not None:
+        direction, degrees = constrained
+        phase_start = max(0.0, min(1.0, float(card.get('director_trajectory_phase_start') or 0.0)))
+        phase_end = max(phase_start, min(1.0, float(card.get('director_trajectory_phase_end') if card.get('director_trajectory_phase_end') is not None else 1.0)))
+        angle_start = float(degrees) * phase_start
+        angle_end = float(degrees) * phase_end
+        block_duration = max(0.0, float(card.get('director_camera_block_duration_seconds') or interval))
+        duration_text = (
+            f' during this {interval:.2f}-second interval'
+            if interval > 0.0 else ' during this interval'
+        )
+        block_text = (
+            f' The complete authored camera block spans {block_duration:.2f} seconds.'
+            if block_duration > 0.0 else ''
+        )
+        movement_text = (
+            f'the viewpoint follows one continuous subject-centered {direction} orbital trajectory, progressing '
+            f'from {angle_start:.1f} degrees to {angle_end:.1f} degrees of the authored {degrees}-degree orbit'
+            f'{duration_text}.{block_text}'
+        )
+        pace_text = (
+            'exceptionally smooth, deliberate trajectory execution with stable angular progression and polished easing'
+            if state['speed_key'] == 'Ultra Slow'
+            else f'{state["speed"]}, normalized to reach the authored trajectory phase endpoint within the interval'
+        )
+    else:
+        if not moving:
+            movement_text = 'one fixed viewpoint position and orientation maintained continuously'
+            pace_text = 'constant framing and constant image-plane scale throughout the interval'
+        else:
+            movement_text = state['movement']
+            pace_text = state['speed']
+
+    static_geometry_contract = (
+        'The opening-frame composition remains the spatial reference throughout the interval: '
+        'framing, crop, horizon, optical perspective, subject image-plane scale, and background proportions remain constant while scene-internal motion continues naturally.'
+        if not moving else ''
+    )
+    return ' '.join(x for x in (
+        '[VIEWPOINT DIRECTION]',
+        f"Framing: {state['shot']}.", f"Viewpoint feel: {rig}.",
+        f"Image character: {state['body']}.", f"Optical perspective: {state['lens']}.",
+        f"Motion feel: {stabilization}.", f"Viewpoint motion: {movement_text}.",
+        f"Motion pace: {pace_text}.",
+        'The specified cinematography is active throughout this interval.',
+        static_geometry_contract,
+        'Subject identity, scene geometry, lighting and action remain coherent.',
+    ) if x)
+
+
+def _lm_director_resolve_canvas(document: dict) -> dict:
+    """Resolve Director-owned output geometry independently from Setup width/height.
+
+    Resolution Source owns aspect ratio; megapixel owns total pixel budget. Base Layer
+    uses the first MAIN visual media assignment with known dimensions, then falls back
+    to the first visual asset, then to 16:9. Custom W x H is treated as an aspect source.
+    Final H3 geometry is snapped to the existing 32px canvas contract.
+    """
+    doc = document if isinstance(document, dict) else {}
+    source = str(doc.get('resolution_source') or 'base_layer').strip().lower()
+    allowed = {'base_layer', 'custom', '16:9', '9:16', '1:1', '4:3', '3:4', '21:9', '2.39:1'}
+    if source not in allowed:
+        source = 'base_layer'
+    try:
+        megapixel = float(doc.get('megapixel', 0.8))
+    except Exception:
+        megapixel = 0.8
+    if not math.isfinite(megapixel):
+        megapixel = 0.8
+    megapixel = max(0.1, min(8.0, megapixel))
+
+    ratio_w = ratio_h = None
+    basis = source
+    if source == 'base_layer':
+        subjects = {
+            str(item.get('subject_id') or ''): item
+            for item in (doc.get('subjects') or []) if isinstance(item, dict)
+        }
+        candidates = []
+        for shot in (doc.get('shots') or []):
+            if not isinstance(shot, dict):
+                continue
+            sid = str(shot.get('media_subject_id') or '')
+            subject = subjects.get(sid)
+            media = subject.get('media') if isinstance(subject, dict) else None
+            if isinstance(media, dict):
+                candidates.append((sid, media))
+        if not candidates:
+            for sid, subject in subjects.items():
+                if str(subject.get('kind') or '') not in ('Picture', 'Video'):
+                    continue
+                media = subject.get('media')
+                if isinstance(media, dict):
+                    candidates.append((sid, media))
+        for sid, media in candidates:
+            try:
+                w = int(media.get('width') or 0); h = int(media.get('height') or 0)
+            except Exception:
+                w = h = 0
+            if w > 0 and h > 0:
+                ratio_w, ratio_h = w, h
+                basis = f'base_layer:{sid}'
+                break
+        if ratio_w is None:
+            ratio_w, ratio_h = 16, 9
+            basis = 'base_layer:fallback_16:9'
+    elif source == 'custom':
+        raw = str(doc.get('resolution') or '1920x1080').lower().replace('×', 'x').replace(' ', '')
+        try:
+            lhs, rhs = raw.split('x', 1)
+            ratio_w, ratio_h = max(1, int(lhs)), max(1, int(rhs))
+        except Exception:
+            ratio_w, ratio_h = 16, 9
+            basis = 'custom:fallback_16:9'
+    else:
+        if source == '2.39:1':
+            ratio_w, ratio_h = 239, 100
+        else:
+            try:
+                lhs, rhs = source.split(':', 1)
+                ratio_w, ratio_h = float(lhs), float(rhs)
+            except Exception:
+                ratio_w, ratio_h = 16, 9
+                basis = f'{source}:fallback_16:9'
+
+    ratio = max(1e-6, float(ratio_w) / float(ratio_h))
+    pixels = megapixel * 1_000_000.0
+    raw_w = math.sqrt(pixels * ratio)
+    raw_h = pixels / raw_w
+    requested_w = max(32, int(round(raw_w / 32.0) * 32))
+    requested_h = max(32, int(round(raw_h / 32.0) * 32))
+    safe_w, safe_h, geom = _h3_safe_target_canvas(requested_w, requested_h)
+    return {
+        'source': source,
+        'basis': basis,
+        'resolution': str(doc.get('resolution') or '1920x1080'),
+        'megapixel': megapixel,
+        'aspect_ratio': ratio,
+        'width': int(safe_w),
+        'height': int(safe_h),
+        'actual_megapixel': float(safe_w * safe_h) / 1_000_000.0,
+        'geometry': geom,
+    }
+
+
+class MiniMaxH3LongMediaDirector:
+    """Semantic timeline authoring layer for LongMedia MultiClip execution.
+
+    The frontend edits human-authored seconds, shots, WHO & WHAT references,
+    camera state and audio directions. Python compiles that document, camera
+    transition state and Director-managed media into one H3_LONGMEDIA_DIRECTOR
+    contract consumed by Long Media Setup. H3 frame-lattice alignment remains
+    owned by the LongMedia execution planner.
+    """
+
+    DESCRIPTION = (
+        'Timeline director for LongMedia. Author shots, references, camera transitions and audio-reactive directions on one semantic timeline, '
+        'then connect the single director output to Long Media Setup. Director selects MultiClip timeline execution automatically.'
+    )
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            'required': {
+                'global_prompt': ('STRING', {
+                    'default': '',
+                    'multiline': True,
+                    'tooltip': 'Persistent world/style/character context shared by every Director shot.',
+                }),
+                'director_json': ('STRING', {
+                    'default': _director_default_json(),
+                    'multiline': True,
+                    'tooltip': 'Internal serialized Director timeline. The frontend replaces this raw JSON field with the timeline editor.',
+                }),
+            },
+            'hidden': {'unique_id': 'UNIQUE_ID'},
+        }
+
+    RETURN_TYPES = ('H3_LONGMEDIA_DIRECTOR', 'STRING')
+    RETURN_NAMES = ('director', 'report')
+    FUNCTION = 'build'
+    CATEGORY = CATEGORY_LONGMEDIA
+
+    def build(self, global_prompt, director_json, unique_id=None):
+        clip_plan, camera_plan, director_plan, report = _compile_director_plan(
+            director_json,
+            global_prompt=global_prompt,
+            camera_compiler=_lm_director_camera_instruction,
+        )
+        director_media = _lm_build_director_media_bundle(director_json)
+        _document = director_plan.get('document') if isinstance(director_plan, dict) else None
+        _director_audio_mode = str((_document or {}).get('audio_mode') or 'auto')
+        _document = _document if isinstance(_document, dict) else {}
+        _director_h3_mode = str((_document or {}).get('setup_h3_mode') or 'auto').strip().lower()
+        if _director_h3_mode not in ('auto', 't2va', 'fl2va', 'ref2va', 'hybrid', 'video_ref_edit'):
+            _director_h3_mode = 'auto'
+        _director_timeline_mode = str((_document or {}).get('setup_timeline_mode') or 'auto').strip().lower()
+        if _director_timeline_mode not in ('auto', 'single', 'segmented', 'multiclip'):
+            _director_timeline_mode = 'auto'
+        _director_resolution = _lm_director_resolve_canvas(_document or {})
+        # Keep the browser-authored document, not only the compiler projection. The
+        # compiler intentionally drops editor-only fields such as scene anchoring and
+        # UI timeline preferences, but Restore Take must recover the authored state.
+        try:
+            _timeline_snapshot = json.loads(str(director_json or '{}'))
+        except Exception:
+            _timeline_snapshot = {}
+        if not isinstance(_timeline_snapshot, dict):
+            _timeline_snapshot = {}
+        if not _timeline_snapshot:
+            _timeline_snapshot = dict(_document)
+        else:
+            # Canonical project identity comes from the normalized compiler document.
+            _timeline_snapshot = dict(_timeline_snapshot)
+            _timeline_snapshot['project_id'] = str(_document.get('project_id') or _timeline_snapshot.get('project_id') or '')
+        # Regeneration is an execution command, not authored timeline state. Persisting
+        # an old request_id would make a restored take queue stale work on a later run.
+        _timeline_snapshot['regeneration'] = {'mode': 'none', 'clip_id': None, 'request_id': None}
+        # global_prompt is serialized by ComfyUI as a separate widget, outside
+        # director_json. TAKE restore must nevertheless recover one complete authored
+        # Director state, so embed an immutable copy in the take timeline snapshot.
+        _timeline_snapshot['_global_prompt'] = str(global_prompt or '')
+        _frame_anchor_settings = (
+            dict(director_plan.get('frame_anchors') or {})
+            if isinstance(director_plan, dict) and isinstance(director_plan.get('frame_anchors'), dict)
+            else {'enabled': False}
+        )
+        _native_character_replace = (
+            dict(director_plan.get('native_character_replace') or {})
+            if isinstance(director_plan, dict) and isinstance(director_plan.get('native_character_replace'), dict)
+            else None
+        )
+        if _native_character_replace is not None:
+            _source_sid = str(_native_character_replace.get('source_video_subject_id') or '')
+            _source_entry = next((
+                item for item in (director_media.get('manifest') or [])
+                if isinstance(item, dict) and str(item.get('subject_id') or '') == _source_sid
+            ), None)
+            if isinstance(_source_entry, dict):
+                _native_character_replace['source_has_paired_audio'] = bool(_source_entry.get('paired_audio'))
+                _native_character_replace['source_fps'] = _source_entry.get('source_fps')
+            _character_sid = str(_native_character_replace.get('character_subject_id') or '')
+            _character_entry = next((
+                item for item in (director_media.get('manifest') or [])
+                if isinstance(item, dict) and str(item.get('subject_id') or '') == _character_sid
+            ), None)
+            if isinstance(_character_entry, dict) and _character_entry.get('runtime_slot') is not None:
+                _native_character_replace['character_picture_runtime_slot'] = int(_character_entry.get('runtime_slot'))
+        director = {
+            'version': 2,
+            'kind': 'h3_longmedia_director',
+            'source': 'MiniMax H3 LongMedia Director',
+            'node_id': str(unique_id or ''),
+            'project_id': str(_document.get('project_id') or director_plan.get('project_id') or ''),
+            'regeneration': dict(_document.get('regeneration') or {'mode': 'none', 'clip_id': None, 'request_id': None}),
+            'timeline_snapshot': _timeline_snapshot,
+            'clip_plan': clip_plan,
+            'camera_plan': camera_plan,
+            'media': director_media,
+            'plan': director_plan,
+            'settings': {
+                'audio_mode': _director_audio_mode,
+                'h3_mode': _director_h3_mode,
+                'timeline_mode': _director_timeline_mode,
+                'segmented_count': int(_document.get('segmented_count') or 3),
+                'segmented_duration': float(_document.get('segmented_duration') or 5.0),
+                'resolution_source': str(_director_resolution.get('source') or 'base_layer'),
+                'resolution': str(_director_resolution.get('resolution') or '1920x1080'),
+                'megapixel': float(_director_resolution.get('megapixel') or 0.8),
+                'width': int(_director_resolution.get('width') or 0),
+                'height': int(_director_resolution.get('height') or 0),
+                'resolution_basis': str(_director_resolution.get('basis') or ''),
+                'actual_megapixel': float(_director_resolution.get('actual_megapixel') or 0.0),
+                'frame_anchors': _frame_anchor_settings,
+                'native_character_replace': _native_character_replace,
+            },
+            'clip_count': int(len(clip_plan.get('clips') or [])),
+            'requested_seconds': float(director_plan.get('total_duration') or 0.0),
+        }
+        return (director, report)
+
+
 class MiniMaxH3LongMediaCameras:
     DESCRIPTION = (
         "Per-clip LongMedia camera direction with stable Planner clip identity: shot size, camera/capture profile, "
@@ -15166,7 +18837,7 @@ class MiniMaxH3LatentLabLongMediaSetup:
                     {'default': 24.0, 'min': 1.0, 'max': 120.0, 'step': 1.0},
                 ),
                 'video_mode': (['auto', 'preserve', 'transform'],),
-                'audio_mode': (['auto', 'preserve', 'generate', 'reference_only', 'preserve_reference', 'lip_sync'], {'tooltip': 'auto: legacy behavior; in video_ref_edit, connected audio_1 is also the authoritative source-performance timing clock and is restored untouched. preserve: restore original audio at output; in video_ref_edit it also locks replacement facial/mouth timing to audio_1. generate: generate final H3 audio. reference_only: use input audio as H3 reference but output generated audio. preserve_reference: use input audio as H3 reference/timing source and restore the untouched original track; in video_ref_edit it also locks source-performance sync. lip_sync: audio_1 stays native <Audio 1> Ref2VA content conditioning and is also time-anchored per clip; the untouched audio_1 is restored at output.'}),
+                'audio_mode': (['auto', 'preserve', 'generate', 'reference_only', 'preserve_reference', 'lip_sync'], {'tooltip': 'auto: legacy behavior; in video_ref_edit, connected audio_1 is also the authoritative source-performance timing clock and is restored untouched. preserve: restore original audio at output; in video_ref_edit it also locks replacement facial/mouth timing to audio_1. generate: generate final H3 audio. reference_only: use input audio as H3 reference but output generated audio. preserve_reference: use input audio as H3 reference/timing source and restore the untouched original track; in video_ref_edit it also locks source-performance sync. lip_sync: audio_1 is encoded directly into the target H3 audio stream and frozen as the sole speech/singing clock; it is not duplicated as a Ref2VA audio reference. MultiClip slices the exact global waveform per clip and restores the untouched audio_1 at output.'}),
                 'conditioning_mode': (
                     ['auto_refs', 'hybrid_first_frame', 'hybrid_first_last', 'multiclip_ref2va'],
                     {
@@ -15178,6 +18849,18 @@ class MiniMaxH3LatentLabLongMediaSetup:
                             'hybrid_first_last: image_1 is the first keyframe, image_2 is the last keyframe, '
                             'and image_3..image_9 become <Picture 1>..<Picture 7> refs. '
                             'Manual mode only. auto_refs sends all connected images as Picture refs. hybrid_first_frame uses image_1 as the opening keyframe. hybrid_first_last uses image_1/image_2 as first/last keyframes. video_1..3 and audio_1..3 remain native H3 refs.'
+                        ),
+                    },
+                ),
+                'motion_repair': (
+                    ['off', 'auto', 'fluid', 'strong'],
+                    {
+                        'default': 'off',
+                        'tooltip': (
+                            'Optional temporal anti-smear repair. off preserves the historical sampling path. '
+                            'auto detects overloaded fast-motion spans in the completed H3 latent and selectively re-renders only those temporal regions. '
+                            'fluid is more sensitive to fine chaotic structures such as water jets, spray, smoke, hair and cloth. '
+                            'strong uses wider/more aggressive local temporal dilation. Audio is frozen during repair and the original audio latent is restored exactly.'
                         ),
                     },
                 ),
@@ -15194,7 +18877,10 @@ class MiniMaxH3LatentLabLongMediaSetup:
                     },
                 ),
                 'clip_plan': ('H3_LONGMEDIA_CLIP_PLAN', {
-                    'tooltip': 'Connect MiniMax H3 LongMedia Planner. It is authoritative only when timeline_mode=multiclip; single/segmented timelines ignore the connected Planner.',
+                    'tooltip': 'Connect MiniMax H3 LongMedia Planner/Cameras. It is authoritative only when timeline_mode=multiclip and no Director is connected.',
+                }),
+                'director': ('H3_LONGMEDIA_DIRECTOR', {
+                    'tooltip': 'Single LongMedia Director contract: complete Director timeline, camera transitions and Director-managed Picture/Video/Audio media. One MAIN shot is valid; two or more use native MultiClip continuation. Explicit Setup image/video/audio sockets still override matching Director media slots.',
                 }),
                 'workflow_mode': (
                     ['hybrid_auto', 'segmented_continuation', 'multiclip', 'reconstruct', 'ref2va_full', 'loop', 'manual', 'video_ref_edit'],
@@ -15232,9 +18918,9 @@ class MiniMaxH3LatentLabLongMediaSetup:
                 'video_1': ('IMAGE', {'lazy': True, 'tooltip': 'Video frames only (IMAGE batch). video_ref_edit: primary motion/camera/composition source as <Video 1>. Other modes: regular <Video 1> reference. If the source video has audio, connect that extracted audio to audio_1.'}),
                 'video_2': ('IMAGE', {'lazy': True, 'tooltip': 'Video frames only (IMAGE batch). Passed as <Video 2> reference. Pair with audio_2 when they come from the same source.'}),
                 'video_3': ('IMAGE', {'lazy': True, 'tooltip': 'Video frames only (IMAGE batch). Passed as <Video 3> reference. Pair with audio_3 when they come from the same source.'}),
-                'audio_1': ('AUDIO', {'tooltip': 'Native MiniMax H3 <Audio 1> reference. In video_ref_edit with auto/preserve/preserve_reference, audio_1 is the paired source-performance clock and can be addressed from the prompt. With audio_mode=lip_sync, Audio 1 is an independent authoritative dub/timing source rather than the soundtrack paired to Video 1. duration_source controls timeline length separately.'}),
-                'audio_2': ('AUDIO', {'lazy': True, 'tooltip': 'Optional second native H3 audio reference. In video_ref_edit it remains standalone <Audio 2> prompt conditioning, independent from Audio 1 timing/output ownership.'}),
-                'audio_3': ('AUDIO', {'lazy': True, 'tooltip': 'Optional third native H3 audio reference. In video_ref_edit it remains standalone <Audio 3> prompt conditioning, independent from Audio 1 timing/output ownership.'}),
+                'audio_1': ('AUDIO', {'tooltip': 'Native MiniMax H3 <Audio 1> reference. In video_ref_edit with auto/preserve/preserve_reference, audio_1 is the paired source-performance clock and can be addressed from the prompt. With audio_mode=lip_sync, Audio 1 is the authoritative forced target-audio clock and is excluded from native Ref2VA audio references. duration_source controls timeline length separately.'}),
+                'audio_2': ('AUDIO', {'lazy': True, 'tooltip': 'Optional second native H3 audio reference in normal modes. audio_mode=lip_sync disables native audio references so the forced Audio 1 target clock remains unambiguous.'}),
+                'audio_3': ('AUDIO', {'lazy': True, 'tooltip': 'Optional third native H3 audio reference in normal modes. audio_mode=lip_sync disables native audio references so the forced Audio 1 target clock remains unambiguous.'}),
                 'loop_closure_strength': (
                     'FLOAT',
                     {
@@ -15243,10 +18929,10 @@ class MiniMaxH3LatentLabLongMediaSetup:
                     },
                 ),
                 'control_mode': (
-                    ['auto', 'manual'],
+                    ['auto', 'director', 'manual'],
                     {
                         'default': 'auto',
-                        'tooltip': 'Setup control surface. auto derives safe internal policies from H3 Mode + Timeline. manual exposes the advanced Setup-only conditioning/transition controls.',
+                        'tooltip': 'Setup control surface. auto uses Setup H3/timeline/audio choices. director lets a connected LongMedia Director own MultiClip conditioning/audio semantics while Setup media sockets remain explicit overrides. manual exposes advanced Setup-only conditioning/transition controls.',
                     },
                 ),
                 'h3_mode': (
@@ -15317,7 +19003,7 @@ class MiniMaxH3LatentLabLongMediaSetup:
     def setup(self, clip, vae, audio_vae, prompt, width, height, manual_duration,
               duration_source, segment_seconds, overlap_frames, loop_closure_enabled, loop_closure_frames, resolution_mode,
               reference_budget, video_fps, video_mode, audio_mode,
-              release_guard=True, clip_plan=None, reconstruction=None, workflow_mode='hybrid_auto', generation_mode='auto', conditioning_mode='auto_refs',
+              release_guard=True, clip_plan=None, director=None, reconstruction=None, workflow_mode='hybrid_auto', generation_mode='auto', conditioning_mode='auto_refs', motion_repair='off',
               control_mode=None, h3_mode=None, timeline_mode=None, transition_frames=22,
               first_frame_mode='latent_inject',
               first_frame_denoise=0.25, first_frame_blend_frames=3,
@@ -15340,10 +19026,177 @@ class MiniMaxH3LatentLabLongMediaSetup:
         # important when re-running a workflow after H3 occupied most of VRAM.
         setup_memory_events.append(_setup_memory_isolation('setup_entry', unload_models=True))
 
+        # Single Director bridge. One Director socket carries the complete authored
+        # MultiClip plan, camera-transition contract and runtime media bundle. Explicit
+        # Setup image/video/audio sockets remain authoritative for manual overrides.
+        director_cfg = director if isinstance(director, dict) else None
+        director_clip_plan = None
+        director_media_cfg = None
+        director_settings_cfg = None
+        director_plan_cfg = None
+        director_native_character_replace_cfg = None
+        director_frame_anchor_cfg = None
+        director_first_anchor_image = None
+        director_last_anchor_image = None
+        _explicit_director_image_inputs = tuple(v is not None for v in (image_1, image_2, image_3, image_4, image_5, image_6, image_7, image_8, image_9))
+        _explicit_director_video_inputs = tuple(v is not None for v in (video_1, video_2, video_3))
+        _explicit_director_audio_inputs = tuple(v is not None for v in (audio_1, audio_2, audio_3))
+        director_project_id = ''
+        director_node_id = ''
+        director_timeline_snapshot = None
+        director_regeneration_cfg = {'mode': 'none', 'clip_id': None, 'request_id': None}
+        if director_cfg is not None:
+            if str(director_cfg.get('kind') or '') != 'h3_longmedia_director' or int(director_cfg.get('version', 0) or 0) not in (1, 2):
+                raise ValueError('Invalid H3_LONGMEDIA_DIRECTOR payload. Rebuild it with MiniMax H3 LongMedia Director.')
+            director_clip_plan = director_cfg.get('clip_plan')
+            if not isinstance(director_clip_plan, dict) or str(director_clip_plan.get('kind') or '') != 'h3_longmedia_clip_plan':
+                raise ValueError('LongMedia Director payload is missing a valid embedded clip_plan.')
+            director_media_cfg = director_cfg.get('media')
+            director_settings_cfg = director_cfg.get('settings') if isinstance(director_cfg.get('settings'), dict) else {}
+            director_plan_cfg = director_cfg.get('plan') if isinstance(director_cfg.get('plan'), dict) else {}
+            _native_cfg = (director_settings_cfg or {}).get('native_character_replace')
+            director_native_character_replace_cfg = dict(_native_cfg) if isinstance(_native_cfg, dict) and bool(_native_cfg.get('enabled')) else None
+            _anchor_cfg = (director_settings_cfg or {}).get('frame_anchors')
+            director_frame_anchor_cfg = dict(_anchor_cfg) if isinstance(_anchor_cfg, dict) and bool(_anchor_cfg.get('enabled')) else None
+            director_project_id = str(director_cfg.get('project_id') or director_plan_cfg.get('project_id') or '').strip()
+            director_node_id = str(director_cfg.get('node_id') or '').strip()
+            _snapshot = director_cfg.get('timeline_snapshot')
+            if not isinstance(_snapshot, dict):
+                _snapshot = director_plan_cfg.get('document') if isinstance(director_plan_cfg.get('document'), dict) else None
+            if isinstance(_snapshot, dict):
+                # JSON round-trip gives the immutable plan its own plain-data copy and
+                # guarantees that take metadata can be serialized without custom types.
+                try:
+                    director_timeline_snapshot = json.loads(json.dumps(_snapshot, ensure_ascii=False))
+                except Exception as _snapshot_exc:
+                    raise ValueError(f'Director timeline snapshot is not JSON serializable: {_snapshot_exc}') from _snapshot_exc
+                director_timeline_snapshot['project_id'] = director_project_id or str(director_timeline_snapshot.get('project_id') or '')
+                director_timeline_snapshot['regeneration'] = {'mode': 'none', 'clip_id': None, 'request_id': None}
+            _regen = director_cfg.get('regeneration')
+            if not isinstance(_regen, dict):
+                _regen = director_plan_cfg.get('regeneration') if isinstance(director_plan_cfg.get('regeneration'), dict) else {}
+            _regen_mode = str(_regen.get('mode') or 'none').strip().lower()
+            if _regen_mode not in ('none', 'clip', 'from_here', 'recast', 'recast_range'):
+                _regen_mode = 'none'
+            director_regeneration_cfg = {
+                'mode': _regen_mode,
+                'clip_id': (str(_regen.get('clip_id') or '').strip() or None),
+                'request_id': (str(_regen.get('request_id') or '').strip() or None),
+                'source_revision': (str(_regen.get('source_revision') or '').strip() or None),
+                'recast_subject_id': (str(_regen.get('recast_subject_id') or '').strip() or None),
+                'preserve_audio': bool(_regen.get('preserve_audio', _regen_mode in ('recast', 'recast_range'))),
+                'recast_video_denoise': 1.0,  # legacy serialization compatibility
+                'recast_reference_scale': str(_regen.get('recast_reference_scale') or 'auto').strip().lower(),
+                'recast_clip_ids': tuple(str(v) for v in (_regen.get('recast_clip_ids') or []) if str(v).strip()),
+                'source_revisions': {str(k): str(v) for k, v in ((_regen.get('source_revisions') or {}).items()) if str(k).strip() and str(v).strip()},
+            }
+            if director_media_cfg is not None and (
+                not isinstance(director_media_cfg, dict)
+                or str(director_media_cfg.get('kind') or '') != 'h3_longmedia_director_media'
+            ):
+                raise ValueError('LongMedia Director payload contains an invalid media bundle.')
+
+        if director_media_cfg is not None:
+            _dm_images = list(director_media_cfg.get('images') or [])
+            _dm_videos = list(director_media_cfg.get('videos') or [])
+            _dm_audios = list(director_media_cfg.get('audios') or [])
+            _dm_frame_anchors = director_media_cfg.get('frame_anchors') if isinstance(director_media_cfg.get('frame_anchors'), dict) else {}
+            director_first_anchor_image = _dm_frame_anchors.get('first')
+            director_last_anchor_image = _dm_frame_anchors.get('last')
+            _img_values = [image_1, image_2, image_3, image_4, image_5, image_6, image_7, image_8, image_9]
+            _vid_values = [video_1, video_2, video_3]
+            _aud_values = [audio_1, audio_2, audio_3]
+            for _i in range(min(9, len(_dm_images))):
+                if _img_values[_i] is None and _dm_images[_i] is not None:
+                    _img_values[_i] = _dm_images[_i]
+            for _i in range(min(3, len(_dm_videos))):
+                if _vid_values[_i] is None and _dm_videos[_i] is not None:
+                    _vid_values[_i] = _dm_videos[_i]
+            for _i in range(min(3, len(_dm_audios))):
+                if _aud_values[_i] is None and _dm_audios[_i] is not None:
+                    _aud_values[_i] = _dm_audios[_i]
+            if director_native_character_replace_cfg is not None:
+                _source_slot = max(1, min(3, int(director_native_character_replace_cfg.get('source_video_slot') or 1)))
+                _character_slot = max(1, min(9, int(
+                    director_native_character_replace_cfg.get('character_picture_runtime_slot')
+                    or director_native_character_replace_cfg.get('character_picture_slot')
+                    or 1
+                )))
+                _source_video = _vid_values[0] if _explicit_director_video_inputs[0] else _vid_values[_source_slot - 1]
+                if _source_video is None:
+                    raise ValueError(
+                        'Director Native Character Replace requires the BASE / MAIN source video. '
+                        'Reattach the source video to the MAIN shot or provide an explicit Setup.video_1 override.'
+                    )
+                _character_image = _img_values[_character_slot - 1]
+                if _character_image is None:
+                    raise ValueError(
+                        'Director Native Character Replace requires the Picture subject selected on the full-shot CHARACTER layer.'
+                    )
+                # Promote the authored BASE source into Video 1 because native H3
+                # video_ref_edit defines Video 1 as the source-performance stream.
+                # Explicit Setup.video_1 remains the highest-priority override.
+                _native_vid_values = [_source_video, None, None]
+                for _i in (1, 2):
+                    if _explicit_director_video_inputs[_i]:
+                        _native_vid_values[_i] = _vid_values[_i]
+                _vid_values = _native_vid_values
+
+                # If the BASE video lived in Video 2/3, its embedded soundtrack must
+                # move with it to Audio 1.  An explicit Setup.audio_1 override remains
+                # authoritative and may intentionally provide replacement dialogue.
+                _source_audio = _aud_values[0] if _explicit_director_audio_inputs[0] else _aud_values[_source_slot - 1]
+                _native_aud_values = list(_aud_values)
+                if _source_slot != 1 and not _explicit_director_audio_inputs[_source_slot - 1]:
+                    _native_aud_values[_source_slot - 1] = None
+                if not _explicit_director_audio_inputs[0]:
+                    _native_aud_values[0] = _source_audio
+                _aud_values = _native_aud_values
+
+                # WHO & WHAT is an asset library.  Unused Director pictures must not
+                # silently become competing identities.  Keep the CHARACTER picture
+                # plus any explicit Setup image overrides the user deliberately wired.
+                for _i in range(9):
+                    if _i != (_character_slot - 1) and not _explicit_director_image_inputs[_i]:
+                        _img_values[_i] = None
+
+                if not _explicit_director_video_inputs[0]:
+                    try:
+                        _native_fps = float(director_native_character_replace_cfg.get('source_fps') or 0.0)
+                    except Exception:
+                        _native_fps = 0.0
+                    if _native_fps > 0.0:
+                        video_fps = _native_fps
+
+                _lm_print(
+                    '[MiniMaxH3 LongMedia][DIRECTOR NATIVE CHARACTER REPLACE] '
+                    f'armed; source_subject={director_native_character_replace_cfg.get("source_video_subject_id")}; '
+                    f'source_slot=Video{_source_slot}->Video1; character_subject={director_native_character_replace_cfg.get("character_subject_id")}; '
+                    f'character_slot=Picture{_character_slot}; source_audio_to_Audio1={bool(_aud_values[0] is not None)}; '
+                    f'fps={float(video_fps):.3f}',
+                    flush=True,
+                )
+
+            (image_1, image_2, image_3, image_4, image_5, image_6, image_7, image_8, image_9) = _img_values
+            (video_1, video_2, video_3) = _vid_values
+            (audio_1, audio_2, audio_3) = _aud_values
+
         effective_prompt = prompt
         segment0_prompt = None
         hybrid_artifacts = None
         audio_mode = str(audio_mode or 'auto')
+        motion_repair = _normalize_motion_repair_mode(motion_repair)
+        # Director control owns audio semantics, so apply its policy before any
+        # lip-sync validation or reconstruction/audio routing inspects audio_mode.
+        # This avoids a hidden stale Setup audio_mode from either falsely arming or
+        # suppressing Director lip-sync.
+        if str(control_mode or '') == 'director':
+            if director_cfg is None:
+                raise ValueError("control_mode='director' requires the LongMedia Director output connected to Setup.director.")
+            _early_director_audio_mode = str((director_settings_cfg or {}).get('audio_mode') or 'auto')
+            if _early_director_audio_mode not in ('auto', 'preserve', 'generate', 'reference_only', 'preserve_reference', 'lip_sync'):
+                _early_director_audio_mode = 'auto'
+            audio_mode = _early_director_audio_mode
         # v0.3.95: lip-sync is an audio policy, not a separate generation workflow.
         # Migrate legacy workflows that still carry generation_mode=lip_sync.
         if str(generation_mode or 'auto') == 'lip_sync' and audio_mode != 'lip_sync':
@@ -15355,7 +19208,7 @@ class MiniMaxH3LatentLabLongMediaSetup:
         video_ref_edit_audio_sync = False
         video_ref_edit_conditioning_audio_count = 0
         preserve_audio_output = audio_mode in ('preserve', 'preserve_reference')
-        use_audio_as_reference = audio_mode != 'preserve'
+        use_audio_as_reference = audio_mode not in ('preserve', 'lip_sync')
 
         reconstruction_cfg = reconstruction if isinstance(reconstruction, dict) else None
         reconstruction_strength = 1.0
@@ -15425,27 +19278,83 @@ class MiniMaxH3LatentLabLongMediaSetup:
         segmented_opening_frame = opening_frame
         videos = [v for v in [video_1, video_2, video_3] if v is not None]
         audios = [a for a in [audio_1, audio_2, audio_3] if a is not None]
+        director_reference_fingerprint = ''
+        if director_cfg is not None:
+            director_reference_fingerprint = _lm_director_reference_fingerprint(
+                [image_1, image_2, image_3, image_4, image_5, image_6, image_7, image_8, image_9],
+                [video_1, video_2, video_3],
+                [audio_1, audio_2, audio_3],
+                (director_media_cfg or {}).get('manifest') if isinstance(director_media_cfg, dict) else None,
+                (director_media_cfg or {}).get('frame_anchors') if isinstance(director_media_cfg, dict) else None,
+            )
         if lip_sync_enabled:
-            if image_1 is None or audio_1 is None:
-                missing = []
-                if image_1 is None:
-                    missing.append('image_1')
-                if audio_1 is None:
-                    missing.append('audio_1')
-                raise ValueError(
-                    "audio_mode='lip_sync' requires connected image_1 and audio_1; missing: "
-                    + ', '.join(missing)
-                )
-            # Audio 1 is the authoritative speech/singing clock. Audio 2/3 remain
-            # ordinary native H3 audio references so prompts can address additional
-            # music, percussion, bass, ambience, etc. They never replace Audio 1's
-            # lip-sync timing authority or the clean final Audio 1 output track.
+            if audio_1 is None:
+                raise ValueError("audio_mode='lip_sync' requires connected audio_1 as the forced target-audio clock.")
+            # Audio1 is the sole speech/singing timing authority. It is injected into
+            # the target H3 audio stream and frozen; native audio references are
+            # deliberately disabled in this mode to avoid competing audio semantics.
+            # image_1 is optional, so the same forced-audio path works for T2VA,
+            # Ref2VA, Hybrid, VideoRefEdit and MultiClip/Director timelines.
 
-        # v0.3.49: connected INT nodes can bypass the UI's step=32 constraint.
-        # Normalize every target canvas here so all downstream H3 paths see the
-        # same patch-safe geometry. This is a no-op for existing 32px canvases.
+        # Director owns target geometry. Setup width/height sockets remain visible and
+        # connectable for workflow compatibility, but are intentionally ignored when
+        # control_mode=director so stale external INT nodes cannot override the authored
+        # Director canvas.
+        if str(control_mode or '') == 'director':
+            try:
+                _director_width = int((director_settings_cfg or {}).get('width') or 0)
+                _director_height = int((director_settings_cfg or {}).get('height') or 0)
+            except Exception:
+                _director_width = _director_height = 0
+            if _director_width <= 0 or _director_height <= 0:
+                _resolved_director_geometry = _lm_director_resolve_canvas(
+                    (director_plan_cfg or {}).get('document') if isinstance((director_plan_cfg or {}).get('document'), dict) else {}
+                )
+                _director_width = int(_resolved_director_geometry['width'])
+                _director_height = int(_resolved_director_geometry['height'])
+            width, height = _director_width, _director_height
+            _lm_print(
+                '[MiniMaxH3 LongMedia][DIRECTOR RESOLUTION] '
+                f'source={(director_settings_cfg or {}).get("resolution_source", "base_layer")}; '
+                f'megapixel={(director_settings_cfg or {}).get("megapixel", 0.8)}; '
+                f'canvas={width}x{height}; setup_width_height_ignored=True',
+                flush=True,
+            )
+
+        # Connected INT nodes can bypass the UI's step=32 constraint. Normalize the
+        # selected target canvas so every downstream H3 path sees patch-safe geometry.
         width, height, h3_target_geometry = _h3_safe_target_canvas(width, height)
-        safe_images, h3_ref_geometry = _h3_safe_reference_images(images)
+
+        # v0.6.10 media-safety contract: every external IMAGE/VIDEO input is clamped
+        # to fit inside the active target canvas before any VAE/reference encoding.
+        # This applies uniformly to plain Setup sockets and Director-provided media.
+        image_inputs = [image_1, image_2, image_3, image_4, image_5, image_6, image_7, image_8, image_9]
+        video_inputs = [video_1, video_2, video_3]
+        safe_image_slots = []
+        h3_image_geometry = []
+        for _img in image_inputs:
+            if _img is None:
+                safe_image_slots.append(None)
+                continue
+            _safe_img, _report = _lm_clamp_media_to_target_geometry(_img, width, height, kind='image')
+            safe_image_slots.append(_safe_img)
+            h3_image_geometry.append(_report)
+        safe_video_slots = []
+        h3_video_geometry = []
+        for _vid in video_inputs:
+            if _vid is None:
+                safe_video_slots.append(None)
+                continue
+            _safe_vid, _report = _lm_clamp_media_to_target_geometry(_vid, width, height, kind='video')
+            safe_video_slots.append(_safe_vid)
+            h3_video_geometry.append(_report)
+        (
+            image_1, image_2, image_3, image_4, image_5, image_6, image_7, image_8, image_9,
+        ) = safe_image_slots
+        (video_1, video_2, video_3) = safe_video_slots
+        images = [v for v in safe_image_slots if v is not None]
+        videos = [v for v in safe_video_slots if v is not None]
+        safe_images = list(images)
         safe_image_by_id = {id(src): safe for src, safe in zip(images, safe_images)}
 
         # v0.5.23 Setup architecture: conditioning, timeline and loop are
@@ -15480,12 +19389,121 @@ class MiniMaxH3LatentLabLongMediaSetup:
                 timeline_mode = migrated[2]
             legacy_loop_anchor = legacy_workflow_mode == 'loop'
 
-        if control_mode not in ('auto', 'manual'):
+        if control_mode not in ('auto', 'director', 'manual'):
             raise ValueError(f'Unknown control_mode={control_mode!r}')
         if h3_mode not in ('t2va', 'fl2va', 'ref2va', 'hybrid', 'video_ref_edit'):
             raise ValueError(f'Unknown h3_mode={h3_mode!r}')
         if timeline_mode not in ('single', 'segmented', 'multiclip'):
             raise ValueError(f'Unknown timeline_mode={timeline_mode!r}')
+
+        # A connected Director is a complete authoring contract. In control_mode=director
+        # it owns audio policy and may also own H3/timeline routing through its top-bar
+        # mode selectors. Explicit Setup image/video/audio sockets still override matching
+        # Director media slots after the Director bundle is loaded.
+        if control_mode == 'director':
+            if director_cfg is None:
+                raise ValueError("control_mode='director' requires the LongMedia Director output connected to Setup.director.")
+            _director_audio_mode = str((director_settings_cfg or {}).get('audio_mode') or 'auto')
+            if _director_audio_mode not in ('auto', 'preserve', 'generate', 'reference_only', 'preserve_reference', 'lip_sync'):
+                _director_audio_mode = 'auto'
+            _director_requested_h3_mode = str((director_settings_cfg or {}).get('h3_mode') or 'auto').strip().lower()
+            if _director_requested_h3_mode not in ('auto', 't2va', 'fl2va', 'ref2va', 'hybrid', 'video_ref_edit'):
+                _director_requested_h3_mode = 'auto'
+            _director_requested_timeline_mode = str((director_settings_cfg or {}).get('timeline_mode') or 'auto').strip().lower()
+            if _director_requested_timeline_mode not in ('auto', 'single', 'segmented', 'multiclip'):
+                _director_requested_timeline_mode = 'auto'
+            _director_segmented_count = max(1, min(64, int((director_settings_cfg or {}).get('segmented_count') or 3)))
+            _director_segmented_duration = max(0.25, min(150.0, float((director_settings_cfg or {}).get('segmented_duration') or 5.0)))
+            audio_mode = _director_audio_mode
+            lip_sync_enabled = audio_mode == 'lip_sync'
+            preserve_audio_output = audio_mode in ('preserve', 'preserve_reference')
+            use_audio_as_reference = audio_mode not in ('preserve', 'lip_sync')
+            _director_has_reference_media = bool(images or videos or (use_audio_as_reference and audios))
+            _director_clips = list((director_clip_plan or {}).get('clips') or [])
+            _director_clip_count = len(_director_clips)
+            _director_has_first_anchor = bool(
+                director_frame_anchor_cfg is not None and director_first_anchor_image is not None
+            )
+            _director_has_last_anchor = bool(
+                director_frame_anchor_cfg is not None and director_last_anchor_image is not None
+            )
+            _director_has_frame_anchors = bool(_director_has_first_anchor or _director_has_last_anchor)
+            if _director_has_frame_anchors and _director_requested_h3_mode in ('t2va', 'ref2va', 'video_ref_edit'):
+                raise ValueError(
+                    f"Director FIRST/LAST frame anchors are incompatible with h3_mode={_director_requested_h3_mode!r}. "
+                    "Choose h3_mode=auto, hybrid or fl2va."
+                )
+            if _director_has_last_anchor and _director_clip_count > 1:
+                raise ValueError(
+                    'Director LAST frame anchoring currently requires one MAIN shot. '
+                    'A multi-shot LAST anchor would otherwise be applied to clip 1 instead of the final clip.'
+                )
+            if _director_has_first_anchor and _director_clip_count > 1:
+                _first_clip_id = str((director_frame_anchor_cfg or {}).get('first_clip_id') or '')
+                _timeline_first_id = str((_director_clips[0] or {}).get('clip_id') or '') if _director_clips else ''
+                if _first_clip_id and _timeline_first_id and _first_clip_id != _timeline_first_id:
+                    raise ValueError('Director FIRST frame anchor must belong to the first MAIN shot in MultiClip mode.')
+            if _director_requested_h3_mode == 'fl2va' and _director_has_frame_anchors and not _director_has_first_anchor:
+                raise ValueError('Director fl2va requires a FIRST frame anchor. Use hybrid/auto for LAST-only anchoring.')
+            _director_promote_fl2va_to_hybrid = bool(
+                _director_requested_h3_mode == 'fl2va'
+                and _director_has_frame_anchors
+                and _director_has_reference_media
+            )
+            if _director_promote_fl2va_to_hybrid:
+                _lm_print(
+                    '[MiniMaxH3 LongMedia][DIRECTOR MODE PROMOTION] '
+                    'requested_h3_mode=fl2va; frame_anchors=True; additional_native_refs=True; '
+                    'runtime_h3_mode=hybrid; FIRST/LAST remain native keyframes; refs remain native refs',
+                    flush=True,
+                )
+            if director_native_character_replace_cfg is not None:
+                if _director_clip_count != 1:
+                    raise ValueError(
+                        'Director Native Character Replace currently requires exactly one MAIN shot. '
+                        'Use persistent-take Recast for selective/multi-shot replacement.'
+                    )
+                # Native H3 video_ref_edit is a one-source timeline, so a one-shot
+                # Director project bypasses MultiClip and runs the direct fresh-target
+                # source-performance edit path. The Director prompt remains authoritative
+                # even though the embedded clip plan is not executed directly.
+                h3_mode = 'video_ref_edit'
+                timeline_mode = 'single'
+                _native_global = str((director_clip_plan or {}).get('global_prompt') or '').strip()
+                _native_local = str((_director_clips[0] or {}).get('prompt') or '').strip()
+                effective_prompt = _v043_join_global_local_prompt(_native_global, _native_local)
+            else:
+                # Director-authored media are semantic references, not implicit first/last
+                # keyframes. When the Director H3 selector stays on auto, choose the safe
+                # family from the actual connected media inventory.
+                if _director_requested_h3_mode == 'auto':
+                    if _director_has_frame_anchors:
+                        h3_mode = (
+                            'fl2va'
+                            if _director_clip_count == 1 and _director_has_first_anchor and not _director_has_reference_media
+                            else 'hybrid'
+                        )
+                    else:
+                        h3_mode = 'ref2va' if _director_has_reference_media else 't2va'
+                else:
+                    h3_mode = (
+                        'hybrid'
+                        if _director_promote_fl2va_to_hybrid
+                        else _director_requested_h3_mode
+                    )
+                if _director_requested_timeline_mode == 'auto':
+                    timeline_mode = 'multiclip' if _director_clip_count > 1 else 'single'
+                else:
+                    timeline_mode = _director_requested_timeline_mode
+                if _director_clip_count > 1 and timeline_mode != 'multiclip':
+                    raise ValueError(
+                        'Director timeline_mode=single/segmented requires exactly one MAIN shot. '
+                        'For multiple Director shots choose timeline_mode=multiclip or collapse the MAIN timeline to one shot.'
+                    )
+                if _director_clips and timeline_mode in ('single', 'segmented'):
+                    _director_global = str((director_clip_plan or {}).get('global_prompt') or '').strip()
+                    _director_local = str((_director_clips[0] or {}).get('prompt') or '').strip()
+                    effective_prompt = _v043_join_global_local_prompt(_director_global, _director_local)
 
         # Old workflow_mode=loop may already have been visually migrated by JS,
         # leaving no 'legacy' sentinel for the backend migration branch above.
@@ -15529,7 +19547,11 @@ class MiniMaxH3LatentLabLongMediaSetup:
                 # injection is native-only or LongMedia-enhanced.
                 workflow_mode = 'hybrid_auto'
 
-        external_clip_plan = clip_plan if isinstance(clip_plan, dict) else None
+        # Director owns the MultiClip plan when present. A separately connected Planner
+        # remains available for non-Director workflows, but is ignored while the complete
+        # Director contract is connected to avoid split ownership.
+        external_clip_plan = director_clip_plan if director_clip_plan is not None else (clip_plan if isinstance(clip_plan, dict) else None)
+        external_clip_plan_source = 'director' if director_clip_plan is not None else ('planner' if isinstance(clip_plan, dict) else None)
         planner_global_prompt = ''
         if timeline_mode == 'multiclip' and external_clip_plan is not None:
             kind = str(external_clip_plan.get('kind') or '')
@@ -15542,21 +19564,23 @@ class MiniMaxH3LatentLabLongMediaSetup:
             planner_has_camera_guidance = bool(external_clip_plan.get('camera_plan')) or any(
                 isinstance(c, dict) and c.get('camera_instruction') for c in clips_payload
             )
+            if external_clip_plan_source == 'director':
+                planner_has_camera_guidance = bool((external_clip_plan.get('director') or {}).get('camera_blocks'))
             if planner_has_camera_guidance:
                 planner_global_prompt, _removed_planner_camera_sentences = _lm_strip_camera_directives(planner_global_prompt)
             _lm_print(
-                f'[MiniMaxH3 LongMedia][PLANNER] timeline=multiclip; external clip_plan selected; clips={len(clips_payload)}',
+                f'[MiniMaxH3 LongMedia][TIMELINE] timeline=multiclip; source={external_clip_plan_source}; clips={len(clips_payload)}',
                 flush=True,
             )
         elif external_clip_plan is not None:
             _lm_print(
-                f'[MiniMaxH3 LongMedia][PLANNER] clip_plan connected but timeline={timeline_mode}; planner is ignored',
+                f'[MiniMaxH3 LongMedia][TIMELINE] external clip_plan connected but timeline={timeline_mode}; source={external_clip_plan_source} is ignored',
                 flush=True,
             )
         _lm_print(
             f'[MiniMaxH3 LongMedia][SETUP OWNERSHIP] control={control_mode}; h3={h3_mode}; timeline={timeline_mode}; '
             f'legacy_workflow={legacy_workflow_mode}; internal_workflow={workflow_mode}; '
-            f'planner_connected={external_clip_plan is not None}; '
+            f'timeline_source={external_clip_plan_source}; '
             f'planner_active={bool(timeline_mode == "multiclip" and external_clip_plan is not None)}; '
             f'transition={effective_transition_frames}f',
             flush=True,
@@ -15564,13 +19588,35 @@ class MiniMaxH3LatentLabLongMediaSetup:
 
         loop_last_override = None
         multiclip_clips = None
+        director_same_source_loop = False
 
+        _director_anchor_conditioning_mode = None
+        if control_mode == 'director' and director_frame_anchor_cfg is not None:
+            _has_first = bool(director_first_anchor_image is not None)
+            _has_last = bool(director_last_anchor_image is not None)
+            if _has_first and _has_last:
+                _director_anchor_conditioning_mode = 'hybrid_first_last'
+            elif _has_first:
+                _director_anchor_conditioning_mode = 'hybrid_first_frame'
+            elif _has_last:
+                _director_anchor_conditioning_mode = 'hybrid_last_frame'
+            if h3_mode == 'fl2va' and _director_anchor_conditioning_mode is not None:
+                first_frame_mode = 'native_keyframe'
+
+        _manual_conditioning_override = None
         if control_mode == 'manual':
-            # Manual exposes the legacy low-level conditioning selector without
-            # turning Manual itself into a timeline/workflow mode.
-            conditioning_mode = str(conditioning_mode or 'auto_refs')
-            if conditioning_mode not in ('auto_refs', 'hybrid_first_frame', 'hybrid_first_last', 'multiclip_ref2va'):
-                raise ValueError(f'Unknown manual conditioning_mode={conditioning_mode!r}')
+            # Manual keeps the explicit low-level conditioning selector available, but
+            # leaving it at the historical default 'auto_refs' must not silently disable
+            # the higher-level H3/timeline mode selectors.
+            _manual_conditioning = str(conditioning_mode or 'auto_refs')
+            if _manual_conditioning not in ('auto_refs', 'hybrid_first_frame', 'hybrid_first_last', 'multiclip_ref2va'):
+                raise ValueError(f'Unknown manual conditioning_mode={_manual_conditioning!r}')
+            if _manual_conditioning != 'auto_refs':
+                _manual_conditioning_override = _manual_conditioning
+        if _director_anchor_conditioning_mode is not None:
+            conditioning_mode = _director_anchor_conditioning_mode
+        elif _manual_conditioning_override is not None:
+            conditioning_mode = _manual_conditioning_override
         elif h3_mode == 't2va':
             active_ref_audio = bool(use_audio_as_reference and audios)
             if images or videos or active_ref_audio:
@@ -15637,7 +19683,15 @@ class MiniMaxH3LatentLabLongMediaSetup:
         # payload is authoritative when connected; multiclip_json remains legacy
         # storage/fallback for saved workflows.
         if timeline_mode == 'multiclip':
-            local_clips = _v85_parse_multiclip_json(multiclip_json, '', manual_duration)
+            # Planner/Cameras intentionally remain a 2+ clip authoring surface, while
+            # Director is also the primary authoring UI for an ordinary one-shot render.
+            # The unified MultiClip executor itself is valid with one clip (one pass,
+            # no handoff/overlap is consumed), so accept a single MAIN shot only when
+            # the authoritative clip plan came from Director.
+            _timeline_min_clips = 1 if external_clip_plan_source == 'director' else 2
+            local_clips = _v85_parse_multiclip_json(
+                multiclip_json, '', manual_duration, min_clips=_timeline_min_clips,
+            )
             global_prompt_effective = planner_global_prompt if external_clip_plan is not None else str(prompt or '').strip()
             multiclip_clips = tuple({
                 **dict(c),
@@ -15649,6 +19703,26 @@ class MiniMaxH3LatentLabLongMediaSetup:
         effective_overlap_frames = int(effective_transition_frames) if segmentation_active else 0
         effective_manual_duration = float(manual_duration)
         effective_duration_source = duration_source
+        if control_mode == 'director' and director_cfg is not None and timeline_mode in ('single', 'segmented'):
+            if timeline_mode == 'segmented':
+                effective_segment_seconds = float(_director_segmented_duration)
+                _director_seconds = float(_director_segmented_count) * float(_director_segmented_duration)
+            else:
+                _director_seconds = float(
+                    director_cfg.get('requested_seconds')
+                    or (director_plan_cfg or {}).get('total_duration')
+                    or 0.0
+                )
+            if _director_seconds <= 0.0:
+                raise ValueError('Director MAIN timeline has no positive duration.')
+            effective_manual_duration = _director_seconds
+            effective_duration_source = 'manual'
+            _lm_print(
+                '[MiniMaxH3 LongMedia][DIRECTOR DURATION OWNERSHIP] '
+                f'timeline={timeline_mode}; seconds={_director_seconds:.3f}; ' + (f'segments={int(_director_segmented_count)} segment_duration={float(_director_segmented_duration):.3f}s; ' if timeline_mode == 'segmented' else ''),
+                'legacy Setup duration_source/manual_duration bypassed',
+                flush=True,
+            )
         if h3_mode == 'video_ref_edit' and reconstruction_cfg is None and str(effective_duration_source) == 'auto':
             # Source-video editing owns the visual timeline.  The soundtrack may be
             # a few encoder/mux samples shorter or longer than the IMAGE batch; using
@@ -15699,6 +19773,7 @@ class MiniMaxH3LatentLabLongMediaSetup:
             reconstruction_detail_strength=float(reconstruction_detail_strength if workflow_mode == 'reconstruct' else 0.0),
             reconstruction_detail_steps=int(reconstruction_detail_steps if workflow_mode == 'reconstruct' else 1),
             reconstruction_audio_locked=bool(workflow_mode == 'reconstruct' and audio_1 is not None),
+            motion_repair_mode=str(motion_repair),
             release_guard=bool(release_guard),
         )
 
@@ -15764,21 +19839,31 @@ class MiniMaxH3LatentLabLongMediaSetup:
             mc_lengths, mc_starts, mc_output_frames = _v85_multiclip_geometry(
                 multiclip_clips, multiclip_native_overlap
             )
+            # v0.6.18 lifecycle fix: the v0.6.17 authored-output clock was
+            # accidentally assigned in the *segmented* branch, so Director
+            # MultiClip reached this branch with an unbound local. Derive the
+            # visible horizon only after MultiClip geometry exists, from the
+            # clip timing contract that owns that geometry.
+            mc_requested_frames = _v118_multiclip_requested_output_frames(
+                multiclip_clips, mc_output_frames,
+            )
             plan = _dc_replace(
                 plan,
                 mode='multiclip', duration_basis='multiclip:native_continuous_vae',
                 workflow_mode='multiclip', segmentation_active=False,
-                total_duration=float(mc_output_frames) / float(FPS), output_frames=int(mc_output_frames),
+                total_duration=float(mc_requested_frames) / float(FPS), output_frames=int(mc_requested_frames),
                 segment_frames=int(mc_lengths[0]), segment_lengths=tuple(mc_lengths), segment_starts=tuple(mc_starts),
                 overlap_frames=int(multiclip_native_overlap), step_frames=max(1, int(mc_lengths[0]) - int(multiclip_native_overlap)),
-                passes=len(mc_lengths), generated_frames=int(mc_output_frames), trim_frames=0,
+                passes=len(mc_lengths), generated_frames=int(mc_output_frames), trim_frames=max(0, int(mc_output_frames) - int(mc_requested_frames)),
                 segment_seeds=tuple(c['seed'] for c in multiclip_clips), timeline_policy='native_continuous_vae',
             )
             _lm_print(
                 '[MiniMaxH3 LongMedia][MULTICLIP NATIVE CONTINUOUS VAE] '
                 f'clips={len(mc_lengths)} lengths={list(mc_lengths)} starts={list(mc_starts)} '
                 f'native_overlap={int(multiclip_native_overlap)}f latent_overlap={int(video_latent_t(multiclip_native_overlap))}t '
-                f'final={int(mc_output_frames)}f; video_decode=single_continuous',
+                f'generated={int(mc_output_frames)}f output={int(mc_requested_frames)}f '
+                f'trim={max(0, int(mc_output_frames) - int(mc_requested_frames))}f; '
+                'video_decode=single_continuous',
                 flush=True,
             )
         if h3_mode == 'video_ref_edit' and reconstruction_cfg is None and video_1 is not None:
@@ -15856,7 +19941,7 @@ class MiniMaxH3LatentLabLongMediaSetup:
             generation_mode = 'auto'
             _lm_print(
                 '[MiniMaxH3 LongMedia][LIP SYNC] audio_mode=lip_sync; '
-                'workflow preserved; Audio 1 remains native Ref2VA content reference + native per-clip H3 Audio Guide timing',
+                'workflow preserved; Audio1 is excluded from Ref2VA refs and becomes the sole frozen target-audio clock',
                 flush=True,
             )
 
@@ -15993,8 +20078,31 @@ class MiniMaxH3LatentLabLongMediaSetup:
             )
             setup_memory_events.append(_setup_memory_isolation('after_storyboard_conditioning_release', unload_models=True))
 
-        elif conditioning_mode in ('hybrid_first_frame', 'hybrid_first_last'):
-            if workflow_mode == 'segmented_continuation' and segmented_opening_frame is not None:
+        elif conditioning_mode in ('hybrid_first_frame', 'hybrid_first_last', 'hybrid_last_frame'):
+            if control_mode == 'director' and director_frame_anchor_cfg is not None:
+                # Director frame anchors are semantic MAIN roles, not image_N sockets.
+                # Their tensors live outside the native Picture reference list so a
+                # Picture used as FIRST/LAST cannot also accidentally condition Ref2VA.
+                hybrid_first = director_first_anchor_image if conditioning_mode in ('hybrid_first_frame', 'hybrid_first_last') else None
+                hybrid_last = director_last_anchor_image if conditioning_mode in ('hybrid_last_frame', 'hybrid_first_last') else None
+                if conditioning_mode in ('hybrid_first_frame', 'hybrid_first_last') and hybrid_first is None:
+                    raise ValueError('Director FIRST frame anchor media is unavailable at Setup runtime.')
+                if conditioning_mode in ('hybrid_last_frame', 'hybrid_first_last') and hybrid_last is None:
+                    raise ValueError('Director LAST frame anchor media is unavailable at Setup runtime.')
+                loop_latent_override = None
+                director_same_source_loop = bool(
+                    hybrid_first is not None and hybrid_last is not None
+                    and (director_frame_anchor_cfg or {}).get('same_source_loop')
+                )
+                hybrid_ref_images = [image_1, image_2, image_3, image_4, image_5, image_6, image_7, image_8, image_9]
+                _lm_print(
+                    '[MiniMaxH3 LongMedia][DIRECTOR FRAME ANCHORS] '
+                    f'first={bool(hybrid_first is not None)}; last={bool(hybrid_last is not None)}; '
+                    f'same_source_loop={bool((director_frame_anchor_cfg or {}).get("same_source_loop"))}; '
+                    'anchors are separate from native Picture reference ordinals',
+                    flush=True,
+                )
+            elif workflow_mode == 'segmented_continuation' and segmented_opening_frame is not None:
                 hybrid_first = segmented_opening_frame
                 if conditioning_mode == 'hybrid_first_last':
                     hybrid_last = (loop_last_override if loop_last_override is not None else image_2)
@@ -16038,8 +20146,10 @@ class MiniMaxH3LatentLabLongMediaSetup:
             # native <Picture N> references.  Detect the unambiguous legacy/input-
             # socket convention (present in the supplied workflow) and translate it
             # before any pass is tokenized.  Native-numbered prompts stay untouched.
-            anchor_roles = ['opening frame']
-            if conditioning_mode == 'hybrid_first_last':
+            anchor_roles = []
+            if hybrid_first is not None:
+                anchor_roles.append('opening frame')
+            if hybrid_last is not None:
                 anchor_roles.append('ending frame')
             effective_prompt, picture_tag_policy = normalize_hybrid_picture_tags(
                 effective_prompt,
@@ -16059,7 +20169,15 @@ class MiniMaxH3LatentLabLongMediaSetup:
                 ref_audios=hybrid_ref_audios,
                 first_latent_override=loop_latent_override,
                 last_latent_override=loop_latent_override,
+                shared_boundary_geometry=bool(director_same_source_loop),
             )
+            if director_same_source_loop:
+                _lm_print(
+                    '[MiniMaxH3 LongMedia][DIRECTOR LOOP GEOMETRY LOCK] '
+                    'same_source_first_last=True; transform=shared_disabled; '
+                    'vae_encode=single; boundary_latent=exact_reuse',
+                    flush=True,
+                )
             first_keyframe_latent = hybrid_artifacts.get('first_keyframe_latent')
             first_frame_latent_injected = False
             if (not lip_sync_enabled) and first_frame_mode == 'latent_inject' and first_keyframe_latent is not None:
@@ -16082,11 +20200,12 @@ class MiniMaxH3LatentLabLongMediaSetup:
                     else str(first_frame_mode)
                 ),
             })
-            _lm_print(
-                '[MiniMaxH3 LongMedia][V327 STARTUP CONTINUITY] '
-                'pass0 uses only the native frame-0 anchor; repeated 5/22/39 anchors disabled',
-                flush=True,
-            )
+            if hybrid_first is not None:
+                _lm_print(
+                    '[MiniMaxH3 LongMedia][V327 STARTUP CONTINUITY] '
+                    'pass0 uses only the native frame-0 anchor; repeated 5/22/39 anchors disabled',
+                    flush=True,
+                )
             setup_memory_events.append(
                 _setup_memory_isolation('after_hybrid_conditioning_release', unload_models=True)
             )
@@ -16144,8 +20263,8 @@ class MiniMaxH3LatentLabLongMediaSetup:
             # standalone reference. This enables prompts to address several tracks
             # (for example voice, percussion and bass) while duration_source and
             # audio_mode independently own timeline/output semantics.
-            edit_ref_audios = [aud for aud in (audio_2, audio_3) if aud is not None]
-            if (not pair_source_audio) and audio_1 is not None:
+            edit_ref_audios = ([] if lip_sync_enabled else [aud for aud in (audio_2, audio_3) if aud is not None])
+            if (not pair_source_audio) and audio_1 is not None and not lip_sync_enabled:
                 edit_ref_audios.insert(0, audio_1)
             video_ref_edit_conditioning_audio_count = int(len(edit_ref_audios) + (1 if pair_source_audio else 0))
 
@@ -16193,7 +20312,7 @@ class MiniMaxH3LatentLabLongMediaSetup:
                 'conditioning_audio_refs_total': int(video_ref_edit_conditioning_audio_count),
                 'audio1_role': (
                     'paired_source_soundtrack' if pair_source_audio
-                    else ('authoritative_redub' if lip_sync_enabled else ('standalone_reference' if audio_1 is not None else 'disconnected'))
+                    else ('forced_target_audio' if lip_sync_enabled else ('standalone_reference' if audio_1 is not None else 'disconnected'))
                 ),
             })
             _lm_print(
@@ -16485,25 +20604,26 @@ class MiniMaxH3LatentLabLongMediaSetup:
             )
 
         if lip_sync_enabled:
-            # v0.3.104: preserve current UI/output semantics.  Audio 1 stays a
-            # native Ref2VA content reference and is additionally anchored to the
-            # local H3 timeline via minimax_keyframes.  Final mux restores the
-            # pristine input track; sampled H3 audio is not the timing authority.
+            # v0.6.11: pure forced-target-audio contract. Audio1 is not a
+            # Ref2VA reference and is not duplicated as an audio-only keyframe. The
+            # exact per-pass waveform slice owns the target H3 audio tokens with
+            # denoise=0; video alone is solved around that immutable audio clock.
             plan = _dc_replace(
                 plan,
                 source_audio=audio_1,
+                reference_audio=None,
                 final_audio_override=audio_1,
                 final_audio_track_count=1,
-                lip_sync_native_audio_guide=True,
+                lip_sync_native_audio_guide=False,
                 lip_sync_target_audio_locked=True,
             )
             _lm_print(
-                '[MiniMaxH3 LongMedia][AUTHORITATIVE LOCAL-0 LIP SYNC] '
-                'Audio1=full native Ref2VA reference + native local-0 timing guide on every clip; continuation keeps VIDEO Motion Context while preserving the source-audio guide through hidden overlap; original Audio1 restored at output',
+                '[MiniMaxH3 LongMedia][FORCED TARGET AUDIO LIP SYNC] '
+                'Audio1=sole frozen target-audio clock; Ref2VA Audio1 and audio-only guide disabled; '
+                'each MultiClip pass receives its exact global waveform window including hidden overlap; '
+                'previous generated audio context is suppressed; original Audio1 restored at output',
                 flush=True,
             )
-            # v0.3.113: Ref2VA refs/guide remain useful semantic conditioning, but
-            # exact timing authority now comes from the frozen target audio stream.
             target_av = _v113_lock_source_audio_in_target(
                 target_av, audio_vae, audio_1,
                 int(plan.segment_starts[0]), int(plan.segment_lengths[0]),
@@ -16525,7 +20645,7 @@ class MiniMaxH3LatentLabLongMediaSetup:
         plan = _dc_replace(plan, video_vae=vae, audio_vae=audio_vae)
         # v0.3.108: pass 0 is sampled from the Setup output CONDITIONING itself,
         # so attach the authoritative native source-audio clock directly here.
-        if lip_sync_enabled:
+        if lip_sync_enabled and not bool(getattr(plan, 'lip_sync_target_audio_locked', False)):
             positive = _v104_attach_native_lipsync_guide(
                 positive, audio_vae, audio_1, plan, 0,
             )
@@ -16549,23 +20669,124 @@ class MiniMaxH3LatentLabLongMediaSetup:
                 hybrid_artifacts['ref_blocks'],
             )
 
+        # v0.6.15: compile Director EMBEDDING clips to single-pass temporal
+        # attention routing.  No hidden sub-clips are created: one MAIN clip remains
+        # one H3 sampling pass.  The native embedding tokens stay at the prompt tail
+        # and are gated to video-query rows by local frame range inside the DiT.
+        if getattr(plan, 'mode', None) == 'multiclip' and multiclip_clips:
+            _temporal_embedding_specs = []
+            for _seg_idx, _clip_spec in enumerate(multiclip_clips):
+                _spans = ([] if int(_clip_spec.get('director_timing_version') or 0) >= 2
+                          else list(_clip_spec.get('director_embedding_spans') or []))
+                _specs = _lm_build_temporal_embedding_specs(
+                    clip, _clip_spec.get('prompt') or '', _spans,
+                    plan=plan, segment_index=_seg_idx,
+                    authored_duration=float(_clip_spec.get('duration') or 0.0),
+                ) if _spans else tuple()
+                _temporal_embedding_specs.append(tuple(_specs))
+                if _specs:
+                    _lm_print(
+                        '[MiniMaxH3 LongMedia][TEMPORAL H3 EMBEDDING PLAN] '
+                        f'clip={_seg_idx + 1}/{len(multiclip_clips)}; single_pass=True; '
+                        f'routes={[{"name": s["name"], "frames": [s["start_frame"], s["end_frame"]], "tokens": s["token_count"]} for s in _specs]}',
+                        flush=True,
+                    )
+            plan = _dc_replace(
+                plan, segment_temporal_embeddings=tuple(_temporal_embedding_specs),
+            )
+
+        if director_cfg is not None and getattr(plan, 'mode', None) != 'multiclip':
+            direct_clips = list((director_clip_plan or {}).get('clips') or [])
+            if len(direct_clips) == 1 and direct_clips[0].get('director_temporal_controls'):
+                if int(plan.passes) != 1:
+                    raise ValueError('Director native video edit temporal controls require a single source pass.')
+                positive, direct_specs = _lm_encode_director_controls(
+                    clip, positive, direct_clips[0], plan, 0,
+                )
+                plan = _dc_replace(plan, segment_temporal_embeddings=(direct_specs,))
+            elif len(direct_clips) == 1 and direct_clips[0].get('director_conditioning_regions'):
+                if int(plan.passes) != 1:
+                    raise ValueError('Director native video edit regional timing requires a single source pass.')
+                positive, direct_specs = _lm_encode_director_regions(
+                    clip, positive, effective_prompt, direct_clips[0], plan, 0,
+                )
+                plan = _dc_replace(plan, segment_temporal_embeddings=(direct_specs,))
+
         if conditioning_mode != 'storyboard_bridge':
             if getattr(plan, 'mode', None) == 'multiclip':
-                mc_prompts = tuple(c['prompt'] for c in multiclip_clips)
-                segment_positive_conditionings, segment_prompt_summaries = _v85_preencode_multiclip_conditionings(
-                    clip, positive, plan, mc_prompts, v329_native_refs=v329_native_refs,
-                    lip_sync_audio=(audio_1 if lip_sync_enabled else None), audio_vae=audio_vae,
+                mc_prompts = tuple(
+                    _build_lipsync_prompt(c['prompt'], plan, False, audio_1 is not None)
+                    if lip_sync_enabled else c['prompt']
+                    for c in multiclip_clips
                 )
+                segment_positive_conditionings, segment_prompt_summaries, positive, regional_specs = _v85_preencode_multiclip_conditionings(
+                    clip, positive, plan, mc_prompts, v329_native_refs=v329_native_refs,
+                    lip_sync_audio=None, audio_vae=audio_vae, director_clips=multiclip_clips,
+                )
+                plan = _dc_replace(plan, segment_temporal_embeddings=regional_specs)
             else:
                 segment_positive_conditionings, segment_prompt_summaries = _v57_preencode_segment_conditionings(
                     clip, effective_prompt, positive, plan, v329_native_refs=v329_native_refs,
-                    lip_sync_audio=(audio_1 if lip_sync_enabled else None), audio_vae=audio_vae,
+                    lip_sync_audio=None, audio_vae=audio_vae,
                 )
             plan = _dc_replace(
                 plan,
                 segment_positive_conditionings=segment_positive_conditionings,
                 segment_prompt_summaries=segment_prompt_summaries,
             )
+        if director_cfg is not None:
+            _director_clips = list((director_clip_plan or {}).get('clips') or [])
+            _director_ids = tuple(str(item.get('clip_id') or '') for item in _director_clips)
+            _director_meta = tuple({
+                'clip_id': str(item.get('clip_id') or ''),
+                'name': str(item.get('name') or ''),
+                'duration': float(item.get('duration') or 0.0),
+                'source_in': float(item.get('director_source_in_seconds') or 0.0),
+                'source_out': float(item.get('director_source_out_seconds') or 0.0),
+                'subject_ids': tuple(str(v) for v in (item.get('director_subject_ids') or [])),
+                'cast_subject_id': (str(item.get('director_cast_subject_id') or '').strip() or None),
+                'camera': dict(item.get('camera') or {}),
+                'camera_spans': [dict(r) for r in (item.get('director_camera_spans') or [])],
+                'director_timing_version': int(item.get('director_timing_version') or 0),
+                'conditioning_regions': [dict(r) for r in (item.get('director_conditioning_regions') or [])],
+                'temporal_controls': [dict(r) for r in (item.get('director_temporal_controls') or [])],
+                'embedding_spans': [dict(r) for r in (item.get('director_embedding_spans') or [])],
+            } for item in _director_clips)
+            if director_regeneration_cfg.get('mode') != 'none':
+                if not director_project_id:
+                    raise ValueError('Director selective regeneration requires a stable Director project_id. Reload the Director node once and retry.')
+                if director_regeneration_cfg.get('clip_id') not in set(_director_ids):
+                    raise ValueError('Director selective regeneration targets a clip that no longer exists on the MAIN timeline.')
+                if director_regeneration_cfg.get('mode') == 'recast' and not director_regeneration_cfg.get('source_revision'):
+                    raise ValueError('Director Recast requires the selected source take revision.')
+            plan = _dc_replace(
+                plan,
+                director_project_id=str(director_project_id),
+                director_node_id=str(director_node_id),
+                director_clip_ids=_director_ids,
+                director_clip_metadata=_director_meta,
+                director_timeline_snapshot=director_timeline_snapshot,
+                director_regeneration=dict(director_regeneration_cfg),
+                director_reference_fingerprint=str(director_reference_fingerprint),
+            )
+
+        for _idx, _report in enumerate(h3_image_geometry, start=1):
+            if isinstance(_report, dict) and bool(_report.get('changed')):
+                _lm_print(
+                    f"[MiniMaxH3 LongMedia][MEDIA CLAMP] Picture {_idx}: "
+                    f"{_report['source_width']}x{_report['source_height']} -> {_report['safe_width']}x{_report['safe_height']}; "
+                    f"target={_report['target_width']}x{_report['target_height']}",
+                    flush=True,
+                )
+        for _idx, _report in enumerate(h3_video_geometry, start=1):
+            if isinstance(_report, dict) and bool(_report.get('changed')):
+                _lm_print(
+                    f"[MiniMaxH3 LongMedia][MEDIA CLAMP] Video {_idx}: "
+                    f"{_report['source_width']}x{_report['source_height']} -> {_report['safe_width']}x{_report['safe_height']}; "
+                    f"target={_report['target_width']}x{_report['target_height']}",
+                    flush=True,
+                )
+
         setup_memory_events.append(_setup_memory_isolation('setup_exit_release', unload_models=True))
 
         report = json.dumps({
@@ -16587,7 +20808,10 @@ class MiniMaxH3LatentLabLongMediaSetup:
             'timeline_policy': getattr(plan, 'timeline_policy', 'legacy'),
             'selected_workflow_mode': workflow_mode,
             'legacy_workflow_mode_input': legacy_workflow_mode,
-            'multiclip_plan_source': ('external_planner' if (timeline_mode == 'multiclip' and external_clip_plan is not None) else ('setup_editor' if timeline_mode == 'multiclip' else ('fixed_segment_math' if timeline_mode == 'segmented' else None))),
+            'multiclip_plan_source': ((f'external_{external_clip_plan_source}' if external_clip_plan_source else 'setup_editor') if timeline_mode == 'multiclip' else ('fixed_segment_math' if timeline_mode == 'segmented' else None)),
+            'director_project_id': (str(director_project_id) if director_cfg is not None else None),
+            'director_regeneration': (dict(director_regeneration_cfg) if director_cfg is not None else None),
+            'director_reference_fingerprint': (str(director_reference_fingerprint) if director_cfg is not None else None),
             'multiclip_clip_durations': ([float(c['duration']) for c in multiclip_clips] if multiclip_clips else None),
             'multiclip_segment_seeds': ([c['seed'] for c in multiclip_clips] if multiclip_clips else None),
             'segment_seconds_semantics': ('new_output_timeline_plus_extra_overlap_context' if segmentation_active else 'ignored_outside_manual_and_segmented_continuation'),
@@ -16597,13 +20821,18 @@ class MiniMaxH3LatentLabLongMediaSetup:
             'loop_closure_enabled': bool(getattr(plan, 'loop_closure_enabled', False)),
             'loop_closure_frames': int(getattr(plan, 'loop_closure_frames', 0) or 0),
             'loop_closure_strength': float(getattr(plan, 'loop_closure_strength', 0.65)),
+            'motion_repair': str(getattr(plan, 'motion_repair_mode', 'off') or 'off'),
+            'motion_repair_contract': (
+                'latent_native_selective_temporal_dilation_second_pass_exact_unaffected_token_restore'
+                if str(getattr(plan, 'motion_repair_mode', 'off') or 'off') != 'off' else 'disabled'
+            ),
             'segment_conditioning_policy': 'preencoded_in_setup_no_clip_in_plan',
             'segment_conditionings_preencoded': int(len(getattr(plan, 'segment_positive_conditionings', ()) or ())),
             'decouple_original_image_refs_after_pass0': bool(getattr(plan, 'decouple_original_image_refs_after_pass0', False)),
             'h3_target_geometry': h3_target_geometry,
-            'h3_reference_geometry': h3_ref_geometry,
-            'h3_reference_pixel_budget': int(_H3_SAFE_REF_PIXELS),
-            'h3_reference_resolution_policy': 'independent_safe_0.60MP_max_no_upscale',
+            'h3_image_geometry': h3_image_geometry,
+            'h3_video_geometry': h3_video_geometry,
+            'h3_media_resolution_policy': 'all_external_image_video_inputs_fit_inside_target_geometry_no_upscale',
             'output_frames': int(plan.output_frames),
             'trim_frames': int(plan.trim_frames),
             'final_audio_tracks': plan.final_audio_track_count,
@@ -16619,6 +20848,10 @@ class MiniMaxH3LatentLabLongMediaSetup:
                 else len(audios) if use_audio_as_reference else 0
             ),
             'lip_sync_enabled': bool(lip_sync_enabled),
+            'lip_sync_contract': ('forced_frozen_target_audio_no_ref2va_audio_no_audio_guide' if lip_sync_enabled else None),
+            'lip_sync_multiclip_exact_global_slicing': bool(lip_sync_enabled and getattr(plan, 'mode', None) == 'multiclip'),
+            'director_native_character_replace': bool(director_native_character_replace_cfg is not None),
+            'director_native_character_replace_contract': (dict(director_native_character_replace_cfg) if director_native_character_replace_cfg is not None else None),
             'video_ref_edit_audio_sync': bool(video_ref_edit_audio_sync),
             'video_ref_edit_paired_source_av': bool(
                 isinstance(hybrid_info, dict) and hybrid_info.get('source_video_audio_paired', False)
@@ -16702,11 +20935,14 @@ class MiniMaxH3LatentLabLongMediaNextSegment:
         multiclip_latent_overlap = bool(
             getattr(plan, 'mode', None) == 'multiclip' and seg_idx > 0
         )
-        native_motion_head = bool(
-            seg_idx == 1
-            and int(getattr(plan, 'passes', 0) or 0) == 2
-            and getattr(plan, 'mode', None) == 'segmented_continuation'
-        ) and _v83_native_guide_api_supported()
+        segmented_latent_overlap = bool(
+            getattr(plan, 'mode', None) == 'segmented_continuation' and seg_idx > 0
+        )
+        # v0.6.40 segmented anti-cycle: continuation authority lives in the
+        # actual generated target-latent prefix. Do not replace it with a fresh
+        # target head plus ~22f native keyframe guide; that guide span can become
+        # a globally repeated motion motif (~0.92s at 24fps).
+        native_motion_head = False
 
         video = torch.zeros(
             (prev_video.shape[0], prev_video.shape[1], target_video_t,
@@ -16724,11 +20960,16 @@ class MiniMaxH3LatentLabLongMediaNextSegment:
 
         if multiclip_latent_overlap:
             video_overlap_policy = 'multiclip_exact_generated_latent_overlap'
+        elif segmented_latent_overlap:
+            video_overlap_policy = 'segmented_exact_generated_latent_overlap'
         else:
-            video_overlap_policy = ('native_motion_context_fresh_head' if native_motion_head else 'zero_fill')
+            video_overlap_policy = 'zero_fill'
         latent_value_transform = 'none'
 
+        video_vae_segment_encode_used = False
+        audio_vae_segment_encode_used = False
         if plan.source_video is not None and plan.video_vae is not None and not bool(getattr(plan, 'reconstruction_active', False)):
+            video_vae_segment_encode_used = True
             source_frames = slice_video_segment(
                 plan.source_video, start_frame, length_frames, plan.video_fps,
             )
@@ -16756,23 +20997,47 @@ class MiniMaxH3LatentLabLongMediaNextSegment:
                 video = source_video_latent.to(video)
             video_overlap_policy = ('lowpass_source_authority' if reconstruction_active else 'exact_frozen')
 
-        if plan.source_audio is not None and plan.audio_vae is not None:
-            available, _ = _slice_source_audio_for_segment(
-                plan.source_audio, start_frame, length_frames
-            )
-            waveform_for_encode = available.movedim(1, -1)
-            source_audio_latent = plan.audio_vae.encode(waveform_for_encode)
+        recast_audio_passthrough_fastpath = _lm_recast_audio_passthrough_segment(plan, seg_idx)
+        if plan.source_audio is not None and plan.audio_vae is not None and not recast_audio_passthrough_fastpath:
+            audio_vae_segment_encode_used = True
             if bool(getattr(plan, 'lip_sync_target_audio_locked', False)):
-                # Source speech is the authoritative local clock.  Use the exact
-                # global slice across the whole clip, including hidden overlap; do
-                # not inherit sampled/generated audio from the previous clip.
+                # v0.6.11: use frame-exact global sample boundaries on every pass,
+                # then resample to the AudioVAE clock exactly like pass 0. This
+                # prevents clip-to-clip phoneme phase drift from mixed rounding or
+                # mismatched source sample rates.
+                _slice, _start_sample, _end_sample = _v104_slice_lipsync_guide_audio(
+                    plan.source_audio, start_frame, length_frames,
+                )
+                _wave = _slice['waveform']
+                _sr = int(_slice['sample_rate'])
+                _vae_sr = int(getattr(plan.audio_vae, 'audio_sample_rate', 32000))
+                if _sr != _vae_sr:
+                    _wave = torchaudio.functional.resample(_wave, _sr, _vae_sr)
+                waveform_for_encode = _wave[:1].movedim(1, -1)
+                source_audio_latent = plan.audio_vae.encode(waveform_for_encode)
+                # Source speech is the sole authoritative local clock. Use the
+                # exact global slice across the complete local pass, hidden overlap
+                # included, and never inherit sampled/generated audio from clip N-1.
                 audio = _fit_stream(source_audio_latent, audio, 'audio', 'crop_pad', 'start')
-            elif overlap_audio_t:
-                audio[..., overlap_audio_t:] = source_audio_latent[
-                    ..., :audio.shape[-1] - overlap_audio_t
-                ].to(audio)
+                _lm_print(
+                    '[MiniMaxH3 LongMedia][MULTICLIP FORCED AUDIO] '
+                    f'clip={seg_idx + 1} global={start_frame}f length={length_frames}f '
+                    f'source_samples={_start_sample}..{_end_sample} source_sr={_sr} vae_sr={_vae_sr} '
+                    f'target_audio_t={int(audio.shape[-1])}; inherited_audio=False',
+                    flush=True,
+                )
             else:
-                audio = source_audio_latent.to(audio)
+                available, _ = _slice_source_audio_for_segment(
+                    plan.source_audio, start_frame, length_frames
+                )
+                waveform_for_encode = available.movedim(1, -1)
+                source_audio_latent = plan.audio_vae.encode(waveform_for_encode)
+                if overlap_audio_t:
+                    audio[..., overlap_audio_t:] = source_audio_latent[
+                        ..., :audio.shape[-1] - overlap_audio_t
+                    ].to(audio)
+                else:
+                    audio = source_audio_latent.to(audio)
 
         _reconstruction_strength = (
             max(0.0, min(1.0, float(getattr(plan, 'reconstruction_strength', 1.0))))
@@ -16791,17 +21056,25 @@ class MiniMaxH3LatentLabLongMediaNextSegment:
             # MultiClip uses an exact frozen generated overlap. Other continuation
             # workflows retain the user-selected partial-denoise policy.
             video_mask[:, :, :overlap_video_t] = (
-                0.0 if multiclip_latent_overlap else float(video_context_denoise)
+                0.0 if (multiclip_latent_overlap or segmented_latent_overlap) else float(video_context_denoise)
             )
         if overlap_audio_t and not native_motion_head and not bool(getattr(plan, 'lip_sync_target_audio_locked', False)) and not bool(getattr(plan, 'reconstruction_audio_locked', False)):
             audio_mask[..., :overlap_audio_t] = (
-                0.0 if multiclip_latent_overlap else float(audio_context_denoise)
+                0.0 if (multiclip_latent_overlap or segmented_latent_overlap) else float(audio_context_denoise)
             )
         if multiclip_latent_overlap:
             _lm_print(
                 '[MiniMaxH3 LongMedia][MULTICLIP LATENT MOTION INERTIA] '
                 f'segment={seg_idx} overlap={overlap}f target head inherits exact generated latent; '
                 'video/audio overlap denoise=0; native motion context remains auxiliary',
+                flush=True,
+            )
+        elif segmented_latent_overlap:
+            _lm_print(
+                '[MiniMaxH3 LongMedia][SEGMENTED LATENT OVERLAP] '
+                f'segment={seg_idx + 1}; overlap={overlap}f; '
+                'previous_generated_tail=frozen_target_prefix; denoise=0; '
+                'aux_motion_keyframes=False; aux_context_ref=False',
                 flush=True,
             )
         elif native_motion_head:
@@ -16817,7 +21090,6 @@ class MiniMaxH3LatentLabLongMediaNextSegment:
         output = {k: v for k, v in previous_av.items() if k not in ('noise_mask', 'samples')}
         output['samples'] = av_samples
         output['noise_mask'] = mask_samples
-
         _lm_print(
             '[MiniMaxH3 LongMedia][V318 TIMELINE] '
             f'segment={seg_idx} context_start={start_frame}f visible_start={visible_start_frame}f '
@@ -16839,14 +21111,47 @@ class MiniMaxH3LatentLabLongMediaNextSegment:
             'length_frames': length_frames,
             'overlap_frames': overlap,
             'video_overlap_policy': video_overlap_policy,
-            'overlap_mask_policy': ('multiclip_exact_frozen' if multiclip_latent_overlap else ('native_motion_context_full_denoise' if native_motion_head else 'constant_overlap_denoise')),
-            'native_motion_context_head': bool(native_motion_head),
+            'overlap_mask_policy': (
+                'multiclip_exact_frozen' if multiclip_latent_overlap else
+                ('segmented_exact_frozen' if segmented_latent_overlap else 'constant_overlap_denoise')
+            ),
+            'native_motion_context_head': False,
+            'segmented_latent_overlap': bool(segmented_latent_overlap),
             'multiclip_latent_overlap': bool(multiclip_latent_overlap),
             'latent_value_transform': latent_value_transform,
+            'video_vae_segment_encode_used': bool(video_vae_segment_encode_used),
+            'audio_vae_segment_encode_used': bool(audio_vae_segment_encode_used),
+            'recast_audio_passthrough_fastpath': bool(recast_audio_passthrough_fastpath),
             'video_context_denoise': float(video_context_denoise),
             'audio_context_denoise': float(audio_context_denoise),
         }, indent=2)
         return (output, report)
+
+
+def _lm_validate_refine_sigmas(sigmas, *, required=False):
+    """Validate the independent user-owned Refine sigma schedule."""
+    if sigmas is None:
+        if required:
+            raise ValueError(
+                'Refine is enabled but refine_sigmas is not connected. Connect a dedicated SIGMAS schedule to the Refine Sigmas input.'
+            )
+        return None
+    src = sigmas.detach() if torch.is_tensor(sigmas) else torch.as_tensor(sigmas, dtype=torch.float32)
+    src = src.flatten()
+    if int(src.numel()) < 2:
+        raise ValueError('Refine Sigmas requires at least two sigma points.')
+    vals = src.detach().float().cpu()
+    if not bool(torch.isfinite(vals).all()):
+        raise ValueError('Refine Sigmas contains NaN/Inf values.')
+    if bool((vals < 0).any()):
+        raise ValueError('Refine Sigmas must be non-negative.')
+    if bool((vals[1:] > vals[:-1] + 1e-7).any()):
+        raise ValueError('Refine Sigmas must be monotonically non-increasing.')
+    if float(vals[0]) <= 0.0:
+        raise ValueError('Refine Sigmas must start above zero.')
+    if abs(float(vals[-1])) > 1e-7:
+        raise ValueError('Refine Sigmas must end at 0 so Refine returns a clean x0.')
+    return src.clone()
 
 
 class MiniMaxH3LatentLabRefineSigmas:
@@ -17212,6 +21517,63 @@ def _resolve_h3_memory_mode(guider, requested):
 
 
 
+
+def _lm_motion_repair_remap_conds(original_conds, dilation, *, source_frame_offset=0, source_frame_count=None):
+    """Clone guider conditioning and retime/crop MiniMax anchors for one repair window."""
+    mapping = tuple(int(v) for v in (dilation.get('expanded_frame_to_source_frame') or ()))
+    target_frames = int(dilation.get('target_frames') or 0)
+    source_offset = max(0, int(source_frame_offset))
+    source_count = int(source_frame_count or dilation.get('source_frames') or 0)
+    source_end = source_offset + max(0, source_count)
+    if target_frames <= 0 or not mapping:
+        return copy.deepcopy(original_conds or {})
+
+    def _patch_meta(meta):
+        meta = dict(meta)
+        had_frame_count = 'minimax_frame_count' in meta
+        keyframes = list(meta.get('minimax_keyframes') or [])
+        remapped = []
+        for kf in keyframes:
+            item = dict(kf)
+            global_source_index = int(round(float(item.get('resolved_frame_index', 0) or 0)))
+            if source_count > 0 and not (source_offset <= global_source_index < source_end):
+                continue
+            local_source_index = max(0, global_source_index - source_offset)
+            target_index = _motion_repair_remap_frame_index(local_source_index, mapping)
+            item['resolved_frame_index'] = int(target_index)
+            if 'motion_context_index' in item:
+                item['motion_context_index'] = int(target_index)
+            remapped.append(item)
+        if remapped:
+            meta['minimax_keyframes'] = remapped
+            meta['minimax_frame_count'] = int(target_frames)
+        else:
+            meta.pop('minimax_keyframes', None)
+            if had_frame_count:
+                # Frame count without surviving local keyframes is still useful to
+                # wrappers that inspect target duration, but it must describe this window.
+                meta['minimax_frame_count'] = int(target_frames)
+        return meta
+
+    out = {}
+    for cond_name, entries in (original_conds or {}).items():
+        cloned = []
+        for entry in entries or []:
+            if isinstance(entry, dict):
+                cloned.append(_patch_meta(entry))
+            elif isinstance(entry, (list, tuple)) and len(entry) >= 2 and isinstance(entry[1], dict):
+                new_entry = list(entry)
+                new_entry[1] = _patch_meta(entry[1])
+                cloned.append(new_entry)
+            else:
+                try:
+                    cloned.append(entry.copy())
+                except Exception:
+                    cloned.append(entry)
+        out[cond_name] = cloned
+    return out
+
+
 class MiniMaxH3LatentLabUnifiedRuntimeSampler:
     """Execute every LongMedia segment inside one ComfyUI sampling lifecycle.
 
@@ -17241,7 +21603,11 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                 'latent_hires_align': ('INT', {'default': 32, 'min': 16, 'max': 256, 'step': 16}),
                 'refine_enabled': ('BOOLEAN', {'default': False}),
                 'refine_steps': ('INT', {'default': 2, 'min': 1, 'max': 1000, 'step': 1}),
-            }
+                'windowed_refine': ('BOOLEAN', {'default': True}),
+            },
+            'optional': {
+                'refine_sigmas': ('SIGMAS',),
+            },
         }
 
     RETURN_TYPES = ('LATENT', 'STRING')
@@ -17506,55 +21872,710 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
 
     @staticmethod
     def _hires_conditioning_without_video_keyframes(original_conds):
-        """Clone conditioning shells and drop geometry-bound VIDEO keyframes.
+        """Drop only geometry-bound VIDEO data while retaining audio guides.
 
-        Native H3 keyframe rows must use the target spatial grid.  After spatial
-        latent upscale, low-res keyframe latents cannot be inserted into the new
-        layout (the exact 2550->5610 row mismatch seen in 0.4.52).  Ref2VA refs are
-        allowed to keep their own geometry, and audio-only keyframes are geometry
-        independent, so both remain intact.  The upscaled x0 itself carries the
-        image/continuation structure into the independent second pass.
+        Learned Hi-Res changes the target H/W, so a low-resolution H3 video
+        keyframe cannot be inserted into the high-resolution PackedLayout.  A
+        mixed keyframe may, however, contain both ``latent`` and ``audio_latent``.
+        In that case the video field is removed while the audio guide survives as
+        an audio-only keyframe.  Ref2VA refs and already-audio-only guides are
+        geometry-independent and remain untouched.
         """
         out = {}
         dropped = 0
+
+        def _strip_video_keyframes(meta):
+            nonlocal dropped
+            meta = dict(meta)
+            kfs = list(meta.get('minimax_keyframes', []) or [])
+            if not kfs:
+                return meta
+            keep = []
+            for raw in kfs:
+                kf = dict(raw)
+                if kf.get('latent') is None:
+                    keep.append(kf)
+                    continue
+                dropped += 1
+                # Preserve a mixed AV guide as a pure audio guide.  Only the
+                # low-resolution target-grid video latent is invalid after upscale.
+                if kf.get('audio_latent') is not None:
+                    kf.pop('latent', None)
+                    keep.append(kf)
+            if keep:
+                meta['minimax_keyframes'] = keep
+            else:
+                meta.pop('minimax_keyframes', None)
+            return meta
+
         for cond_name, entries in (original_conds or {}).items():
             cloned = []
             for entry in entries or []:
                 if isinstance(entry, dict):
-                    meta = dict(entry)
-                    kfs = list(meta.get('minimax_keyframes', []) or [])
-                    if kfs:
-                        keep = [dict(kf) for kf in kfs if kf.get('latent') is None]
-                        dropped += len(kfs) - len(keep)
-                        if keep:
-                            meta['minimax_keyframes'] = keep
-                        else:
-                            meta.pop('minimax_keyframes', None)
-                    cloned.append(meta)
+                    cloned.append(_strip_video_keyframes(entry))
                 elif isinstance(entry, (list, tuple)) and len(entry) >= 2 and isinstance(entry[1], dict):
                     new_entry = list(entry)
-                    meta = dict(entry[1])
-                    kfs = list(meta.get('minimax_keyframes', []) or [])
-                    if kfs:
-                        keep = [dict(kf) for kf in kfs if kf.get('latent') is None]
-                        dropped += len(kfs) - len(keep)
-                        if keep:
-                            meta['minimax_keyframes'] = keep
-                        else:
-                            meta.pop('minimax_keyframes', None)
-                    new_entry[1] = meta
+                    new_entry[1] = _strip_video_keyframes(entry[1])
                     cloned.append(new_entry)
                 else:
                     cloned.append(entry)
             out[cond_name] = cloned
         return out, dropped
 
+    @staticmethod
+    def _geometry_locked_detail_merge(base_video: torch.Tensor, candidate_video: torch.Tensor, strength: float = 1.0) -> torch.Tensor:
+        """True H3 refine merge: keep base geometry, import only bounded fine detail.
+
+        Refine must not become a second scene solve.  The full 3x3 low-pass field
+        of ``base_video`` is restored after the merge, so camera/staging/body/face
+        macro geometry stays owned by the already-approved x0.  Only bounded
+        high-frequency residual detail from ``candidate_video`` is allowed through.
+        """
+        if tuple(base_video.shape) != tuple(candidate_video.shape):
+            raise ValueError(
+                f'Geometry-locked detail merge shape mismatch: {tuple(base_video.shape)} vs {tuple(candidate_video.shape)}'
+            )
+        strength = max(0.0, min(1.0, float(strength)))
+        if strength <= 0.0:
+            return base_video
+        b, c, t, h, w = base_video.shape
+        if min(h, w) < 3:
+            return base_video
+
+        # Windowed Stage 2 commonly returns the refined candidate on the model
+        # device while the Stage-1 x0 accumulator may already be CPU/offloaded.
+        # Perform the detail merge on whichever side is CUDA-resident, then copy
+        # the bounded result back to the base tensor's original device/dtype.
+        # This keeps offload policy intact and prevents mixed-device arithmetic.
+        if base_video.device == candidate_video.device:
+            work_device = base_video.device
+        elif candidate_video.device.type == 'cuda':
+            work_device = candidate_video.device
+        elif base_video.device.type == 'cuda':
+            work_device = base_video.device
+        else:
+            work_device = base_video.device
+
+        def _blur3(x: torch.Tensor) -> torch.Tensor:
+            y = x.permute(0, 2, 1, 3, 4).reshape(b * t, c, h, w)
+            y = torch.nn.functional.avg_pool2d(
+                y, kernel_size=3, stride=1, padding=1, count_include_pad=False
+            )
+            return y.reshape(b, t, c, h, w).permute(0, 2, 1, 3, 4)
+
+        base_f = base_video.to(device=work_device, dtype=torch.float32)
+        cand_f = candidate_video.to(device=work_device, dtype=torch.float32)
+        base_low = _blur3(base_f)
+        cand_low = _blur3(cand_f)
+        delta_hi = (cand_f - cand_low) - (base_f - base_low)
+
+        if t >= 3:
+            prev = torch.cat((delta_hi[:, :, :1], delta_hi[:, :, :-1]), dim=2)
+            nxt = torch.cat((delta_hi[:, :, 1:], delta_hi[:, :, -1:]), dim=2)
+            delta_hi = 0.25 * prev + 0.50 * delta_hi + 0.25 * nxt
+
+        scale = base_f.std(dim=(0, 2, 3, 4), keepdim=True).clamp_min(1e-4)
+        limit = scale * (0.10 + 0.10 * strength)
+        delta_hi = limit * torch.tanh(delta_hi / limit.clamp_min(1e-6))
+        merged = base_f + delta_hi * (0.45 + 0.30 * strength)
+
+        # Absolute low-frequency geometry lock after all detail injection.
+        merged = merged - _blur3(merged) + base_low
+        return merged.to(device=base_video.device, dtype=base_video.dtype)
+
+    @staticmethod
+    def _hires_refine_window_conds(original_conds, window_start_frame, window_frame_count, source_video):
+        """Localize conditioning to one post-x0 refine window.
+
+        Refine is a second denoise stage over an already-generated x0 (optionally
+        after learned latent upscale). Dropping visual keyframes entirely breaks
+        the native FIRST/LAST contract and lets refine reinterpret the shot.
+
+        The correct authority at this stage is the already-existing runtime x0 on
+        the *current* target grid. Therefore every visual keyframe that lands
+        inside the local window is rebuilt from the matching source-video latent
+        token instead of being discarded as "low-res". Audio-only keyframes are
+        still cropped/shifted to the local clock; refs and text remain shared.
+        """
+        start = max(0, int(window_start_frame))
+        count = max(1, int(window_frame_count))
+        stop = start + count
+        dropped_video = 0
+        rebuilt_video = 0
+        cropped_audio = 0
+
+        try:
+            source_video_t = int(source_video.shape[2])
+        except Exception:
+            source_video_t = 0
+
+        def frame_to_token(frame_index: int) -> int | None:
+            if source_video_t <= 0:
+                return None
+            token = max(0, int(_hires_tokens_covering_frames(int(frame_index) + 1)) - 1)
+            if token >= source_video_t:
+                token = source_video_t - 1
+            return token if token >= 0 else None
+
+        def clone_runtime_keyframe(frame_index: int):
+            token = frame_to_token(frame_index)
+            if token is None:
+                return None
+            return source_video[:, :, token:token + 1].contiguous()
+
+        def patch_meta(meta):
+            nonlocal dropped_video, rebuilt_video, cropped_audio
+            meta = dict(meta)
+            if 'minimax_frame_count' in meta:
+                meta['minimax_frame_count'] = int(count)
+            keyframes = []
+            for raw in list(meta.get('minimax_keyframes', []) or []):
+                item = dict(raw)
+                idx = int(round(float(item.get('resolved_frame_index', 0) or 0)))
+                video_latent = item.get('latent')
+                audio_latent = item.get('audio_latent')
+                if video_latent is not None:
+                    if start <= idx < stop:
+                        runtime_latent = clone_runtime_keyframe(idx)
+                        if runtime_latent is not None:
+                            item['latent'] = runtime_latent
+                            item['resolved_frame_index'] = int(idx - start)
+                            if 'motion_context_index' in item:
+                                item['motion_context_index'] = int(item['resolved_frame_index'])
+                            keyframes.append(item)
+                            rebuilt_video += 1
+                        else:
+                            dropped_video += 1
+                    continue
+                if audio_latent is None:
+                    if start <= idx < stop:
+                        item['resolved_frame_index'] = int(idx - start)
+                        if 'motion_context_index' in item:
+                            item['motion_context_index'] = int(item['resolved_frame_index'])
+                        keyframes.append(item)
+                    continue
+                try:
+                    audio_t = int(audio_latent.shape[-1])
+                except Exception:
+                    audio_t = 0
+                if audio_t <= 0:
+                    continue
+                duration_frames = max(1, int(math.ceil(audio_t / float(AUDIO_LATENT_FPS) * float(FPS))))
+                kf_stop = idx + duration_frames
+                inter_start = max(start, idx)
+                inter_stop = min(stop, kf_stop)
+                if inter_stop <= inter_start:
+                    continue
+                a0 = max(0, int(round((inter_start - idx) / float(FPS) * float(AUDIO_LATENT_FPS))))
+                required = max(1, int(round((inter_stop - inter_start) / float(FPS) * float(AUDIO_LATENT_FPS))))
+                a1 = min(audio_t, a0 + required)
+                if a1 <= a0:
+                    continue
+                item['audio_latent'] = audio_latent[..., a0:a1].contiguous()
+                item['resolved_frame_index'] = int(inter_start - start)
+                if 'motion_context_index' in item:
+                    item['motion_context_index'] = int(item['resolved_frame_index'])
+                keyframes.append(item)
+                cropped_audio += 1
+            if keyframes:
+                meta['minimax_keyframes'] = keyframes
+            else:
+                meta.pop('minimax_keyframes', None)
+            return meta
+
+        out = {}
+        for cond_name, entries in (original_conds or {}).items():
+            cloned = []
+            for entry in entries or []:
+                if isinstance(entry, dict):
+                    cloned.append(patch_meta(entry))
+                elif isinstance(entry, (list, tuple)) and len(entry) >= 2 and isinstance(entry[1], dict):
+                    new_entry = list(entry)
+                    new_entry[1] = patch_meta(entry[1])
+                    cloned.append(new_entry)
+                else:
+                    cloned.append(entry)
+            out[cond_name] = cloned
+        return out, dropped_video, rebuilt_video, cropped_audio
+
+    @staticmethod
+    def _hires_refine_audio_window(audio, frame_start, frame_count):
+        a0, a1, required = _hires_audio_window_bounds(
+            int(frame_start), int(frame_count), int(audio.shape[-1])
+        )
+        chunk = audio[..., a0:a1]
+        missing = int(required) - int(chunk.shape[-1])
+        if missing > 0:
+            if int(chunk.shape[-1]) > 0:
+                pad = chunk[..., -1:].expand(*chunk.shape[:-1], missing)
+            else:
+                pad = torch.zeros((*audio.shape[:-1], missing), device=audio.device, dtype=audio.dtype)
+            chunk = torch.cat((chunk, pad), dim=-1)
+        return chunk.contiguous()
+
+    @staticmethod
+    def _sampler2_window_conds(original_conds, window_start_frame, window_frame_count):
+        """Localize the exact Sampler #2 conditioning contract to one temporal window.
+
+        Geometry-bound visual keyframes are either already valid on the current grid
+        or were removed before this helper when learned latent Hi-Res changed H/W.
+        Ref2VA references remain global. Audio guides are cropped to the local clock.
+        """
+        start = max(0, int(window_start_frame))
+        count = max(1, int(window_frame_count))
+        stop = start + count
+        kept_video = 0
+        cropped_audio = 0
+
+        def patch_meta(meta):
+            nonlocal kept_video, cropped_audio
+            meta = dict(meta)
+            if 'minimax_frame_count' in meta:
+                meta['minimax_frame_count'] = int(count)
+            keyframes = []
+            for raw in list(meta.get('minimax_keyframes', []) or []):
+                item = dict(raw)
+                idx = int(round(float(item.get('resolved_frame_index', 0) or 0)))
+                video_latent = item.get('latent')
+                audio_latent = item.get('audio_latent')
+                if video_latent is not None:
+                    if start <= idx < stop:
+                        item['resolved_frame_index'] = int(idx - start)
+                        if 'motion_context_index' in item:
+                            item['motion_context_index'] = int(item['resolved_frame_index'])
+                        keyframes.append(item)
+                        kept_video += 1
+                    continue
+                if audio_latent is None:
+                    if start <= idx < stop:
+                        item['resolved_frame_index'] = int(idx - start)
+                        if 'motion_context_index' in item:
+                            item['motion_context_index'] = int(item['resolved_frame_index'])
+                        keyframes.append(item)
+                    continue
+                try:
+                    audio_t = int(audio_latent.shape[-1])
+                except Exception:
+                    audio_t = 0
+                if audio_t <= 0:
+                    continue
+                duration_frames = max(1, int(math.ceil(audio_t / float(AUDIO_LATENT_FPS) * float(FPS))))
+                kf_stop = idx + duration_frames
+                inter_start = max(start, idx)
+                inter_stop = min(stop, kf_stop)
+                if inter_stop <= inter_start:
+                    continue
+                a0 = max(0, int(round((inter_start - idx) / float(FPS) * float(AUDIO_LATENT_FPS))))
+                required = max(1, int(round((inter_stop - inter_start) / float(FPS) * float(AUDIO_LATENT_FPS))))
+                a1 = min(audio_t, a0 + required)
+                if a1 <= a0:
+                    continue
+                item['audio_latent'] = audio_latent[..., a0:a1].contiguous()
+                item['resolved_frame_index'] = int(inter_start - start)
+                if 'motion_context_index' in item:
+                    item['motion_context_index'] = int(item['resolved_frame_index'])
+                keyframes.append(item)
+                cropped_audio += 1
+            if keyframes:
+                meta['minimax_keyframes'] = keyframes
+            else:
+                meta.pop('minimax_keyframes', None)
+            return meta
+
+        out = {}
+        for cond_name, entries in (original_conds or {}).items():
+            cloned = []
+            for entry in entries or []:
+                if isinstance(entry, dict):
+                    cloned.append(patch_meta(entry))
+                elif isinstance(entry, (list, tuple)) and len(entry) >= 2 and isinstance(entry[1], dict):
+                    new_entry = list(entry)
+                    new_entry[1] = patch_meta(entry[1])
+                    cloned.append(new_entry)
+                else:
+                    cloned.append(entry)
+            out[cond_name] = cloned
+        return out, kept_video, cropped_audio
+
+    def _run_windowed_refine(
+        self, *, guider, segment_guider, model_patcher, device, sampler, refine_sigmas,
+        source_native, effective_seed, plan, segment_index, latent_preview,
+        geometry_changed=False, windowed_refine=True,
+    ):
+        """Execute internal video Sampler #2; audio remains exact Stage-1 context.
+
+        ``refine_enabled`` is intentionally modelled as an internal bypass switch:
+        Stage 1 produces an ordinary H3 AV latent and Stage 2 refines only its video
+        stream with Refine Sigmas. Stage-1 audio remains visible to H3 as frozen context
+        and is returned unchanged. With ``windowed_refine=True`` large high-resolution
+        video sequences may use the adaptive temporal-window fallback. With it disabled,
+        Stage 2 is forced to refine the complete video latent in one monolithic pass.
+        """
+        if not getattr(source_native, 'is_nested', False):
+            raise RuntimeError('Internal Sampler #2 requires native H3 NestedTensor AV input.')
+        streams = list(source_native.unbind())
+        if len(streams) != 2:
+            raise RuntimeError(f'Internal Sampler #2 expected 2 AV streams, got {len(streams)}.')
+        source_video, source_audio = streams
+        saved_original_conds = getattr(guider, 'original_conds', None)
+        saved_conds = getattr(guider, 'conds', None)
+        saved_model_options = getattr(guider, 'model_options', None)
+
+        def _restore_guider_state():
+            guider.original_conds = saved_original_conds
+            guider.conds = saved_conds
+            guider.model_options = saved_model_options
+
+        # Match the proven external Sampler #2 handoff. Learned Hi-Res changes the
+        # target H/W, therefore old target-grid VIDEO keyframes are invalid; refs and
+        # audio-only guides remain valid. Without Hi-Res every original condition stays.
+        stage2_conds = dict(saved_original_conds or {})
+        dropped_video_keyframes = 0
+        if bool(geometry_changed):
+            stage2_conds, dropped_video_keyframes = self._hires_conditioning_without_video_keyframes(stage2_conds)
+
+        refine_sigmas_device = refine_sigmas.to(device)
+        import comfy.sample
+        full_noise = comfy.sample.prepare_noise(
+            source_native, int(effective_seed) & 0xFFFFFFFFFFFFFFFF
+        )
+        if not getattr(full_noise, 'is_nested', False):
+            raise RuntimeError('Internal Sampler #2 could not construct native H3 AV noise.')
+        noise_streams = list(full_noise.unbind())
+        if len(noise_streams) != 2:
+            raise RuntimeError(f'Internal Sampler #2 noise has {len(noise_streams)} streams, expected 2.')
+        full_noise_video, _full_noise_audio_unused = noise_streams
+        # Stage 2 is a VIDEO refiner. Audio from Stage 1 is authoritative context,
+        # not a second diffusion target. Keep its noise identically zero.
+        frozen_audio_noise = torch.zeros_like(source_audio)
+
+        latent_t = int(source_video.shape[2])
+        lat_h = int(source_video.shape[3])
+        lat_w = int(source_video.shape[4])
+        packed_video_rows = int(latent_t * ((lat_h + 1) // 2) * ((lat_w + 1) // 2))
+        try:
+            total_vram = int(torch.cuda.get_device_properties(device).total_memory) if torch.cuda.is_available() else 0
+        except Exception:
+            total_vram = 0
+        gb = float(total_vram) / float(1024 ** 3) if total_vram else 0.0
+        if gb and gb <= 18.5:
+            full_row_budget = 200_000
+        elif gb and gb <= 24.5:
+            full_row_budget = 320_000
+        elif gb and gb <= 32.5:
+            full_row_budget = 460_000
+        else:
+            full_row_budget = 650_000
+
+        # A learned spatial upscale makes every temporal token substantially more
+        # expensive.  The previous exact-first heuristic looked only at total row
+        # count and could therefore launch a 15s high-res H3 solve as one enormous
+        # Sampler #2 call.  DynamicVRAM then spent minutes staging/streaming the first
+        # transformer step instead of reaching the proven bounded-window path.
+        #
+        # For geometry-changed (latent-hires) Stage 2, only use a monolithic solve
+        # when the *entire temporal latent* already fits the VRAM-tier safe window.
+        # Refiner-only (same geometry) keeps the existing exact-first behavior.
+        safe_chunk_tokens = max(7, int(_hires_default_chunk_tokens(total_vram)))
+        temporal_full_safe = int(latent_t) <= int(safe_chunk_tokens)
+        # Public Windowed Refine is an explicit quality/memory policy switch.
+        # ON preserves the validated adaptive behavior: use one full Stage-2 solve when
+        # it is already safe, otherwise use bounded temporal windows. OFF is exact-only:
+        # never split the Refine trajectory, even when the planner predicts high VRAM.
+        # This intentionally trades memory headroom for temporal/lighting continuity.
+        allow_windowed_refine = bool(windowed_refine)
+        adaptive_full_safe = (
+            packed_video_rows <= int(full_row_budget)
+            and (temporal_full_safe if bool(geometry_changed) else True)
+        )
+        prefer_full = (not allow_windowed_refine) or bool(adaptive_full_safe)
+        _lm_print(
+            '[MiniMaxH3 LongMedia][INTERNAL SAMPLER2 PLAN] '
+            f'geometry_changed={bool(geometry_changed)}; latent_t={int(latent_t)}; '
+            f'safe_chunk_tokens={int(safe_chunk_tokens)}; packed_video_rows={int(packed_video_rows)}; '
+            f'row_budget={int(full_row_budget)}; windowed_refine={allow_windowed_refine}; '
+            f'adaptive_full_safe={bool(adaptive_full_safe)}; prefer_full={bool(prefer_full)}; '
+            f'path={"exact_forced" if (prefer_full and not allow_windowed_refine) else ("exact" if prefer_full else "windowed")}',
+            flush=True,
+        )
+
+        segment_specs = ()
+        per_segment_specs = getattr(plan, 'segment_temporal_embeddings', None)
+        if per_segment_specs and int(segment_index) < len(per_segment_specs):
+            segment_specs = tuple(dict(item) for item in (per_segment_specs[int(segment_index)] or ()))
+        timeline = _segment_timeline_contract(plan, int(segment_index))
+        context_start = int(timeline['context_start'])
+
+        if prefer_full:
+            try:
+                guider.original_conds = stage2_conds
+                guider.conds = self._copy_conds(stage2_conds)
+                guider.model_options = comfy.model_patcher.create_model_options_clone(saved_model_options or {})
+                callback_state = {}
+                callback = latent_preview.prepare_callback(
+                    model_patcher, max(0, int(refine_sigmas.shape[-1]) - 1), callback_state
+                )
+                _lm_print(
+                    '[MiniMaxH3 LongMedia][INTERNAL SAMPLER2 EXACT] '
+                    f'unit={int(segment_index)+1}; rows={packed_video_rows}; budget={int(full_row_budget)}; '
+                    f'steps={int(refine_sigmas.numel())-1}; noise=video_only_stock_noise; mask=audio_frozen; '
+                    f'dropped_geometry_video_keyframes={int(dropped_video_keyframes)}; '
+                    'input=stage1_final_av; sigmas=Refine_Sigmas; audio_passthrough=stage1_exact; post_geometry_merge=False',
+                    flush=True,
+                )
+                # Preserve Stage-1 audio as a frozen AV context stream.  The model
+                # can still attend to it while only video receives Refine-Sigma noise.
+                exact_noise = comfy.nested_tensor.NestedTensor((full_noise_video, frozen_audio_noise))
+                exact_mask = comfy.nested_tensor.NestedTensor((
+                    torch.ones_like(source_video, dtype=torch.float32),
+                    torch.zeros_like(source_audio, dtype=torch.float32),
+                ))
+                refined = self._run_stock_sample_with_reused_lifecycle(
+                    guider, device, exact_noise, source_native, sampler, refine_sigmas_device,
+                    exact_mask, callback, False, int(effective_seed),
+                )
+                if not getattr(refined, 'is_nested', False):
+                    raise RuntimeError('Internal Sampler #2 exact path returned non-native H3 output.')
+                refined_streams = list(refined.unbind())
+                if len(refined_streams) != 2:
+                    raise RuntimeError(
+                        f'Internal Sampler #2 exact path returned {len(refined_streams)} streams, expected 2.'
+                    )
+                # Hard output contract: Stage 2 never rewrites audio, even if a
+                # sampler implementation introduces numerical changes under mask=0.
+                result = comfy.nested_tensor.NestedTensor((refined_streams[0], source_audio))
+                _restore_guider_state()
+                return result
+            except torch.OutOfMemoryError:
+                _restore_guider_state()
+                try:
+                    comfy.model_management.soft_empty_cache()
+                except Exception:
+                    pass
+                if not allow_windowed_refine:
+                    _lm_print(
+                        '[MiniMaxH3 LongMedia][INTERNAL SAMPLER2 EXACT OOM] '
+                        f'rows={packed_video_rows}; fallback=disabled_by_windowed_refine_switch; '
+                        'action=raise; semantics=Sampler2',
+                        flush=True,
+                    )
+                    raise
+                _lm_print(
+                    '[MiniMaxH3 LongMedia][INTERNAL SAMPLER2 EXACT OOM] '
+                    f'rows={packed_video_rows}; fallback=temporal_windows; semantics=Sampler2',
+                    flush=True,
+                )
+            except Exception:
+                _restore_guider_state()
+                raise
+
+        initial_chunk = min(latent_t, int(safe_chunk_tokens))
+        if initial_chunk < latent_t and (initial_chunk - 2) % 5:
+            initial_chunk = 22
+        candidates = (latent_t,) if latent_t <= initial_chunk else _hires_fallback_chunk_tokens(initial_chunk)
+        last_oom = None
+        for chunk_tokens in candidates:
+            # Windowed Sampler #2 needs substantially more temporal context than a
+            # normal continuation overlap.  With 22-token windows use a legal
+            # 12-token (39-frame) overlap: hop=10 tokens keeps the H3 five-token
+            # phase while giving the new tail enough past context to avoid a new
+            # local attractor at every window.
+            if int(chunk_tokens) >= latent_t:
+                overlap_tokens = 0
+            elif int(chunk_tokens) >= 17:
+                overlap_tokens = 12
+            elif int(chunk_tokens) >= 12:
+                overlap_tokens = 7
+            else:
+                overlap_tokens = 2
+            exact_prefix = 0 if overlap_tokens == 0 else min(2, overlap_tokens)
+            windows = _hires_plan_refine_windows(
+                latent_t, chunk_tokens=int(chunk_tokens), overlap_tokens=int(overlap_tokens),
+                exact_prefix_tokens=int(exact_prefix),
+            )
+            video_accumulator = source_video.clone()
+            audio_accumulator = source_audio.clone()
+            try:
+                _lm_print(
+                    '[MiniMaxH3 LongMedia][INTERNAL SAMPLER2 WINDOWED] '
+                    f'unit={int(segment_index)+1}; rows={packed_video_rows}; budget={int(full_row_budget)}; '
+                    f'video_t={latent_t}; windows={len(windows)}; chunk_tokens={int(chunk_tokens)}; '
+                    f'overlap_tokens={int(overlap_tokens)}; steps={int(refine_sigmas.numel())-1}; '
+                    f'noise=video_only_stock_noise_sliced; mask=bidirectional_context_guard_audio_frozen; input=stage1_final_av; '
+                    f'dropped_geometry_video_keyframes={int(dropped_video_keyframes)}; post_geometry_merge=False; '
+                    'audio_passthrough=stage1_exact; window_merge=overlap_save_core_only',
+                    flush=True,
+                )
+                for window_i, window in enumerate(windows):
+                    comfy.model_management.throw_exception_if_processing_interrupted()
+                    v0, v1 = int(window.token_start), int(window.token_stop)
+
+                    # Overlap-save ownership: each local H3 solve receives temporal
+                    # context on BOTH sides but only owns the center core.  Past context
+                    # comes from already-refined output; future context remains the common
+                    # Stage-1 x0.  This preserves the full Sampler #2 result in the core
+                    # while preventing each independent window from establishing a new
+                    # macro-state immediately after a one-sided handoff.
+                    if window_i == 0:
+                        owner_start = 0
+                    else:
+                        owner_start = v0 + int(window.overlap_tokens) // 2
+                    if window_i + 1 >= len(windows):
+                        owner_stop = v1
+                    else:
+                        next_window = windows[window_i + 1]
+                        owner_stop = int(next_window.token_start) + int(next_window.overlap_tokens) // 2
+                    owner_start = max(v0, min(v1, int(owner_start)))
+                    owner_stop = max(owner_start, min(v1, int(owner_stop)))
+                    prefix_video_tokens = max(0, owner_start - v0)
+                    suffix_video_tokens = max(0, v1 - owner_stop)
+
+                    local_video = source_video[:, :, v0:v1].contiguous().clone()
+                    local_audio = self._hires_refine_audio_window(
+                        source_audio, int(window.frame_start), int(window.frame_count)
+                    ).clone()
+                    a0, _a1, _required = _hires_audio_window_bounds(
+                        int(window.frame_start), int(window.frame_count), int(audio_accumulator.shape[-1])
+                    )
+
+                    # Only the left context has already been refined. The right context
+                    # deliberately stays on the globally consistent Stage-1 x0 and acts
+                    # as a future boundary condition for this core.
+                    if prefix_video_tokens > 0:
+                        local_video[:, :, :prefix_video_tokens] = video_accumulator[
+                            :, :, v0:owner_start
+                        ].to(device=local_video.device, dtype=local_video.dtype)
+
+                    owner_frame_start = int(_hires_frames_for_tokens(owner_start))
+                    owner_frame_stop = int(_hires_frames_for_tokens(owner_stop))
+                    local_owner_frame_start = max(0, owner_frame_start - int(window.frame_start))
+                    local_owner_frame_stop = max(local_owner_frame_start, owner_frame_stop - int(window.frame_start))
+                    audio_owner_start = min(
+                        int(local_audio.shape[-1]),
+                        max(0, int(round(local_owner_frame_start / float(FPS) * float(AUDIO_LATENT_FPS)))),
+                    )
+                    audio_owner_stop = min(
+                        int(local_audio.shape[-1]),
+                        max(audio_owner_start, int(round(local_owner_frame_stop / float(FPS) * float(AUDIO_LATENT_FPS)))),
+                    )
+                    if audio_owner_start > 0:
+                        local_audio[..., :audio_owner_start] = audio_accumulator[
+                            ..., a0:a0 + audio_owner_start
+                        ].to(device=local_audio.device, dtype=local_audio.dtype)
+
+                    local_latent = comfy.nested_tensor.NestedTensor((local_video, local_audio))
+                    noise_video = full_noise_video[:, :, v0:v1].contiguous()
+                    # Audio is context-only in Stage 2: no fresh noise is ever
+                    # injected into it, regardless of exact/windowed execution.
+                    noise_audio = torch.zeros_like(local_audio)
+                    local_noise = comfy.nested_tensor.NestedTensor((noise_video, noise_audio))
+
+                    # Freeze both context wings; denoise the owner core with the full
+                    # Refine Sigmas trajectory. No low-frequency/detail suppression.
+                    local_video_mask = torch.zeros_like(local_video, dtype=torch.float32)
+                    if owner_stop > owner_start:
+                        local_video_mask[:, :, prefix_video_tokens:int(local_video.shape[2]) - suffix_video_tokens if suffix_video_tokens else int(local_video.shape[2])] = 1.0
+                    # Audio is frozen for the entire local solve. It remains visible
+                    # to H3 as context but is never part of the denoised owner core.
+                    local_audio_mask = torch.zeros_like(local_audio, dtype=torch.float32)
+                    local_mask = comfy.nested_tensor.NestedTensor((local_video_mask, local_audio_mask))
+
+                    window_conds, kept_video_kfs, cropped_audio_kfs = self._sampler2_window_conds(
+                        stage2_conds, int(window.frame_start), int(window.frame_count)
+                    )
+                    guider.original_conds = window_conds
+                    guider.conds = self._copy_conds(window_conds)
+                    guider.model_options = comfy.model_patcher.create_model_options_clone(saved_model_options or {})
+                    transformer_options = guider.model_options.setdefault('transformer_options', {})
+                    transformer_options[TEMPORAL_OFFSET_OPTION] = temporal_offset_for_frame(
+                        int(context_start + window.frame_start)
+                    )
+                    local_specs = _lm_slice_temporal_specs_for_hires_refine(
+                        segment_specs, window_start_frame=int(window.frame_start),
+                        window_frame_count=int(window.frame_count),
+                    )
+                    _lm_apply_temporal_specs_runtime_option(guider, local_specs)
+
+                    callback_state = {}
+                    callback = latent_preview.prepare_callback(
+                        model_patcher, max(0, int(refine_sigmas.shape[-1]) - 1), callback_state
+                    )
+                    refined = self._run_stock_sample_with_reused_lifecycle(
+                        guider, device, local_noise, local_latent, sampler, refine_sigmas_device,
+                        local_mask, callback, False, int(effective_seed),
+                    )
+                    if not getattr(refined, 'is_nested', False):
+                        raise RuntimeError('Internal windowed Sampler #2 returned non-native H3 output.')
+                    refined_streams = list(refined.unbind())
+                    if len(refined_streams) != 2:
+                        raise RuntimeError(f'Internal windowed Sampler #2 returned {len(refined_streams)} streams, expected 2.')
+                    refined_video, refined_audio = refined_streams
+
+                    # Overlap-save write: retain the COMPLETE H3-refined latent for
+                    # the owner core. Context wings are discarded, so no crossfade and
+                    # no competing absolute latent solutions ever meet in final output.
+                    incoming_video = refined_video.to(
+                        device=video_accumulator.device, dtype=video_accumulator.dtype
+                    )
+                    local_owner_v0 = int(owner_start - v0)
+                    local_owner_v1 = int(owner_stop - v0)
+                    if local_owner_v1 > local_owner_v0:
+                        video_accumulator[:, :, owner_start:owner_stop] = incoming_video[
+                            :, :, local_owner_v0:local_owner_v1
+                        ]
+
+                    # Intentionally ignore refined_audio. Stage-1 audio owns the
+                    # complete final audio latent bit-for-bit across every window.
+
+                    _lm_print(
+                        '[MiniMaxH3 LongMedia][INTERNAL SAMPLER2 WINDOW] '
+                        f'unit={int(segment_index)+1}; window={int(window.index)+1}/{len(windows)}; '
+                        f'frames={int(window.frame_start)}:{int(window.frame_stop)}; tokens={v0}:{v1}; '
+                        f'owner_tokens={owner_start}:{owner_stop}; context_left={prefix_video_tokens}t; context_right={suffix_video_tokens}t; '
+                        f'kept_video_keyframes={int(kept_video_kfs)}; cropped_audio_keyframes={int(cropped_audio_kfs)}; '
+                        f'temporal_controls={len(local_specs)}; overlap_crossfade=False; future_context=stage1_x0; '
+                        'full_refine_core=True; detail_residual_only=False; audio_refine=False; audio_passthrough=stage1_exact',
+                        flush=True,
+                    )
+                    del local_latent, local_noise, refined, refined_streams, refined_video, refined_audio, incoming_video
+                    try:
+                        comfy.model_management.soft_empty_cache()
+                    except Exception:
+                        pass
+                result = comfy.nested_tensor.NestedTensor((video_accumulator, audio_accumulator))
+                _restore_guider_state()
+                return result
+            except torch.OutOfMemoryError as exc:
+                last_oom = exc
+                _restore_guider_state()
+                try:
+                    del video_accumulator, audio_accumulator
+                except Exception:
+                    pass
+                try:
+                    comfy.model_management.soft_empty_cache()
+                except Exception:
+                    pass
+                _lm_print(
+                    '[MiniMaxH3 LongMedia][INTERNAL SAMPLER2 WINDOW OOM] '
+                    f'chunk_tokens={int(chunk_tokens)} failed; trying smaller legal H3 window',
+                    flush=True,
+                )
+                continue
+            except Exception:
+                _restore_guider_state()
+                raise
+        _restore_guider_state()
+        if last_oom is not None:
+            raise last_oom
+        raise RuntimeError('Internal Sampler #2 could not construct a valid execution plan.')
+
     def run(self, initial_av, long_media_plan, guider, sampler, sigmas, seed,
             video_context_denoise=0.0, audio_context_denoise=0.0,
             offload_completed_segments=True,
             latent_hires_enabled=False, latent_hires_model='', latent_hires_scale=2.0,
             latent_hires_precision='fp16', latent_hires_align=32,
-            refine_enabled=False, refine_steps=2):
+            refine_enabled=False, refine_steps=2, refine_sigmas=None, windowed_refine=True):
         import comfy.samplers
         import comfy.sampler_helpers
         import comfy.model_management
@@ -17568,6 +22589,8 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
         passes = max(1, int(getattr(plan, 'passes', 1) or 1))
         segmentation_active = bool(getattr(plan, 'segmentation_active', False))
         workflow_mode = str(getattr(plan, 'workflow_mode', '') or '')
+        motion_repair_mode = _normalize_motion_repair_mode(getattr(plan, 'motion_repair_mode', 'off'))
+        motion_repair_reports = []
 
         # FastH3 Preview is a 4-call DMD2 student. Detect the loader-attached
         # contract before any sigma splitting so a workflow cannot accidentally
@@ -17615,47 +22638,35 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
             if _is_fastvideo_vsa and bool(refine_enabled):
                 _lm_print(
                     '[MiniMaxH3 LongMedia][FastVideo VSA REFINER OWNERSHIP] '
-                    f'sampler_1_steps=4; sampler_2_refine_steps_requested={int(refine_steps)}; '
-                    'sampler #2 keeps the workflow-selected refine schedule; no 8->4+4 split is inferred from sampler #1.',
+                    'sampler_1_steps=4; Refine uses the dedicated refine_sigmas schedule; '
+                    'the trained four-call MAIN trajectory is never split.',
                     flush=True,
                 )
         else:
             full_sigmas = sigmas
 
+        # v0.6.24: Refine is an independent user-owned second-stage schedule.
+        # MAIN SIGMAS are never split or shortened.  This keeps the proven
+        # MultiClip generation trajectory byte-for-byte independent from the
+        # optional post-x0 refine stage.
         main_steps = max(0, int(full_sigmas.numel()) - 1) if torch.is_tensor(full_sigmas) else max(0, len(full_sigmas) - 1)
-        total_steps = main_steps
+        runtime_main_sigmas = full_sigmas
+        refine_switch_step = main_steps
         if bool(refine_enabled):
-            if _is_fastvideo_vsa:
-                # Sampler #1 is the fixed four-step student.  Sampler #2 is an
-                # independent LongMedia refiner whose step count comes only from
-                # refine_steps.  Its sigma tail is selected from the workflow's
-                # connected SIGMAS schedule, never from the forced four-step base.
-                _unused_main, runtime_refine_sigmas, _connected_total, _connected_switch, refine_steps_effective, _ = split_refine_sigmas(
-                    sigmas, int(refine_steps)
-                )
-                runtime_main_sigmas = full_sigmas
-                refine_switch_step = main_steps
-                total_steps = main_steps + int(refine_steps_effective)
-            else:
-                runtime_main_sigmas, runtime_refine_sigmas, total_steps, refine_switch_step, refine_steps_effective, _ = split_refine_sigmas(
-                    full_sigmas, int(refine_steps)
-                )
+            runtime_refine_sigmas = _lm_validate_refine_sigmas(refine_sigmas, required=True)
+            refine_steps_effective = max(0, int(runtime_refine_sigmas.numel()) - 1)
+            total_steps = main_steps + int(refine_steps_effective)
         else:
-            runtime_main_sigmas = full_sigmas
             runtime_refine_sigmas = None
-            refine_switch_step = main_steps
             refine_steps_effective = 0
-        hires_second_sigmas = None
-        hires_sigma_indices = []
-        if bool(latent_hires_enabled) and bool(refine_enabled) and int(refine_steps_effective) > 0:
-            _secondary_sigma_source = sigmas if _is_fastvideo_vsa else full_sigmas
-            hires_second_sigmas, hires_sigma_indices = self._hires_second_pass_sigmas(_secondary_sigma_source, int(refine_steps_effective))
+            total_steps = main_steps
         _lm_print(
-            '[MiniMaxH3 LongMedia][TWO-PASS HIRES] '
-            f'hires={bool(latent_hires_enabled)} refine={bool(refine_enabled)}; total_steps={int(total_steps)}; '
-            f'lowres_steps={int(refine_switch_step)}; second_pass_steps={int(refine_steps_effective)}; '
-            f'second_sigma_indices={hires_sigma_indices if hires_second_sigmas is not None else None}; '
-            'model_lifecycle=single; second_model_load=False',
+            '[MiniMaxH3 LongMedia][REFINE SIGMAS V624] '
+            f'hires={bool(latent_hires_enabled)} refine={bool(refine_enabled)}; '
+            f'main_steps={int(main_steps)} untouched_main_schedule=True; '
+            f'refine_steps={int(refine_steps_effective)}; '
+            f'refine_sigma_start={(float(runtime_refine_sigmas[0].detach().float().cpu()) if runtime_refine_sigmas is not None else None)}; '
+            'refine_scheduler=dedicated_input; model_lifecycle=single; internal_sampler2=True; external_second_node=False',
             flush=True,
         )
         if (not segmentation_active) and workflow_mode not in ('multiclip',) and passes != 1:
@@ -17672,9 +22683,16 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
         # every sampler invocation start from the same clean memory boundary as
         # a cold first run, before any latent is moved to CUDA or prepare_sampling
         # performs its residency calculation.
+        # Seed-only reruns may reuse the cached upstream guider.  Sever only
+        # LongMedia-owned transient CUDA caches *before* the hard sampler memory
+        # boundary so unload/empty-cache can actually reclaim those pages.
+        sampler_entry_transient_release = _release_longmedia_transient_cuda_refs(
+            getattr(guider, 'model_options', None), 'sampler_entry'
+        )
         sampler_execution_boundary = _sampler_memory_isolation(
             'sampler_entry', unload_models=True
         )
+        sampler_exit_transient_release = None
 
         # Save externally-owned guider state. The runtime temporarily mutates it
         # exactly as CFGGuider.sample() does, but restores everything at the end.
@@ -17717,6 +22735,492 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                 external_refine_global_mode = True
 
         external_refine_mode = bool(external_refine_global_mode)
+        if external_refine_mode and int(passes) > 1 and any(getattr(plan, 'segment_temporal_embeddings', None) or ()):
+            # Each MAIN has a different packed regional text presentation. Using
+            # pass 0's context/row offsets over the whole movie is invalid.
+            external_refine_global_mode = False
+            _lm_print('[MiniMaxH3 LongMedia][DIRECTOR REFINE] refining each MAIN with its own '
+                      'regional conditioning clock; continuous final VAE decode preserved', flush=True)
+
+        # Director persistent per-clip selective cache. Branch-level selective
+        # regeneration remains a native MultiClip feature. Single/segmented Director
+        # timelines are persisted as one complete TAKE after the final stitched output.
+        director_project_id = str(getattr(plan, 'director_project_id', '') or '').strip()
+        director_regeneration = getattr(plan, 'director_regeneration', None)
+        director_regeneration = dict(director_regeneration) if isinstance(director_regeneration, dict) else {
+            'mode': 'none', 'clip_id': None, 'request_id': None,
+        }
+        director_request_mode = str(director_regeneration.get('mode') or 'none').strip().lower()
+        if director_request_mode not in ('none', 'clip', 'from_here', 'recast', 'recast_range'):
+            director_request_mode = 'none'
+        director_request_id = str(director_regeneration.get('request_id') or '').strip()
+        director_target_id = str(director_regeneration.get('clip_id') or '').strip()
+        director_source_revision = str(director_regeneration.get('source_revision') or '').strip()
+        director_recast_subject_id = str(director_regeneration.get('recast_subject_id') or '').strip()
+        director_recast_preserve_audio = bool(director_regeneration.get('preserve_audio', director_request_mode in ('recast', 'recast_range')))
+        director_recast_video_denoise = 1.0  # legacy field retained for serialization only; source is conditioning-only
+        director_recast_reference_scale = str(director_regeneration.get('recast_reference_scale') or 'auto').strip().lower()
+        if director_recast_reference_scale not in ('auto', '1.0', '0.875', '0.75', '0.625', '0.5'):
+            director_recast_reference_scale = 'auto'
+        director_recast_clip_ids = tuple(str(v) for v in (director_regeneration.get('recast_clip_ids') or ()) if str(v).strip())
+        director_recast_source_revisions = {str(k): str(v) for k, v in ((director_regeneration.get('source_revisions') or {}).items()) if str(k).strip() and str(v).strip()}
+        director_clip_ids = tuple(str(v) for v in (getattr(plan, 'director_clip_ids', None) or ()))
+        director_cache = None
+        director_cached_takes = {}
+        director_render_indices = set(range(int(passes)))
+        director_clip_only_target = None
+        director_recast_target = None
+        director_recast_targets = set()
+        director_recast_source_by_index = {}
+        director_recast_boundary_flags = {}
+        director_cache_report = {
+            'enabled': False,
+            'requested_mode': director_request_mode,
+            'effective_mode': 'full_render',
+            'project_id': director_project_id or None,
+            'request_id': director_request_id or None,
+            'target_clip_id': director_target_id or None,
+            'source_revision': director_source_revision or None,
+            'recast_subject_id': director_recast_subject_id or None,
+            'preserve_audio': bool(director_recast_preserve_audio) if director_request_mode in ('recast', 'recast_range') else None,
+            'recast_video_denoise': float(director_recast_video_denoise) if director_request_mode in ('recast', 'recast_range') else None,
+            'recast_reference_scale': director_recast_reference_scale if director_request_mode in ('recast', 'recast_range') else None,
+            'recast_stage_count': 0,
+            'video_vae_segment_encodes': 0,
+            'audio_vae_segment_encodes': 0,
+            'audio_vae_segment_encodes_skipped': 0,
+            'recast_clip_ids': list(director_recast_clip_ids) if director_request_mode == 'recast_range' else None,
+            'reason': None,
+        }
+        director_geometry = {}
+        director_semantic = {}
+        director_outgoing_contract = {}
+
+        _director_cache_allowed = bool(
+            director_project_id
+            and workflow_name == 'multiclip'
+            and not bool(external_refine_global_mode)
+            and not bool(getattr(plan, 'loop_closure_enabled', False))
+            and len(director_clip_ids) == int(passes)
+        )
+        if _director_cache_allowed:
+            try:
+                import folder_paths
+                _cache_base_video, _cache_base_audio = unpack_av_samples(initial_av)
+                director_cache = _DirectorClipCache(folder_paths.get_output_directory(), director_project_id)
+                # v0.5.56: take restore is an editorial lineage problem, not a
+                # floating-point hash problem. Migrate the currently accepted chain
+                # once so clip-only rerolls can preserve stable seam identities across
+                # restart and historical takes can be reattached by parent_revision.
+                director_cache.ensure_active_chain_lineage(director_clip_ids)
+                for _cache_index in range(int(passes)):
+                    director_geometry[_cache_index] = _lm_director_clip_geometry_fingerprint(
+                        plan, _cache_base_video, _cache_base_audio, _cache_index,
+                        latent_hires_enabled=bool(latent_hires_enabled),
+                        latent_hires_model=str(latent_hires_model),
+                        latent_hires_scale=float(latent_hires_scale),
+                        latent_hires_precision=str(latent_hires_precision),
+                        latent_hires_align=int(latent_hires_align),
+                    )
+                    director_semantic[_cache_index] = _lm_director_clip_semantic_fingerprint(
+                        plan, int(seed), _cache_index
+                    )
+                    director_outgoing_contract[_cache_index] = _lm_director_outgoing_contract_fingerprint(
+                        plan, _cache_index
+                    )
+                _active_meta = {
+                    i: director_cache.active_metadata(director_clip_ids[i])
+                    for i in range(int(passes))
+                }
+                director_cache_report['enabled'] = True
+
+                _target_index = (
+                    director_clip_ids.index(director_target_id)
+                    if director_request_mode != 'none' and director_target_id in director_clip_ids
+                    else None
+                )
+                _request_done = (
+                    director_cache.request_completed(director_request_id)
+                    if director_request_id else None
+                )
+                if director_request_mode == 'recast' and _target_index is not None and _request_done is None:
+                    if not director_source_revision:
+                        raise RuntimeError('Director Recast request is missing source_revision.')
+                    # v0.6.6-r3: the queued Recast request owns an immutable source_revision.
+                    # Do not depend on a stale UI-side active.json pointer still matching when
+                    # the sampler eventually executes. Restore/validate the selected cached
+                    # branch transactionally in the backend, then refresh active metadata.
+                    _recast_restore = director_cache.restore_take_branch(
+                        director_clip_ids, director_target_id, director_source_revision
+                    )
+                    if not bool(_recast_restore.get('ok')):
+                        raise RuntimeError(
+                            'Director Recast could not restore the selected source branch: '
+                            f"{_recast_restore.get('reason') or 'branch_restore_unavailable'}"
+                        )
+                    _active_meta = {
+                        i: director_cache.active_metadata(director_clip_ids[i])
+                        for i in range(int(passes))
+                    }
+                    _recast_active = _active_meta.get(int(_target_index))
+                    _recast_active_revision = str((_recast_active or {}).get('revision') or '')
+                    if _recast_active_revision != director_source_revision:
+                        raise RuntimeError(
+                            'Director Recast backend branch restore did not activate the requested source revision: '
+                            f'requested={director_source_revision!r} active={_recast_active_revision!r}.'
+                        )
+                    director_cache_report['recast_branch_restore'] = {
+                        'requested_revision': director_source_revision,
+                        'changed_clips': list(_recast_restore.get('changed_clips') or []),
+                        'reason': _recast_restore.get('reason'),
+                    }
+                    _recast_take = director_cache.load_revision(director_target_id, director_source_revision)
+                    if _recast_take is None:
+                        raise RuntimeError('Director Recast source take disappeared from the persistent cache.')
+                    _recast_source_video = _recast_take['continuation_video']
+                    _recast_source_audio = _recast_take['continuation_audio']
+                    _recast_target_video_t = int(video_latent_t(int(plan.segment_lengths[int(_target_index)])))
+                    _recast_target_audio_t = int(audio_latent_t(int(plan.segment_lengths[int(_target_index)])))
+                    if (tuple(_recast_source_video.shape[:2]) != tuple(_cache_base_video.shape[:2])
+                            or tuple(_recast_source_video.shape[3:]) != tuple(_cache_base_video.shape[3:])):
+                        raise RuntimeError(
+                            'Director Recast source take spatial/channel geometry no longer matches this workflow: '
+                            f'source={tuple(_recast_source_video.shape)} base={tuple(_cache_base_video.shape)}.'
+                        )
+                    if tuple(_recast_source_audio.shape[:3]) != tuple(_cache_base_audio.shape[:3]):
+                        raise RuntimeError(
+                            'Director Recast source take AUDIO channel geometry no longer matches this workflow: '
+                            f'source={tuple(_recast_source_audio.shape)} base={tuple(_cache_base_audio.shape)}.'
+                        )
+                    _recast_preflight = _lm_recast_temporal_prefix_indices(
+                        _recast_target_video_t, int(_recast_source_video.shape[2]),
+                        _recast_target_audio_t, int(_recast_source_audio.shape[-1]),
+                        overlap_frames=int(getattr(plan, 'overlap_frames', 0) or 0),
+                        segment_index=int(_target_index),
+                    )
+                    director_cache_report['recast_source_geometry'] = {
+                        **dict(_recast_preflight),
+                        'target_video_t': _recast_target_video_t,
+                        'source_video_t': int(_recast_source_video.shape[2]),
+                        'target_audio_t': _recast_target_audio_t,
+                        'source_audio_t': int(_recast_source_audio.shape[-1]),
+                    }
+                    director_cached_takes[int(_target_index)] = _recast_take
+                    director_recast_target = int(_target_index)
+                    director_recast_targets = {int(_target_index)}
+                    director_recast_source_by_index[int(_target_index)] = _recast_take
+                    director_recast_boundary_flags[int(_target_index)] = {
+                        'lock_head': bool(int(_target_index) > 0),
+                        'lock_tail': bool(int(_target_index) < int(passes) - 1),
+                    }
+
+                if director_request_mode == 'recast_range' and _request_done is None:
+                    if not director_recast_clip_ids:
+                        raise RuntimeError('Director Recast range is missing target clip ids.')
+                    _range_indices = []
+                    for _cid in director_recast_clip_ids:
+                        if _cid not in director_clip_ids:
+                            raise RuntimeError(f'Director Recast range target {_cid!r} is no longer in this timeline.')
+                        _range_indices.append(int(director_clip_ids.index(_cid)))
+                    _range_indices = sorted(set(_range_indices))
+                    if not _range_indices:
+                        raise RuntimeError('Director Recast range resolved to no timeline clips.')
+                    _range_anchor_index = int(_range_indices[0])
+                    _range_anchor_id = director_clip_ids[_range_anchor_index]
+                    _range_anchor_revision = str(
+                        director_recast_source_revisions.get(_range_anchor_id) or ''
+                    ).strip()
+                    if not _range_anchor_revision:
+                        raise RuntimeError(
+                            f'Director Recast range is missing source revision for {_range_anchor_id!r}.'
+                        )
+                    # Restore the immutable branch selected by the first target shot. The
+                    # explicit per-shot source revisions must then resolve to that same branch;
+                    # otherwise the request describes mutually incompatible cached timelines.
+                    _range_restore = director_cache.restore_take_branch(
+                        director_clip_ids, _range_anchor_id, _range_anchor_revision
+                    )
+                    if not bool(_range_restore.get('ok')):
+                        raise RuntimeError(
+                            'Director Recast range could not restore its selected source branch: '
+                            f"{_range_restore.get('reason') or 'branch_restore_unavailable'}"
+                        )
+                    _active_meta = {
+                        i: director_cache.active_metadata(director_clip_ids[i])
+                        for i in range(int(passes))
+                    }
+                    director_cache_report['recast_branch_restore'] = {
+                        'requested_revision': _range_anchor_revision,
+                        'anchor_clip_id': _range_anchor_id,
+                        'changed_clips': list(_range_restore.get('changed_clips') or []),
+                        'reason': _range_restore.get('reason'),
+                    }
+                    for _ri in _range_indices:
+                        _cid = director_clip_ids[_ri]
+                        _rev = str(director_recast_source_revisions.get(_cid) or '').strip()
+                        if not _rev:
+                            raise RuntimeError(f'Director Recast range is missing source revision for {_cid!r}.')
+                        _active = _active_meta.get(_ri)
+                        _active_rev = str((_active or {}).get('revision') or '')
+                        if _active_rev != _rev:
+                            raise RuntimeError(
+                                f'Director Recast range source revisions do not belong to one active cached branch for {_cid!r}: '
+                                f'requested={_rev!r} active={_active_rev!r}.'
+                            )
+                        _take = director_cache.load_revision(_cid, _rev)
+                        if _take is None:
+                            raise RuntimeError(f'Director Recast range source take disappeared for {_cid!r}.')
+                        _sv = _take['continuation_video']
+                        _sa = _take['continuation_audio']
+                        if (tuple(_sv.shape[:2]) != tuple(_cache_base_video.shape[:2])
+                                or tuple(_sv.shape[3:]) != tuple(_cache_base_video.shape[3:])):
+                            raise RuntimeError(
+                                f'Director Recast range source VIDEO geometry mismatch for {_cid!r}: '
+                                f'source={tuple(_sv.shape)} base={tuple(_cache_base_video.shape)}.'
+                            )
+                        if tuple(_sa.shape[:3]) != tuple(_cache_base_audio.shape[:3]):
+                            raise RuntimeError(
+                                f'Director Recast range source AUDIO geometry mismatch for {_cid!r}: '
+                                f'source={tuple(_sa.shape)} base={tuple(_cache_base_audio.shape)}.'
+                            )
+                        _tv = int(video_latent_t(int(plan.segment_lengths[_ri])))
+                        _ta = int(audio_latent_t(int(plan.segment_lengths[_ri])))
+                        _map = _lm_recast_temporal_prefix_indices(
+                            _tv, int(_sv.shape[2]), _ta, int(_sa.shape[-1]),
+                            overlap_frames=int(getattr(plan, 'overlap_frames', 0) or 0),
+                            segment_index=int(_ri),
+                        )
+                        director_cached_takes[_ri] = _take
+                        director_recast_source_by_index[_ri] = _take
+                        director_cache_report.setdefault('recast_source_geometry_by_clip', {})[_cid] = {
+                            **dict(_map), 'target_video_t': _tv, 'source_video_t': int(_sv.shape[2]),
+                            'target_audio_t': _ta, 'source_audio_t': int(_sa.shape[-1]),
+                        }
+                    director_recast_targets = set(_range_indices)
+                    for _ri in _range_indices:
+                        director_recast_boundary_flags[_ri] = {
+                            'lock_head': bool(_ri > 0 and (_ri - 1) not in director_recast_targets),
+                            'lock_tail': bool(_ri < int(passes) - 1 and (_ri + 1) not in director_recast_targets),
+                        }
+                    director_recast_target = min(director_recast_targets)
+
+                _all_current = all(
+                    _lm_director_take_matches(
+                        _active_meta.get(i), director_geometry[i], director_semantic[i]
+                    )
+                    for i in range(int(passes))
+                )
+
+                if director_request_mode != 'none' and _request_done is not None and _all_current:
+                    # Same one-shot request reached the sampler again because a downstream
+                    # node changed. Replay active takes instead of silently rerolling twice.
+                    director_render_indices = set()
+                    director_cache_report.update({
+                        'effective_mode': 'cached_replay',
+                        'reason': 'request_already_completed',
+                    })
+                elif director_request_mode == 'recast_range' and director_recast_targets:
+                    _outside = [i for i in range(int(passes)) if i not in director_recast_targets]
+                    _unsafe_outside = [
+                        i for i in _outside
+                        if not _lm_director_take_matches(_active_meta.get(i), director_geometry[i], director_semantic[i])
+                    ]
+                    _unsafe_target_geometry = [
+                        i for i in sorted(director_recast_targets)
+                        if not _lm_director_take_matches(_active_meta.get(i), director_geometry[i], None)
+                    ]
+                    if _unsafe_outside:
+                        raise RuntimeError(
+                            'Director Recast range requires the non-target timeline to match its active cached branch; '
+                            f'out-of-date clip indices={_unsafe_outside}. Render/restore the current branch first.'
+                        )
+                    if _unsafe_target_geometry:
+                        raise RuntimeError(
+                            'Director Recast range target geometry changed; Recast preserves timing and cannot stretch cached speech. '
+                            f'clip indices={_unsafe_target_geometry}.'
+                        )
+                    director_render_indices = set(director_recast_targets)
+                    director_clip_only_target = None
+                    director_cache_report.update({
+                        'effective_mode': 'recast_range_preserve_audio',
+                        'target_indices': sorted(director_recast_targets),
+                        'reason': 'character_layer_span_recast_with_exact_cached_audio',
+                    })
+                elif director_request_mode == 'from_here' and _target_index is not None:
+                    _start = int(_target_index)
+                    for i in range(int(_target_index)):
+                        if not _lm_director_take_matches(
+                            _active_meta.get(i), director_geometry[i], director_semantic[i]
+                        ):
+                            _start = i
+                            break
+                    director_render_indices = set(range(_start, int(passes)))
+                    director_cache_report.update({
+                        'effective_mode': 'from_here',
+                        'start_index': int(_start),
+                        'requested_index': int(_target_index),
+                        'reason': ('prefix_cache_valid' if _start == int(_target_index) else 'prefix_cache_mismatch_regenerate_earlier'),
+                    })
+                elif director_request_mode in ('clip', 'recast') and _target_index is not None:
+                    _target_index = int(_target_index)
+                    _unsafe_prefix = [
+                        i for i in range(_target_index)
+                        if not _lm_director_take_matches(
+                            _active_meta.get(i), director_geometry[i], director_semantic[i]
+                        )
+                    ]
+                    _unsafe_suffix = [
+                        i for i in range(_target_index + 1, int(passes))
+                        if not _lm_director_take_matches(
+                            _active_meta.get(i), director_geometry[i], director_semantic[i]
+                        )
+                    ]
+                    _target_meta = _active_meta.get(_target_index)
+                    _target_geometry_ok = _lm_director_take_matches(
+                        _target_meta, director_geometry[_target_index], None
+                    )
+                    _needs_old_outgoing = _target_index < int(passes) - 1
+                    _target_outgoing_ok = (
+                        not _needs_old_outgoing
+                        or (
+                            isinstance(_target_meta, dict)
+                            and str(_target_meta.get('outgoing_contract_fingerprint') or '')
+                            == str(director_outgoing_contract.get(_target_index) or '')
+                        )
+                    )
+                    if _unsafe_prefix:
+                        _start = min(_unsafe_prefix)
+                        director_render_indices = set(range(_start, int(passes)))
+                        director_cache_report.update({
+                            'effective_mode': 'from_here',
+                            'start_index': int(_start),
+                            'requested_index': _target_index,
+                            'reason': 'clip_only_prefix_cache_mismatch',
+                        })
+                    elif _unsafe_suffix or not _target_geometry_ok or not _target_outgoing_ok:
+                        director_render_indices = set(range(_target_index, int(passes)))
+                        director_cache_report.update({
+                            'effective_mode': 'from_here',
+                            'start_index': _target_index,
+                            'requested_index': _target_index,
+                            'reason': (
+                                'clip_only_suffix_cache_mismatch' if _unsafe_suffix
+                                else ('clip_only_outgoing_transition_changed' if not _target_outgoing_ok
+                                      else ('clip_only_missing_outgoing_boundary_take' if _needs_old_outgoing
+                                            else 'clip_only_missing_target_take'))
+                            ),
+                        })
+                    else:
+                        director_render_indices = {_target_index}
+                        director_clip_only_target = _target_index
+                        director_cache_report.update({
+                            'effective_mode': ('recast_take_preserve_audio' if director_request_mode == 'recast' else 'clip_only_two_sided_lock'),
+                            'start_index': _target_index,
+                            'requested_index': _target_index,
+                            'reason': ('recast_source_and_neighbors_cached' if director_request_mode == 'recast' else 'all_unchanged_dependencies_cached'),
+                        })
+                elif director_request_mode != 'none':
+                    director_cache_report.update({
+                        'effective_mode': 'full_render',
+                        'reason': 'invalid_or_missing_target_clip',
+                    })
+            except Exception as _cache_exc:
+                if director_request_mode in ('recast', 'recast_range'):
+                    raise RuntimeError(
+                        f'Director Recast requires its selected persistent take cache: {type(_cache_exc).__name__}: {_cache_exc}'
+                    ) from _cache_exc
+                director_cache = None
+                director_render_indices = set(range(int(passes)))
+                director_clip_only_target = None
+                director_recast_target = None
+                director_cache_report.update({
+                    'enabled': False,
+                    'effective_mode': 'full_render',
+                    'reason': f'cache_initialization_failed:{type(_cache_exc).__name__}:{_cache_exc}',
+                })
+        elif director_project_id:
+            if director_request_mode in ('recast', 'recast_range'):
+                raise RuntimeError(
+                    'Director Recast requires native MultiClip take caching with stable clip identities; '
+                    'disable Loop Closure/global external refine and use a cached Director MultiClip take.'
+                )
+            if bool(external_refine_global_mode):
+                _reason = 'external_global_refiner_stage'
+            elif bool(getattr(plan, 'loop_closure_enabled', False)):
+                _reason = 'loop_closure_requires_full_tail_execution'
+            elif workflow_name != 'multiclip':
+                _reason = 'selective_regeneration_requires_multiclip'
+            else:
+                _reason = 'director_clip_identity_count_mismatch'
+            director_cache_report['reason'] = _reason
+
+        # Materialize every cached clip that the execution plan intends to skip,
+        # plus the old target take required as the right-side lock for clip-only reroll.
+        if director_cache is not None:
+            _needed_cached_indices = set(range(int(passes))) - set(director_render_indices)
+            if director_clip_only_target is not None and int(director_clip_only_target) < int(passes) - 1:
+                _needed_cached_indices.add(int(director_clip_only_target))
+            for _cache_index in sorted(_needed_cached_indices):
+                _take = director_cache.load_active(director_clip_ids[_cache_index])
+                if _take is None:
+                    if director_request_mode in ('recast', 'recast_range'):
+                        raise RuntimeError(
+                            f'Director Recast cached dependency disappeared for clip {director_clip_ids[_cache_index]!r}; '
+                            'refusing to regenerate with unfrozen audio.'
+                        )
+                    # Metadata may have passed before a file was externally removed.
+                    # Fail safe by regenerating from the earliest missing dependency.
+                    _fallback = min(_cache_index, int(director_clip_only_target) if director_clip_only_target is not None else _cache_index)
+                    director_render_indices = set(range(_fallback, int(passes)))
+                    director_clip_only_target = None
+                    director_cached_takes.clear()
+                    director_cache_report.update({
+                        'effective_mode': 'from_here' if _fallback > 0 else 'full_render',
+                        'start_index': int(_fallback),
+                        'reason': 'cached_take_file_missing_regenerate_from_dependency',
+                    })
+                    break
+                director_cached_takes[_cache_index] = _take
+
+        _lm_print(
+            '[MiniMaxH3 LongMedia][DIRECTOR TAKES] '
+            f'project={director_project_id or "none"}; requested={director_request_mode}; '
+            f'effective={director_cache_report.get("effective_mode")}; '
+            f'render_indices={sorted(director_render_indices)}; reason={director_cache_report.get("reason")}',
+            flush=True,
+        )
+
+        # A repeated already-completed request can be satisfied entirely from disk.
+        # Return before H3 model preparation so this path costs only latent I/O.
+        if director_cache is not None and not director_render_indices and int(passes) > 0:
+            _cached_segments = []
+            for _cache_index in range(int(passes)):
+                _take = director_cached_takes.get(_cache_index)
+                if _take is None:
+                    _take = director_cache.load_active(director_clip_ids[_cache_index])
+                if _take is None:
+                    raise RuntimeError('Director cached replay lost an active take after validation.')
+                _cached_segments.append(_lm_cached_take_to_latent(_take, 'display'))
+            _stitched = dict(_cached_segments[0])
+            _stitched.pop('noise_mask', None)
+            _stitched['_lm_per_clip_native_video_decode'] = True
+            _stitched['_lm_segment_latents'] = _cached_segments
+            _stitched['_lm_segment_lengths'] = [int(v) for v in plan.segment_lengths]
+            _stitched['_lm_segment_hidden_overlaps'] = [0] + [int(getattr(plan, 'overlap_frames', 0) or 0)] * max(0, int(passes) - 1)
+            _stitched['_lm_segment_workflow'] = 'multiclip'
+            _stitched['_lm_external_refine_ready'] = True
+            _stitched['_lm_director_regeneration_report'] = dict(director_cache_report)
+            _lm_director_send_regeneration_done(
+                plan, director_request_id,
+                {'mode': director_cache_report.get('effective_mode'), 'cached_replay': True},
+            )
+            return (_stitched, json.dumps({
+                'runtime': 'director_cached_replay',
+                'passes': int(passes),
+                'completed_segments': 0,
+                'director_regeneration': director_cache_report,
+                'model_prepared': False,
+            }, indent=2))
 
         if external_refine_global_mode:
             original_segment_passes = int(passes)
@@ -17729,7 +23233,7 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
             first_refine_mask_cleared = True
         else:
             original_segment_passes = int(passes)
-            first_source_av = initial_av
+            first_source_av = external_refine_segments[0] if external_refine_mode else initial_av
             first_refine_mask_cleared = False
 
         first_local, first_latent, first_noise, first_mask, first_shapes, _ = self._pack_segment_inputs(
@@ -17804,6 +23308,59 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                     patcher.pre_run()
 
                 for segment_index in range(passes):
+                    segment_prepare_report = {}
+                    # Director selective regeneration: cached units are first-class
+                    # execution results. Replaying a prefix establishes the exact native
+                    # continuation state for the first regenerated clip; replaying a
+                    # suffix keeps already-approved takes byte-for-byte unchanged.
+                    if (director_cache is not None
+                            and int(segment_index) not in director_render_indices):
+                        _take = director_cached_takes.get(int(segment_index))
+                        if _take is None:
+                            _take = director_cache.load_active(director_clip_ids[int(segment_index)])
+                            if _take is None:
+                                raise RuntimeError(
+                                    f'Director cached take disappeared for clip {director_clip_ids[int(segment_index)]!r} '
+                                    'after dependency validation.'
+                                )
+                            director_cached_takes[int(segment_index)] = _take
+                        sampled_output = _lm_cached_take_to_latent(_take, 'display')
+                        previous_segment_continuation = _lm_cached_take_to_latent(_take, 'continuation')
+                        previous_segment = sampled_output
+
+                        if store_refine_segments:
+                            stored_segment = self._cpu_latent_copy(sampled_output) if bool(offload_completed_segments) else sampled_output
+                            stored_segment = dict(stored_segment)
+                            stored_segment.pop('noise_mask', None)
+                            per_clip_segment_latents.append(stored_segment)
+                            per_clip_segment_lengths.append(int(plan.segment_lengths[int(segment_index)]))
+                            per_clip_hidden_overlaps.append(
+                                0 if int(segment_index) == 0
+                                else int(getattr(plan, 'overlap_frames', 0) or 0)
+                            )
+                        if stitched is None:
+                            stitched = sampled_output
+                        elif store_per_clip_native_decode:
+                            # Native MultiClip Decode consumes per_clip_segment_latents.
+                            # The placeholder accumulator intentionally remains unchanged.
+                            pass
+                        else:
+                            stitch_overlap = int(plan.overlap_frames) if segmentation_active else 0
+                            stitched = MiniMaxH3LatentLabStitchContinuation().stitch(
+                                stitched, sampled_output, stitch_overlap, False,
+                                bool(offload_completed_segments)
+                            )[0]
+                        completed += 1
+                        _lm_print(
+                            '[MiniMaxH3 LongMedia][DIRECTOR TAKE HIT] '
+                            f'unit={int(segment_index) + 1}/{int(passes)}; '
+                            f'clip_id={director_clip_ids[int(segment_index)]}; '
+                            f'revision={str(_take.get("metadata", {}).get("revision") or "unknown")}; '
+                            'sample_calls=0; continuation_replayed=True',
+                            flush=True,
+                        )
+                        continue
+
                     if external_refine_global_mode:
                         segment_av = first_local
                         external_refine_mask_cleared = True
@@ -17819,7 +23376,9 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                             first_local if segment_index == 0 else external_refine_segments[segment_index]
                         )
                         effective_seed = (int(seed) + int(segment_index)) & 0xFFFFFFFFFFFFFFFF
-                        segment_guider = runtime_template_guider
+                        segment_guider = _clone_guider_with_segment_audio(
+                            runtime_template_guider, plan, segment_index, previous_av=None,
+                        )
                     elif segment_index == 0:
                         segment_av = first_local
                         effective_seed = first_seed
@@ -17839,17 +23398,25 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                             # head with denoise=0; native motion context is auxiliary. No RGB
                             # seam search or per-clip VideoVAE reset. The repeated head is
                             # removed later in LATENT space before one continuous decode.
-                            segment_av = MiniMaxH3LatentLabLongMediaNextSegment().prepare(
+                            segment_av, _segment_prepare_report_text = MiniMaxH3LatentLabLongMediaNextSegment().prepare(
                                 plan, previous_segment_continuation, segment_index, 0.0, 0.0
-                            )[0]
+                            )
+                            try:
+                                segment_prepare_report = json.loads(_segment_prepare_report_text)
+                            except Exception:
+                                segment_prepare_report = {}
                             segment_guider = _clone_guider_with_segment_audio(
                                 runtime_template_guider, plan, segment_index, previous_av=previous_segment_continuation
                             )
                         elif segmentation_active:
-                            segment_av = MiniMaxH3LatentLabLongMediaNextSegment().prepare(
+                            segment_av, _segment_prepare_report_text = MiniMaxH3LatentLabLongMediaNextSegment().prepare(
                                 plan, previous_segment_continuation, segment_index,
                                 float(video_context_denoise), float(audio_context_denoise)
-                            )[0]
+                            )
+                            try:
+                                segment_prepare_report = json.loads(_segment_prepare_report_text)
+                            except Exception:
+                                segment_prepare_report = {}
                             # Geometry authority must be identical for the next target latent
                             # and its native motion-context keyframes.  With Latent Hi-Res,
                             # ``previous_segment`` is the upscaled display/output branch while
@@ -17871,8 +23438,144 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                             )
                         effective_seed = (
                             _v85_segment_seed(plan, seed, segment_index)
-                            if getattr(plan, 'mode', None) == 'multiclip'
+                            if getattr(plan, 'mode', None) in ('multiclip', 'segmented_continuation')
                             else int(seed) & 0xFFFFFFFFFFFFFFFF
+                        )
+                        if getattr(plan, 'mode', None) == 'segmented_continuation':
+                            _lm_print(
+                                '[MiniMaxH3 LongMedia][SEGMENTED NOISE PHASE] '
+                                f'segment={int(segment_index) + 1}/{int(passes)}; '
+                                f'base_seed={int(seed)} effective_seed={int(effective_seed)}; '
+                                'fresh_region_seed_is_unique=True',
+                                flush=True,
+                            )
+
+                    director_boundary_report = None
+                    if (director_clip_only_target is not None
+                            and int(segment_index) == int(director_clip_only_target)
+                            and int(segment_index) < int(passes) - 1):
+                        _old_take = director_cached_takes.get(int(segment_index))
+                        if _old_take is None and director_cache is not None:
+                            _old_take = director_cache.load_active(director_clip_ids[int(segment_index)])
+                            if _old_take is not None:
+                                director_cached_takes[int(segment_index)] = _old_take
+                        if _old_take is None:
+                            raise RuntimeError(
+                                'Director clip-only reroll lost the old target take required '
+                                'for the outgoing seam lock. Use Regenerate From Here.'
+                            )
+                        _old_continuation = _lm_cached_take_to_latent(_old_take, 'continuation')
+                        try:
+                            segment_av, director_boundary_report = _lm_apply_cached_tail_lock(
+                                segment_av, _old_continuation, int(getattr(plan, 'overlap_frames', 0) or 0),
+                                has_left_context=(int(segment_index) > 0),
+                            )
+                            if isinstance(director_boundary_report, dict):
+                                director_boundary_report = dict(director_boundary_report)
+                                director_boundary_report['source_revision'] = str(
+                                    _old_take.get('metadata', {}).get('revision') or ''
+                                ) or None
+                            _lm_print(
+                                '[MiniMaxH3 LongMedia][DIRECTOR TWO-SIDED LOCK] '
+                                f'unit={int(segment_index) + 1}/{int(passes)}; '
+                                f'clip_id={director_clip_ids[int(segment_index)]}; '
+                                f'lock={director_boundary_report}',
+                                flush=True,
+                            )
+                        except Exception as _lock_exc:
+                            # Never force a one-clip edit when there is not enough free
+                            # latent middle, geometry changed unexpectedly, or the cached
+                            # right boundary cannot be represented exactly. Keep the cached
+                            # prefix, then regenerate this clip and every dependent suffix.
+                            director_clip_only_target = None
+                            director_render_indices.update(range(int(segment_index), int(passes)))
+                            director_boundary_report = {
+                                'applied': False,
+                                'fallback': 'from_here',
+                                'reason': f'{type(_lock_exc).__name__}:{_lock_exc}',
+                            }
+                            director_cache_report.update({
+                                'effective_mode': 'from_here',
+                                'start_index': int(segment_index),
+                                'reason': 'two_sided_lock_unavailable_regenerate_suffix',
+                                'boundary_lock_error': str(_lock_exc),
+                            })
+                            _lm_print(
+                                '[MiniMaxH3 LongMedia][DIRECTOR TWO-SIDED FALLBACK] '
+                                f'unit={int(segment_index) + 1}/{int(passes)}; '
+                                f'reason={_lock_exc}; action=regenerate_from_here',
+                                flush=True,
+                            )
+
+                    if (director_request_mode == 'recast_range'
+                            and int(segment_index) in director_recast_targets
+                            and bool((director_recast_boundary_flags.get(int(segment_index)) or {}).get('lock_tail'))):
+                        _range_source_take = director_recast_source_by_index.get(int(segment_index))
+                        if _range_source_take is None:
+                            raise RuntimeError('Director Recast range lost its source take before right-boundary locking.')
+                        segment_av, _range_tail_report = _lm_apply_cached_tail_lock(
+                            segment_av, _lm_cached_take_to_latent(_range_source_take, 'continuation'),
+                            int(getattr(plan, 'overlap_frames', 0) or 0),
+                            has_left_context=(int(segment_index) > 0),
+                        )
+                        director_boundary_report = dict(_range_tail_report or {})
+                        director_boundary_report['source_revision'] = str(
+                            _range_source_take.get('metadata', {}).get('revision') or ''
+                        ) or None
+
+                    if bool(segment_prepare_report.get('video_vae_segment_encode_used')):
+                        director_cache_report['video_vae_segment_encodes'] = int(
+                            director_cache_report.get('video_vae_segment_encodes', 0) or 0
+                        ) + 1
+                    if bool(segment_prepare_report.get('audio_vae_segment_encode_used')):
+                        director_cache_report['audio_vae_segment_encodes'] = int(
+                            director_cache_report.get('audio_vae_segment_encodes', 0) or 0
+                        ) + 1
+                    if bool(segment_prepare_report.get('recast_audio_passthrough_fastpath')):
+                        director_cache_report['audio_vae_segment_encodes_skipped'] = int(
+                            director_cache_report.get('audio_vae_segment_encodes_skipped', 0) or 0
+                        ) + 1
+                        director_cache_report['audio_passthrough_fastpath_used'] = True
+
+                    director_recast_report = None
+                    if (director_request_mode in ('recast', 'recast_range')
+                            and int(segment_index) in director_recast_targets):
+                        _source_take = director_recast_source_by_index.get(int(segment_index)) or director_cached_takes.get(int(segment_index))
+                        if _source_take is None:
+                            raise RuntimeError('Director Recast lost its selected source take before sampling.')
+                        _source_continuation = _lm_cached_take_to_latent(_source_take, 'continuation')
+                        # 0.6.6: source take is REFERENCE ONLY. Never copy its VIDEO into
+                        # target x0. This makes the first recast shot a genuinely fresh
+                        # identity solve; subsequent recast shots continue from the newly
+                        # generated branch through the ordinary MultiClip lifecycle.
+                        _recast_positive, director_recast_report = _lm_attach_recast_native_reference(
+                            getattr(segment_guider, 'original_conds', {}).get('positive', []),
+                            segment_av, _source_continuation,
+                            overlap_frames=int(getattr(plan, 'overlap_frames', 0) or 0),
+                            segment_index=int(segment_index),
+                            preserve_audio=bool(director_recast_preserve_audio),
+                            reference_scale=director_recast_reference_scale,
+                        )
+                        segment_guider.original_conds = dict(getattr(segment_guider, 'original_conds', {}) or {})
+                        segment_guider.original_conds['positive'] = _recast_positive
+                        if isinstance(director_boundary_report, dict) and bool(director_boundary_report.get('applied')):
+                            director_recast_report['tail_lock'] = dict(director_boundary_report)
+                        director_cache_report['recast'] = dict(director_recast_report or {})
+                        director_cache_report['recast_stage_count'] = int(
+                            director_cache_report.get('recast_stage_count', 0) or 0
+                        ) + 1
+                        _lm_print(
+                            '[MiniMaxH3 LongMedia][DIRECTOR RECAST NATIVE REF] '
+                            f'unit={int(segment_index) + 1}/{int(passes)}; '
+                            f'clip_id={director_clip_ids[int(segment_index)]}; '
+                            f'source_revision={str((_source_take.get("metadata", {}) or {}).get("revision") or director_source_revision)}; '
+                            f'cast_subject={director_recast_subject_id or "unspecified"}; '
+                            'source_x0=False; native_reference=True; replacement_identity=Picture; '
+                            f'ref_scale={float((director_recast_report or {}).get("recast_ref_scale", 1.0)):.3f}; '
+                            f'ref_tokens={int((director_recast_report or {}).get("original_ref_tokens", 0))}->{int((director_recast_report or {}).get("effective_ref_tokens", 0))}; '
+                            f'audio_exact={bool(director_recast_preserve_audio)}; '
+                            f'audio_vae_segment_encodes_skipped={int(director_cache_report.get("audio_vae_segment_encodes_skipped", 0) or 0)}',
+                            flush=True,
                         )
 
                     local, packed_latent, packed_noise, denoise_mask, latent_shapes, _ = self._pack_segment_inputs(
@@ -17898,19 +23601,20 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                         )
                         guider.original_conds = _clean_refine_conds
                         _lm_print(
-                            '[MiniMaxH3 LongMedia][GLOBAL REFINE GEOMETRY GUARD] '
+                            '[MiniMaxH3 LongMedia][SAMPLER2 PARITY CONDITIONING] '
                             f'workflow={workflow_name}; unit={segment_index + 1}/{passes}; '
                             f'global_mode={bool(external_refine_global_mode)}; '
                             f'dropped_geometry_bound_video_keyframes={int(_dropped_refine_video_kfs)}; '
                             f'cleared_continuation_noise_mask={bool(external_refine_mask_cleared)}; '
-                            'new_previous_av_context=False; refs_preserved=True; '
-                            'audio_keyframes_preserved=True',
+                            'rebuilt_video_keyframes=0; refs_preserved=True; '
+                            'audio_keyframes_preserved=True; contract=v0.5.40',
                             flush=True,
                         )
                     guider.conds = self._copy_conds(guider.original_conds)
                     guider.model_options = comfy.model_patcher.create_model_options_clone(
                         getattr(segment_guider, 'model_options', original_model_options)
                     )
+                    _lm_apply_temporal_embedding_runtime_option(guider, plan, segment_index)
                     if runtime_thread_pool is not None:
                         guider.model_options['multigpu_thread_pool'] = runtime_thread_pool
 
@@ -17950,8 +23654,27 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                         guider, device, native_noise, native_latent, sampler, local_sigmas,
                         native_mask, callback, False, int(effective_seed),
                     )
+                    if bool(external_refine_mode):
+                        _lm_print(
+                            '[MiniMaxH3 LongMedia][EXTERNAL SAMPLER2 PARITY] '
+                            f'unit={segment_index + 1}/{passes}; global_mode={bool(external_refine_global_mode)}; '
+                            'stock_sample_output=True; post_latent_geometry_merge=False; '
+                            'audio_rewrite=False; contract=v0.5.40',
+                            flush=True,
+                        )
+                    stage1_audio_exact = None
                     if getattr(sampled_native, 'is_nested', False):
-                        sampled_packed, _ = comfy.utils.pack_latents(sampled_native.unbind())
+                        sampled_streams = list(sampled_native.unbind())
+                        sampled_packed, _ = comfy.utils.pack_latents(sampled_streams)
+                        if bool(latent_hires_enabled):
+                            if len(sampled_streams) != 2:
+                                raise RuntimeError(
+                                    f'Latent Hi-Res expected 2 Stage-1 AV streams, got {len(sampled_streams)}.'
+                                )
+                            # The completed Stage-1 audio is authoritative.  Latent Hi-Res
+                            # consumes callback x0 only for VIDEO geometry; audio never
+                            # switches to callback-x0 and never enters a second denoise.
+                            stage1_audio_exact = sampled_streams[1].detach().clone()
                     else:
                         sampled_packed = sampled_native
 
@@ -17970,10 +23693,23 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                         if not getattr(lowres_x0, 'is_nested', False):
                             raise RuntimeError('Latent Hi-Res expected native H3 NestedTensor denoised x0.')
                         x0_streams = list(lowres_x0.unbind())
+                        if len(x0_streams) != 2:
+                            raise RuntimeError(f'Latent Hi-Res expected 2 AV x0 streams, got {len(x0_streams)}')
+                        if stage1_audio_exact is None:
+                            raise RuntimeError('Latent Hi-Res lost authoritative Stage-1 audio handoff.')
+                        if stage1_audio_exact.dtype != x0_streams[1].dtype:
+                            raise RuntimeError(
+                                'Latent Hi-Res audio dtype changed between Stage-1 output and callback x0: '
+                                f'{stage1_audio_exact.dtype} != {x0_streams[1].dtype}'
+                            )
+                        stage1_audio_bridge = stage1_audio_exact.to(device=x0_streams[1].device)
+                        # Build the low-res continuation from x0 VIDEO + exact Stage-1 AUDIO.
+                        # This keeps segmented/MultiClip continuation on the same audio
+                        # trajectory that the user would get with Hi-Res disabled.
+                        lowres_x0 = comfy.nested_tensor.NestedTensor((x0_streams[0], stage1_audio_bridge))
+                        x0_streams = list(lowres_x0.unbind())
                         x0_shapes = [x.shape for x in x0_streams]
                         x0_packed, _ = comfy.utils.pack_latents(x0_streams)
-                        # MultiClip/segmented continuation must stay low-resolution and clean.
-                        # Carry x0, never the partial noisy solver state, into the next unit.
                         base_continuation_output = self._unpack_segment_output(local, x0_packed, x0_shapes)
                     else:
                         base_continuation_output = self._unpack_segment_output(local, sampled_packed, latent_shapes)
@@ -17990,7 +23726,7 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                             '[MiniMaxH3 LongMedia][LATENT HIRES X0] '
                             f'unit={segment_index + 1}/{passes}; source=denoised_output(process_latent_out(x0)); model={latent_hires_model}; '
                             f'scale={float(latent_hires_scale):.2f} precision={latent_hires_precision}; '
-                            f'video_before={tuple(hires_video.shape)}; audio_x0_preserved=True; audio_preserved=True',
+                            f'video_before={tuple(hires_video.shape)}; audio_source=stage1_sample_output; audio_passthrough_exact=True',
                             flush=True,
                         )
                         try:
@@ -18007,7 +23743,8 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                         _lm_print(
                             '[MiniMaxH3 LongMedia][LATENT HIRES X0] '
                             f'video_after={tuple(hires_video.shape)}; audio_shape={tuple(hires_audio.shape)}; '
-                            f'independent_second_pass={bool(refine_enabled and int(refine_steps_effective) > 0)}',
+                            f'independent_second_pass={bool(refine_enabled and int(refine_steps_effective) > 0)}; '
+                            'audio_stage2_target=False',
                             flush=True,
                         )
                         try:
@@ -18015,60 +23752,34 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                         except Exception:
                             pass
 
-                    # Stage 2. With Latent Hi-Res this is an INDEPENDENT pass: fresh
-                    # same-seed noise + a new high-sigma schedule over the upscaled x0.
-                    # Without Latent Hi-Res, retain the legacy continuous low-sigma tail.
+                    # Refine is an internal VIDEO Sampler #2 bypass switch. Stage-1
+                    # audio is frozen context and survives bit-for-bit. At ordinary sizes
+                    # video is refined in one pass; large high-resolution video sequences
+                    # use temporal windows under the same audio-passthrough contract.
                     if bool(refine_enabled) and int(refine_steps_effective) > 0:
-                        refine_x0_output = {}
-                        if bool(latent_hires_enabled):
-                            if hires_second_sigmas is None:
-                                raise RuntimeError('Latent Hi-Res second-pass sigmas were not constructed.')
-                            refine_sigmas_device = hires_second_sigmas.to(device)
-                            import comfy.sample
-                            refine_latent = sampled_native
-                            refine_noise = comfy.sample.prepare_noise(refine_latent, int(effective_seed)).to(device=device, dtype=torch.float32)
-                            refine_mask = None
-
-                            # Reprocess conditioning for the new target H/W. Native VIDEO
-                            # keyframes are target-grid bound and therefore cannot be reused
-                            # at low-res. Ref2VA refs and audio-only guides remain valid.
-                            hires_conds, dropped_keyframes = self._hires_conditioning_without_video_keyframes(
-                                getattr(segment_guider, 'original_conds', {}) or {}
-                            )
-                            guider.original_conds = hires_conds
-                            _lm_print(
-                                '[MiniMaxH3 LongMedia][HIRES CONDITIONING] '
-                                f'unit={segment_index + 1}/{passes}; dropped_lowres_video_keyframes={int(dropped_keyframes)}; '
-                                'refs_preserved=True; audio_keyframes_preserved=True; source=x0',
-                                flush=True,
-                            )
-                        else:
-                            refine_sigmas_device = runtime_refine_sigmas.to(device)
-                            refine_latent = sampled_native
-                            refine_mask = native_mask
-                            if getattr(refine_latent, 'is_nested', False):
-                                refine_noise = comfy.nested_tensor.NestedTensor([torch.zeros_like(x) for x in refine_latent.unbind()])
-                            else:
-                                refine_noise = torch.zeros_like(refine_latent)
-
-                        refine_callback = latent_preview.prepare_callback(
-                            model_patcher, max(0, int(refine_sigmas_device.shape[-1]) - 1), refine_x0_output
+                        sampled_native = self._run_windowed_refine(
+                            guider=guider,
+                            segment_guider=segment_guider,
+                            model_patcher=model_patcher,
+                            device=device,
+                            sampler=sampler,
+                            refine_sigmas=runtime_refine_sigmas,
+                            source_native=sampled_native,
+                            effective_seed=int(effective_seed),
+                            plan=plan,
+                            segment_index=int(segment_index),
+                            latent_preview=latent_preview,
+                            geometry_changed=bool(latent_hires_enabled),
+                            windowed_refine=bool(windowed_refine),
                         )
-                        sampled_native = self._run_stock_sample_with_reused_lifecycle(
-                            guider, device, refine_noise, refine_latent, sampler, refine_sigmas_device,
-                            refine_mask, refine_callback, False, int(effective_seed),
-                        )
-                        if getattr(sampled_native, 'is_nested', False):
-                            sampled_packed, _ = comfy.utils.pack_latents(sampled_native.unbind())
-                            latent_shapes = [x.shape for x in sampled_native.unbind()]
-                        else:
-                            sampled_packed = sampled_native
+                        sampled_packed, _ = comfy.utils.pack_latents(sampled_native.unbind())
+                        latent_shapes = [x.shape for x in sampled_native.unbind()]
                         _lm_print(
-                            '[MiniMaxH3 LongMedia][HIRES SECOND PASS] '
+                            '[MiniMaxH3 LongMedia][INTERNAL SAMPLER2 COMPLETE] '
                             f'unit={segment_index + 1}/{passes}; seed={int(effective_seed)}; '
-                            f'steps={int(refine_steps_effective)}; fresh_noise={bool(latent_hires_enabled)}; '
-                            f'sigma_indices={hires_sigma_indices if bool(latent_hires_enabled) else None}; '
-                            f'mode={"independent_x0_hires" if bool(latent_hires_enabled) else "continuous_tail"}',
+                            f'steps={int(refine_steps_effective)}; dedicated_sigmas=True; '
+                            f'latent_hires={bool(latent_hires_enabled)}; windowed_refine={bool(windowed_refine)}; '
+                            'stage2_bypass=False; audio_refine=False; audio_passthrough=stage1_exact; external_second_node_required=False',
                             flush=True,
                         )
 
@@ -18196,6 +23907,265 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                                 flush=True,
                             )
 
+                    # Optional Setup-owned temporal Motion Repair.  This is a final
+                    # latent-native repair layer: analyze the completed video stream,
+                    # locally dilate only overloaded time regions onto another legal H3
+                    # clock, run a masked low-sigma second pass, recover the original T,
+                    # restore every untouched video token bit-for-bit and restore the
+                    # complete audio latent exactly.
+                    if motion_repair_mode != 'off':
+                        _mr_report = {
+                            'mode': motion_repair_mode,
+                            'segment_index': int(segment_index),
+                            'segment_number': int(segment_index) + 1,
+                            'applied': False,
+                        }
+                        if bool(external_refine_mode):
+                            _mr_report['reason'] = 'external_refine_stage_skip'
+                        elif isinstance(_four_call_contract, dict):
+                            # DMD/VSA preview students are trained for an exact four-call
+                            # trajectory; a partial V2V tail would be off-distribution.
+                            _mr_report['reason'] = 'distilled_four_call_sampler_unsupported'
+                        elif not getattr(sampled_native, 'is_nested', False):
+                            _mr_report['reason'] = 'non_native_av_output'
+                        else:
+                            _mr_streams = list(sampled_native.unbind())
+                            if len(_mr_streams) != 2:
+                                _mr_report['reason'] = f'expected_2_av_streams_got_{len(_mr_streams)}'
+                            else:
+                                _mr_base_video, _mr_base_audio = _mr_streams
+                                _mr_protected_prefix = (
+                                    int(getattr(plan, 'overlap_frames', 0) or 0)
+                                    if int(segment_index) > 0 and (
+                                        bool(segmentation_active)
+                                        or workflow_mode in ('multiclip', 'segmented_continuation', 'reconstruct')
+                                    ) else 0
+                                )
+                                _mr_analysis = _motion_repair_analyze(
+                                    _mr_base_video,
+                                    motion_repair_mode,
+                                    protected_prefix_frames=_mr_protected_prefix,
+                                    protect_last_token=True,
+                                )
+                                _mr_report.update({
+                                    'reason': str(_mr_analysis.get('reason') or 'unknown'),
+                                    'source_frames': int(_mr_analysis.get('source_frames') or 0),
+                                    'source_latent_t': int(_mr_analysis.get('source_latent_t') or 0),
+                                    'risk_tokens': int(_mr_analysis.get('risk_tokens') or 0),
+                                    'repair_tokens': int(_mr_analysis.get('repair_tokens') or 0),
+                                    'macrocell_atomic': bool(_mr_analysis.get('macrocell_atomic', False)),
+                                    'risk_spans_frames': [list(map(int, pair)) for pair in (_mr_analysis.get('risk_spans_frames') or [])],
+                                    'peak_score': float(_mr_analysis.get('peak_score') or 0.0),
+                                    'threshold_z': float(_mr_analysis.get('threshold_z') or 0.0),
+                                    'protected_prefix_frames': int(_mr_protected_prefix),
+                                })
+                                if bool(_mr_analysis.get('applied')):
+                                    _mr_windows = _motion_repair_plan_windows(
+                                        _mr_analysis, context_tokens=5, max_windows=3,
+                                    )
+                                    _mr_sigmas_cpu, _mr_sigma_report = _motion_repair_choose_sigmas(
+                                        full_sigmas, motion_repair_mode,
+                                    )
+                                    _mr_report.update({
+                                        'windows_planned': [list(map(int, pair)) for pair in _mr_windows],
+                                        'windows_applied': [],
+                                        'repair_steps': int(_mr_sigma_report.get('steps') or 0),
+                                        'sigma_start_index': _mr_sigma_report.get('start_index'),
+                                        'sigma_start': _mr_sigma_report.get('sigma_start'),
+                                    })
+                                    if not _mr_windows:
+                                        _mr_report['reason'] = 'no_phase_aligned_repair_windows'
+                                    elif _mr_sigmas_cpu is None or int(_mr_sigmas_cpu.numel()) < 2:
+                                        _mr_report['reason'] = 'no_usable_repair_sigma_tail'
+                                    else:
+                                        import comfy.sample
+                                        _mr_original_conds = dict(getattr(guider, 'original_conds', {}) or {})
+                                        # v0.6.9-r2: ``conds`` is transient CFGGuider scratch state.
+                                        # Some current ComfyUI builds delete it when sample() returns,
+                                        # while ``original_conds`` is the stable cross-sample contract.
+                                        # Motion Repair must therefore tolerate a guider that has no
+                                        # runtime ``conds`` attribute after the completed first pass.
+                                        _mr_runtime_conds_missing = object()
+                                        _mr_original_runtime_conds = getattr(
+                                            guider, 'conds', _mr_runtime_conds_missing
+                                        )
+                                        _mr_working_video = _mr_base_video.clone()
+                                        _mr_sigmas = _mr_sigmas_cpu.to(device)
+                                        _mr_total_source_frames = 0
+                                        _mr_total_target_frames = 0
+                                        _mr_windows_applied = []
+
+                                        for _mr_window_index, (_mr_start_tok, _mr_end_tok) in enumerate(_mr_windows):
+                                            _mr_local_video = _mr_base_video[:, :, _mr_start_tok:_mr_end_tok].contiguous()
+                                            _mr_local_audio, _mr_source_frame_offset = _motion_repair_slice_audio_window(
+                                                _mr_base_audio, int(_mr_base_video.shape[2]),
+                                                int(_mr_start_tok), int(_mr_end_tok),
+                                            )
+                                            _mr_local_analysis = _motion_repair_slice_analysis(
+                                                _mr_analysis, int(_mr_start_tok), int(_mr_end_tok),
+                                            )
+                                            if not bool(_mr_local_analysis.get('applied')):
+                                                continue
+
+                                            _mr_dilation = _motion_repair_build_dilated_latents(
+                                                _mr_local_video, _mr_local_audio, _mr_local_analysis,
+                                            )
+                                            _mr_seed = (
+                                                int(effective_seed)
+                                                ^ 0x4D525052
+                                                ^ ((int(_mr_start_tok) + 1) * 0x9E3779B1)
+                                            ) & 0xFFFFFFFFFFFFFFFF
+                                            _mr_input = comfy.nested_tensor.NestedTensor((
+                                                _mr_dilation['video'], _mr_dilation['audio'],
+                                            ))
+                                            _mr_noise_all = comfy.sample.prepare_noise(_mr_input, int(_mr_seed))
+                                            if not getattr(_mr_noise_all, 'is_nested', False):
+                                                raise RuntimeError('Motion Repair could not create native H3 nested noise.')
+                                            _mr_noise_streams = list(_mr_noise_all.unbind())
+                                            if len(_mr_noise_streams) != 2:
+                                                raise RuntimeError(
+                                                    f'Motion Repair noise expected 2 AV streams, got {len(_mr_noise_streams)}.'
+                                                )
+                                            # Audio participates only as frozen timing context.
+                                            # The repair pass authors video, then the completed
+                                            # pre-repair audio stream is kept bit-for-bit.
+                                            _mr_noise = comfy.nested_tensor.NestedTensor((
+                                                _mr_noise_streams[0],
+                                                torch.zeros_like(_mr_noise_streams[1]),
+                                            ))
+                                            _mr_mask = comfy.nested_tensor.NestedTensor((
+                                                _mr_dilation['video_mask'],
+                                                _mr_dilation['audio_mask'],
+                                            ))
+                                            _mr_retimed_conds = _lm_motion_repair_remap_conds(
+                                                _mr_original_conds, _mr_dilation,
+                                                source_frame_offset=int(_mr_source_frame_offset),
+                                                source_frame_count=int(_mr_dilation['source_frames']),
+                                            )
+                                            _mr_transformer_options = None
+                                            _mr_prev_temporal_specs = None
+                                            _mr_prev_single_pass = None
+                                            if isinstance(getattr(guider, 'model_options', None), dict):
+                                                _mr_transformer_options = guider.model_options.setdefault('transformer_options', {})
+                                                _mr_prev_temporal_specs = _mr_transformer_options.get('latentlab_h3_temporal_embeddings')
+                                                _mr_prev_single_pass = _mr_transformer_options.get('latentlab_h3_temporal_embedding_single_pass')
+                                                _mr_local_temporal_specs = _lm_slice_temporal_embedding_specs_for_motion_repair(
+                                                    _mr_prev_temporal_specs, _mr_dilation,
+                                                    source_frame_offset=int(_mr_source_frame_offset),
+                                                )
+                                                if _mr_local_temporal_specs:
+                                                    _mr_transformer_options['latentlab_h3_temporal_embeddings'] = _mr_local_temporal_specs
+                                                    _mr_transformer_options['latentlab_h3_temporal_embedding_single_pass'] = True
+                                                else:
+                                                    _mr_transformer_options.pop('latentlab_h3_temporal_embeddings', None)
+                                                    _mr_transformer_options.pop('latentlab_h3_temporal_embedding_single_pass', None)
+                                            _mr_x0 = {}
+                                            _mr_callback = latent_preview.prepare_callback(
+                                                model_patcher,
+                                                max(0, int(_mr_sigmas.shape[-1]) - 1),
+                                                _mr_x0,
+                                            )
+                                            _lm_print(
+                                                '[MiniMaxH3 LongMedia][MOTION REPAIR WINDOW] '
+                                                f'mode={motion_repair_mode}; unit={int(segment_index) + 1}/{int(passes)}; '
+                                                f'window={int(_mr_window_index) + 1}/{len(_mr_windows)}; '
+                                                f'tokens={int(_mr_start_tok)}:{int(_mr_end_tok)}; '
+                                                f'frames={int(_mr_dilation["source_frames"])}->{int(_mr_dilation["target_frames"])}; '
+                                                f'dilation={float(_mr_dilation["dilation_ratio"]):.3f}x; '
+                                                f'risk_tokens={int(_mr_local_analysis.get("risk_tokens") or 0)}; '
+                                                f'repair_tokens={int(_mr_local_analysis.get("repair_tokens") or 0)}; '
+                                                f'temporal_embeddings={len(_mr_transformer_options.get("latentlab_h3_temporal_embeddings", ())) if isinstance(_mr_transformer_options, dict) else 0}; '
+                                                'macrocell_atomic=True; '
+                                                f'repair_steps={int(_mr_sigma_report.get("steps") or 0)}; '
+                                                'audio_noise=False; local_window=True; final_audio_exact=True',
+                                                flush=True,
+                                            )
+                                            try:
+                                                # ``sample()`` owns creation/preprocessing of runtime
+                                                # conds from ``original_conds``.  Do not require a stale
+                                                # ``guider.conds`` left over from the previous pass.
+                                                guider.original_conds = _mr_retimed_conds
+                                                _mr_candidate = self._run_stock_sample_with_reused_lifecycle(
+                                                    guider, device, _mr_noise, _mr_input, sampler, _mr_sigmas,
+                                                    _mr_mask, _mr_callback, False, int(_mr_seed),
+                                                )
+                                            finally:
+                                                guider.original_conds = _mr_original_conds
+                                                if isinstance(_mr_transformer_options, dict):
+                                                    if _mr_prev_temporal_specs is not None:
+                                                        _mr_transformer_options['latentlab_h3_temporal_embeddings'] = _mr_prev_temporal_specs
+                                                    else:
+                                                        _mr_transformer_options.pop('latentlab_h3_temporal_embeddings', None)
+                                                    if _mr_prev_single_pass is not None:
+                                                        _mr_transformer_options['latentlab_h3_temporal_embedding_single_pass'] = _mr_prev_single_pass
+                                                    else:
+                                                        _mr_transformer_options.pop('latentlab_h3_temporal_embedding_single_pass', None)
+                                                if _mr_original_runtime_conds is _mr_runtime_conds_missing:
+                                                    # Preserve the exact caller-visible attribute contract:
+                                                    # if ComfyUI removed scratch conds after pass 1, leave
+                                                    # them absent after the repair pass as well.
+                                                    try:
+                                                        delattr(guider, 'conds')
+                                                    except AttributeError:
+                                                        pass
+                                                else:
+                                                    guider.conds = _mr_original_runtime_conds
+
+                                            if not getattr(_mr_candidate, 'is_nested', False):
+                                                raise RuntimeError('Motion Repair returned non-native H3 output.')
+                                            _mr_candidate_streams = list(_mr_candidate.unbind())
+                                            if len(_mr_candidate_streams) != 2:
+                                                raise RuntimeError(
+                                                    f'Motion Repair returned {len(_mr_candidate_streams)} streams, expected 2.'
+                                                )
+                                            _mr_local_repaired = _motion_repair_recover_video(
+                                                _mr_local_video, _mr_candidate_streams[0], _mr_dilation,
+                                            )
+                                            _mr_working_video[:, :, _mr_start_tok:_mr_end_tok] = _mr_local_repaired
+                                            _mr_total_source_frames += int(_mr_dilation['source_frames'])
+                                            _mr_total_target_frames += int(_mr_dilation['target_frames'])
+                                            _mr_window_report = {
+                                                'window_index': int(_mr_window_index),
+                                                'source_token_start': int(_mr_start_tok),
+                                                'source_token_end': int(_mr_end_tok),
+                                                'source_frame_offset': int(_mr_source_frame_offset),
+                                                'source_frames': int(_mr_dilation['source_frames']),
+                                                'target_frames': int(_mr_dilation['target_frames']),
+                                                'dilation_ratio': float(_mr_dilation['dilation_ratio']),
+                                                'risk_tokens': int(_mr_local_analysis.get('risk_tokens') or 0),
+                                                'repair_tokens': int(_mr_local_analysis.get('repair_tokens') or 0),
+                                                'macrocell_atomic': True,
+                                                'repair_steps': int(_mr_sigma_report.get('steps') or 0),
+                                            }
+                                            _mr_windows_applied.append(_mr_window_report)
+
+                                        if _mr_windows_applied:
+                                            sampled_native = comfy.nested_tensor.NestedTensor((
+                                                _mr_working_video, _mr_base_audio,
+                                            ))
+                                            latent_shapes = [x.shape for x in sampled_native.unbind()]
+                                            sampled_packed, _ = comfy.utils.pack_latents(sampled_native.unbind())
+                                            _mr_report['applied'] = True
+                                            _mr_report['reason'] = 'selective_window_temporal_repair_completed'
+                                            _mr_report['windows_applied'] = _mr_windows_applied
+                                            _mr_report['repair_source_frames_total'] = int(_mr_total_source_frames)
+                                            _mr_report['repair_target_frames_total'] = int(_mr_total_target_frames)
+                                            _mr_report['audio_restored_exact'] = True
+                                            _mr_report['untouched_video_tokens_restored_exact'] = True
+                                            _lm_print(
+                                                '[MiniMaxH3 LongMedia][MOTION REPAIR] '
+                                                f'mode={motion_repair_mode}; unit={int(segment_index) + 1}/{int(passes)}; '
+                                                f'windows={len(_mr_windows_applied)}/{len(_mr_windows)}; '
+                                                f'local_source_frames={int(_mr_total_source_frames)}; '
+                                                f'local_target_frames={int(_mr_total_target_frames)}; '
+                                                'full_second_pass=False; audio_restored_exact=True; '
+                                                'untouched_video_tokens_restored_exact=True',
+                                                flush=True,
+                                            )
+                                        else:
+                                            _mr_report['reason'] = 'planned_windows_required_no_legal_local_dilation'
+                        motion_repair_reports.append(_mr_report)
+
                     sampled_output = self._unpack_segment_output(local, sampled_packed, latent_shapes)
 
                     # A chained external refiner must never alter the already
@@ -18210,6 +24180,78 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                             'segment_boundary_processing=False; post_blend=False',
                             flush=True,
                         )
+
+                    # Clip-only reroll preserves the already-approved visible seam
+                    # geometry as well as the low-res continuation seam. The target's
+                    # middle is new, but both sides remain exactly compatible with the
+                    # cached neighbours. This post-pass restoration is deliberately after
+                    # Latent Hi-Res / integrated refine so those stages cannot repaint a
+                    # boundary that was frozen on the low-res H3 branch.
+                    if (director_clip_only_target is not None
+                            and int(segment_index) == int(director_clip_only_target)):
+                        _old_take = director_cached_takes.get(int(segment_index))
+                        if _old_take is None and director_cache is not None:
+                            _old_take = director_cache.load_active(director_clip_ids[int(segment_index)])
+                            if _old_take is not None:
+                                director_cached_takes[int(segment_index)] = _old_take
+                        if _old_take is None:
+                            raise RuntimeError(
+                                'Director clip-only reroll lost its cached target take during boundary restore.'
+                            )
+                        _old_display = _lm_cached_take_to_latent(_old_take, 'display')
+                        sampled_output = _lm_restore_cached_boundary(
+                            sampled_output, _old_display, int(getattr(plan, 'overlap_frames', 0) or 0),
+                            lock_head=(int(segment_index) > 0),
+                            lock_tail=(int(segment_index) < int(passes) - 1),
+                        )
+                        if bool(latent_hires_enabled):
+                            _old_continuation = _lm_cached_take_to_latent(_old_take, 'continuation')
+                            base_continuation_output = _lm_restore_cached_boundary(
+                                base_continuation_output, _old_continuation,
+                                int(getattr(plan, 'overlap_frames', 0) or 0),
+                                lock_head=(int(segment_index) > 0),
+                                lock_tail=(int(segment_index) < int(passes) - 1),
+                            )
+
+                    if (director_request_mode == 'recast_range'
+                            and int(segment_index) in director_recast_targets):
+                        _flags = director_recast_boundary_flags.get(int(segment_index)) or {}
+                        if bool(_flags.get('lock_head')) or bool(_flags.get('lock_tail')):
+                            _source_take_for_boundary = director_recast_source_by_index.get(int(segment_index))
+                            if _source_take_for_boundary is None:
+                                raise RuntimeError('Director Recast range lost its source take during boundary restore.')
+                            sampled_output = _lm_restore_cached_boundary(
+                                sampled_output, _lm_cached_take_to_latent(_source_take_for_boundary, 'display'),
+                                int(getattr(plan, 'overlap_frames', 0) or 0),
+                                lock_head=bool(_flags.get('lock_head')),
+                                lock_tail=bool(_flags.get('lock_tail')),
+                            )
+                            if bool(latent_hires_enabled):
+                                base_continuation_output = _lm_restore_cached_boundary(
+                                    base_continuation_output, _lm_cached_take_to_latent(_source_take_for_boundary, 'continuation'),
+                                    int(getattr(plan, 'overlap_frames', 0) or 0),
+                                    lock_head=bool(_flags.get('lock_head')),
+                                    lock_tail=bool(_flags.get('lock_tail')),
+                                )
+
+                    if (director_request_mode in ('recast', 'recast_range')
+                            and int(segment_index) in director_recast_targets
+                            and director_recast_preserve_audio):
+                        _source_take = director_recast_source_by_index.get(int(segment_index)) or director_cached_takes.get(int(segment_index))
+                        if _source_take is None:
+                            raise RuntimeError('Director Recast lost its source take during exact audio restore.')
+                        sampled_output = _lm_restore_cached_audio(
+                            sampled_output, _lm_cached_take_to_latent(_source_take, 'display'),
+                            overlap_frames=int(getattr(plan, 'overlap_frames', 0) or 0),
+                            segment_index=int(segment_index),
+                        )
+                        if bool(latent_hires_enabled):
+                            base_continuation_output = _lm_restore_cached_audio(
+                                base_continuation_output, _lm_cached_take_to_latent(_source_take, 'continuation'),
+                                overlap_frames=int(getattr(plan, 'overlap_frames', 0) or 0),
+                                segment_index=int(segment_index),
+                            )
+                        director_cache_report.setdefault('recast', {})['post_sample_audio_restored_exact'] = True
 
                     # v0.4.55 continuity regression fix:
                     # With Latent Hi-Res disabled, preserve the exact pre-0.4.53
@@ -18226,6 +24268,111 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                         base_continuation_output if bool(latent_hires_enabled) else sampled_output
                     )
                     previous_segment = sampled_output
+
+                    if (director_cache is not None
+                            and int(segment_index) in director_render_indices):
+                        _display_video, _display_audio = unpack_av_samples(sampled_output)
+                        _continuation_video, _continuation_audio = unpack_av_samples(previous_segment_continuation)
+                        _parent_clip_id = (
+                            director_clip_ids[int(segment_index) - 1]
+                            if int(segment_index) > 0 else None
+                        )
+                        _parent_revision = None
+                        if _parent_clip_id is not None:
+                            _parent_meta = director_cache.active_metadata(_parent_clip_id)
+                            if isinstance(_parent_meta, dict):
+                                _parent_revision = str(_parent_meta.get('revision') or '') or None
+                        _clip_meta_values = getattr(plan, 'director_clip_metadata', None) or ()
+                        _clip_meta_value = (
+                            _clip_meta_values[int(segment_index)]
+                            if int(segment_index) < len(_clip_meta_values) else None
+                        )
+                        _prompt_values = getattr(plan, 'segment_prompt_summaries', None) or ()
+                        _prompt_value = (
+                            str(_prompt_values[int(segment_index)] or '')
+                            if int(segment_index) < len(_prompt_values) else ''
+                        )
+                        try:
+                            _preserve_seams_from_revision = None
+                            if isinstance(director_boundary_report, dict) and bool(director_boundary_report.get('applied')):
+                                _preserve_seams_from_revision = str(
+                                    director_boundary_report.get('source_revision') or ''
+                                ).strip() or None
+                            _take_record = director_cache.save_take(
+                                clip_id=director_clip_ids[int(segment_index)],
+                                clip_index=int(segment_index),
+                                display_video=_display_video,
+                                display_audio=_display_audio,
+                                continuation_video=_continuation_video,
+                                continuation_audio=_continuation_audio,
+                                metadata={
+                                    'geometry_fingerprint': director_geometry.get(int(segment_index)),
+                                    'semantic_fingerprint': director_semantic.get(int(segment_index)),
+                                    'outgoing_contract_fingerprint': director_outgoing_contract.get(int(segment_index)),
+                                    'effective_seed': int(effective_seed),
+                                    'clip_name': (str(_clip_meta_value.get('name') or '') if isinstance(_clip_meta_value, dict) else ''),
+                                    'prompt_summary': _prompt_value,
+                                    'clip_metadata': (dict(_clip_meta_value) if isinstance(_clip_meta_value, dict) else None),
+                                    'director_timeline_snapshot': getattr(plan, 'director_timeline_snapshot', None),
+                                    'director_global_prompt_snapshot': str((getattr(plan, 'director_timeline_snapshot', None) or {}).get('_global_prompt') or ''),
+                                    'reference_fingerprint': str(getattr(plan, 'director_reference_fingerprint', '') or ''),
+                                    'segment_length_frames': int(plan.segment_lengths[int(segment_index)]),
+                                    'overlap_frames': int(getattr(plan, 'overlap_frames', 0) or 0),
+                                    'request_id': director_request_id or None,
+                                    'request_mode': director_request_mode,
+                                    'effective_mode': director_cache_report.get('effective_mode'),
+                                    'recast_source_revision': (str((director_recast_source_by_index.get(int(segment_index)) or {}).get('metadata', {}).get('revision') or director_source_revision) or None) if director_request_mode in ('recast', 'recast_range') and int(segment_index) in director_recast_targets else None,
+                                    'recast_subject_id': (director_recast_subject_id or None) if director_request_mode in ('recast', 'recast_range') and int(segment_index) in director_recast_targets else None,
+                                    'recast_preserved_audio_exact': bool(director_recast_preserve_audio) if director_request_mode in ('recast', 'recast_range') and int(segment_index) in director_recast_targets else None,
+                                    'recast_video_denoise': float(director_recast_video_denoise) if director_request_mode in ('recast', 'recast_range') and int(segment_index) in director_recast_targets else None,
+                                    'recast_source_mode': 'native_reference' if director_request_mode in ('recast', 'recast_range') and int(segment_index) in director_recast_targets else None,
+                                    'recast_reference_scale': float((director_recast_report or {}).get('recast_ref_scale', 1.0)) if director_request_mode in ('recast', 'recast_range') and int(segment_index) in director_recast_targets else None,
+                                    'recast_original_ref_tokens': int((director_recast_report or {}).get('original_ref_tokens', 0)) if director_request_mode in ('recast', 'recast_range') and int(segment_index) in director_recast_targets else None,
+                                    'recast_effective_ref_tokens': int((director_recast_report or {}).get('effective_ref_tokens', 0)) if director_request_mode in ('recast', 'recast_range') and int(segment_index) in director_recast_targets else None,
+                                    'recast_target_x0_policy': 'fresh_target' if director_request_mode in ('recast', 'recast_range') and int(segment_index) in director_recast_targets else None,
+                                    'recast_source_video_mixed_into_x0': False if director_request_mode in ('recast', 'recast_range') and int(segment_index) in director_recast_targets else None,
+                                    'parent_clip_id': _parent_clip_id,
+                                    'parent_revision': _parent_revision,
+                                    'boundary_lock': dict(director_boundary_report) if isinstance(director_boundary_report, dict) else None,
+                                    '_preserve_seams_from_revision': _preserve_seams_from_revision,
+                                    '_has_next_clip': bool(int(segment_index) < int(passes) - 1),
+                                },
+                            )
+                        except Exception as _take_save_exc:
+                            # A cache filesystem problem must not destroy an otherwise
+                            # valid expensive render. Stop trusting take reuse for the
+                            # remaining suffix and finish it through normal H3 execution.
+                            _lm_print(
+                                '[MiniMaxH3 LongMedia][DIRECTOR TAKE SAVE FAILED] '
+                                f'unit={int(segment_index) + 1}/{int(passes)}; error={_take_save_exc}; '
+                                'action=continue_with_live_chain',
+                                flush=True,
+                            )
+                            director_cache_report.update({
+                                'enabled': False,
+                                'effective_mode': 'from_here' if int(segment_index) > 0 else 'full_render',
+                                'reason': 'take_save_failed_continue_live_chain',
+                                'cache_write_error': f'{type(_take_save_exc).__name__}:{_take_save_exc}',
+                            })
+                            director_render_indices.update(range(int(segment_index) + 1, int(passes)))
+                            director_clip_only_target = None
+                            director_cache = None
+                            _take_record = {'revision': None}
+
+                        # Do not immediately read the just-written safetensors back.
+                        # LongMedia already owns the live continuation/display tensors;
+                        # keeping a second CPU copy for every rendered clip would defeat
+                        # offload_completed_segments on long projects.
+                        _lm_print(
+                            '[MiniMaxH3 LongMedia][DIRECTOR TAKE SAVE] '
+                            f'unit={int(segment_index) + 1}/{int(passes)}; '
+                            f'clip_id={director_clip_ids[int(segment_index)]}; '
+                            f'revision={_take_record.get("revision")}; '
+                            f'parent_revision={_parent_revision or "none"}; '
+                            f'boundary_lock={bool(director_boundary_report and director_boundary_report.get("applied"))}',
+                            flush=True,
+                        )
+
                     if store_refine_segments:
                         stored_segment = self._cpu_latent_copy(sampled_output) if bool(offload_completed_segments) else sampled_output
                         stored_segment = dict(stored_segment)
@@ -18471,7 +24618,29 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                         pass
                 model_patcher.restore_hook_patches()
                 model_patcher.hook_mode = original_hook_mode
+
+                # The runtime clone can contain execution-created CUDA caches.
+                # Release those refs before discarding the clone, then sanitize
+                # the graph-cached original options as well.  This intentionally
+                # does NOT unload H3 here: post-sampling residency semantics stay
+                # unchanged, and only dead LongMedia-owned cache references are
+                # severed.
+                _runtime_release = _release_longmedia_transient_cuda_refs(
+                    getattr(guider, 'model_options', None), 'sampler_exit_runtime'
+                )
                 guider.model_options = original_model_options
+                _cached_release = _release_longmedia_transient_cuda_refs(
+                    original_model_options, 'sampler_exit_cached_guider'
+                )
+                sampler_exit_transient_release = {
+                    'runtime': _runtime_release,
+                    'cached_guider': _cached_release,
+                }
+                try:
+                    _soft_empty_cuda_cache()
+                except Exception:
+                    pass
+
                 guider.original_conds = original_original_conds
                 guider.inner_model = original_inner_model
                 guider.conds = original_conds_runtime
@@ -18502,6 +24671,114 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
             stitched['_lm_segment_workflow'] = str(getattr(plan, 'workflow_mode', '') or '')
             stitched['_lm_external_refine_ready'] = True
         stitched['_lm_loop_closure_report'] = dict(loop_closure_report or {})
+
+        # TAKE-centric persistence for one-shot Director timelines. The old cache
+        # was MultiClip-only, which meant CREATE TAKE in single/segmented mode could
+        # create a draft folder but the expensive render never filled it. Persist
+        # the *final* post-stitch/post-refine/post-loop AV here so the TAKE workspace
+        # owns exactly what the user sees, and atomically replace the draft snapshot
+        # with the Director state that produced that render.
+        director_editorial_take_record = None
+        if (director_project_id and director_cache is None and len(director_clip_ids) == 1):
+            try:
+                import folder_paths
+                _editorial_store = _DirectorClipCache(folder_paths.get_output_directory(), director_project_id)
+                _take_video, _take_audio = unpack_av_samples(stitched)
+                _take_clip_id = director_clip_ids[0]
+                _take_meta_values = getattr(plan, 'director_clip_metadata', None) or ()
+                _take_clip_meta = _take_meta_values[0] if _take_meta_values else None
+                _take_prompts = getattr(plan, 'segment_prompt_summaries', None) or ()
+                _take_prompt_summary = str(_take_prompts[0] or '') if _take_prompts else ''
+                director_editorial_take_record = _editorial_store.save_take(
+                    clip_id=_take_clip_id,
+                    clip_index=0,
+                    display_video=_take_video,
+                    display_audio=_take_audio,
+                    continuation_video=_take_video,
+                    continuation_audio=_take_audio,
+                    metadata={
+                        'take_scope': 'director_timeline',
+                        'runtime_workflow': str(workflow_name),
+                        'effective_seed': int(seed),
+                        'clip_name': (str(_take_clip_meta.get('name') or '') if isinstance(_take_clip_meta, dict) else ''),
+                        'prompt_summary': _take_prompt_summary,
+                        'clip_metadata': (dict(_take_clip_meta) if isinstance(_take_clip_meta, dict) else None),
+                        'director_timeline_snapshot': getattr(plan, 'director_timeline_snapshot', None),
+                        'director_global_prompt_snapshot': str((getattr(plan, 'director_timeline_snapshot', None) or {}).get('_global_prompt') or ''),
+                        'reference_fingerprint': str(getattr(plan, 'director_reference_fingerprint', '') or ''),
+                        'segment_length_frames': int(getattr(plan, 'output_frames', 0) or 0),
+                        'overlap_frames': 0,
+                        'request_id': director_request_id or None,
+                        'request_mode': director_request_mode,
+                        'effective_mode': 'full_timeline_take',
+                        '_has_next_clip': False,
+                    },
+                )
+                director_cache_report['editorial_take_revision'] = str(director_editorial_take_record.get('revision') or '')
+                director_cache_report['editorial_take_saved'] = True
+                director_cache_report['editorial_take_scope'] = 'director_timeline'
+                _lm_print(
+                    '[MiniMaxH3 LongMedia][DIRECTOR TAKE FINALIZED] '
+                    f'workflow={workflow_name}; clip_id={_take_clip_id}; '
+                    f'revision={director_editorial_take_record.get("revision")}; '
+                    f'draft_filled={bool(director_editorial_take_record.get("revision") == _editorial_store.editor_active_revision(_take_clip_id))}; '
+                    'source=final_stitched_av; snapshot=current_director_state',
+                    flush=True,
+                )
+            except Exception as _editorial_take_exc:
+                director_cache_report['editorial_take_saved'] = False
+                director_cache_report['editorial_take_error'] = f'{type(_editorial_take_exc).__name__}: {_editorial_take_exc}'
+                _lm_print(
+                    '[MiniMaxH3 LongMedia][DIRECTOR TAKE FINALIZE FAILED] '
+                    f'workflow={workflow_name}; error={type(_editorial_take_exc).__name__}: {_editorial_take_exc}',
+                    flush=True,
+                )
+
+        director_cache_report['rendered_indices'] = sorted(int(i) for i in director_render_indices)
+        director_cache_report['clip_count'] = int(original_segment_passes if external_refine_global_mode else passes)
+        if director_cache is not None:
+            _active_revisions = {}
+            for _cache_index, _clip_id in enumerate(director_clip_ids):
+                _meta = director_cache.active_metadata(_clip_id)
+                if isinstance(_meta, dict) and _meta.get('revision'):
+                    _active_revisions[str(_clip_id)] = str(_meta.get('revision'))
+            director_cache_report['active_revisions'] = _active_revisions
+            if director_request_id:
+                _request_payload = {
+                    'requested_mode': director_request_mode,
+                    'effective_mode': director_cache_report.get('effective_mode'),
+                    'target_clip_id': director_target_id or None,
+                    'rendered_indices': sorted(int(i) for i in director_render_indices),
+                    'active_revisions': _active_revisions,
+                    'reason': director_cache_report.get('reason'),
+                }
+                director_cache.mark_request_completed(director_request_id, _request_payload)
+                _lm_director_send_regeneration_done(
+                    plan, director_request_id,
+                    {
+                        'mode': director_cache_report.get('effective_mode'),
+                        'target_clip_id': director_target_id or None,
+                        'rendered_indices': sorted(int(i) for i in director_render_indices),
+                        'reason': director_cache_report.get('reason'),
+                    },
+                )
+        elif director_request_id:
+            # One-shot Director timelines, Loop Closure, or external global sampler #2
+            # intentionally bypass the selective cache. The request is still one-shot:
+            # clear it after this successful full execution so a downstream change does
+            # not accidentally rerun it forever.
+            _lm_director_send_regeneration_done(
+                plan, director_request_id,
+                {
+                    'mode': director_cache_report.get('effective_mode'),
+                    'target_clip_id': director_target_id or None,
+                    'rendered_indices': sorted(int(i) for i in director_render_indices),
+                    'reason': director_cache_report.get('reason'),
+                },
+            )
+        if director_project_id:
+            stitched['_lm_director_regeneration_report'] = dict(director_cache_report)
+
         return (stitched, json.dumps({
             'runtime': 'unified_single_model_lifecycle',
             'passes': passes,
@@ -18509,17 +24786,31 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
             'prepare_sampling_calls': 1,
             'pre_run_calls': 1,
             'cleanup_calls': 1,
+            'sampler_entry_transient_release': sampler_entry_transient_release,
             'sampler_execution_boundary': sampler_execution_boundary,
+            'sampler_exit_transient_release': sampler_exit_transient_release,
             'guider_sample_calls': 0,
             'model_reload_between_segments': False,
             'refine_enabled': bool(refine_enabled),
             'refine_steps_effective': int(refine_steps_effective),
             'refine_switch_step': int(refine_switch_step),
             'refine_model_reload': False,
+            'refine_sigmas_dedicated': bool(refine_enabled),
+            'refine_main_sigmas_untouched': True,
+            'windowed_refine': bool(windowed_refine) if bool(refine_enabled) else None,
+            'refine_execution_contract': (
+                ('internal_sampler2_adaptive_full_or_windowed' if bool(windowed_refine) else 'internal_sampler2_exact_only')
+                if bool(refine_enabled) else 'bypassed'
+            ),
+            'refine_audio_exact': bool(refine_enabled),
             'external_refine_handoff': bool(external_refine_mode),
             'external_refine_global_continuous': bool(external_refine_global_mode),
             'external_refine_source_segments': (int(original_segment_passes) if external_refine_global_mode else None),
             'loop_closure': loop_closure_report,
+            'motion_repair_mode': motion_repair_mode,
+            'motion_repair_segments': motion_repair_reports,
+            'motion_repair_applied_segments': int(sum(1 for item in motion_repair_reports if bool(item.get('applied')))),
+            'director_regeneration': director_cache_report if director_project_id else None,
             'external_refine_runtime_passes': int(passes),
             'external_refine_fresh_noise': True if external_refine_mode else None,
             'external_refine_noise_contract': ('ordinary_prepare_noise' if external_refine_mode else None),
@@ -18614,8 +24905,8 @@ class MiniMaxH3LatentLabLongMediaSampler:
                     },
                 ),
                 'attention_mode': (
-                    ['auto', 'existing', 'sol', 'scheduled_sol'],
-                    {'default': 'auto', 'tooltip': 'auto selects existing/Sage for smaller sequences and embedded Sol for large sequences without changing H3 tokens. existing forces current Sage/Comfy attention. sol/scheduled_sol force the embedded Apache-2.0 SM120 Sol path.'},
+                    ['auto', 'existing', 'sol_h3', 'sol', 'scheduled_sol'],
+                    {'default': 'auto', 'tooltip': 'sol_h3 enables the hardware-adaptive Sol-H3 profile. On <=18.5 GiB DynamicVRAM GPUs it keeps exact Comfy Kitchen attention, secures activation workspace before QKV allocation, and bypasses resident AdaLN trajectory precompute to avoid startup/VRAM regression. Roomier resident GPUs may use AdaLN caching. FastH3 uses four calls only when a trained FastH3/VSA contract is detected. auto selects existing/Sage vs embedded Sol by geometry. sol/scheduled_sol force embedded SM120 Sol.'},
                 ),
                 'sol_tau_start': ('FLOAT', {'default': 1.30, 'min': 0.0, 'max': 4.0, 'step': 0.05}),
                 'sol_tau_end': ('FLOAT', {'default': 0.80, 'min': 0.0, 'max': 4.0, 'step': 0.05}),
@@ -18750,24 +25041,21 @@ class MiniMaxH3LatentLabLongMediaSampler:
                 ),
                 'refine_enabled': (
                     'BOOLEAN',
-                    {'default': True, 'tooltip': 'Split the connected SIGMAS schedule into the main pass plus the final low-noise refine tail. Recommended production default: ON with 2 refine steps.'},
+                    {'default': False, 'tooltip': 'Enable internal Sampler #2. Stage 1 output is handed to a normal second sampling stage driven only by Refine Sigmas. Whole-video execution is used when safe; with windowed refine enabled, very large sequences can fall back to temporal windows while Stage-1 audio stays exact.'},
                 ),
                 'refine_add_noise': (
                     'BOOLEAN',
-                    {'default': False, 'tooltip': 'Legacy compatibility input. Ignored: a true refine stage always continues with no fresh noise.'},
+                    {'default': False, 'tooltip': 'Legacy compatibility input. Ignored: Hi-Res Refine uses stock Sampler #2 fresh noise; non-Hi-Res Refine uses its bounded internal policy.'},
                 ),
                 'refine_seed': (
                     'INT',
-                    {'default': 0, 'min': 0, 'max': 18446744073709551615, 'tooltip': 'Legacy compatibility input. Ignored: refine continues the same trajectory and does not generate fresh noise.'},
+                    {'default': 0, 'min': 0, 'max': 18446744073709551615, 'tooltip': 'Legacy compatibility input. Ignored: Hi-Res Sampler #2 parity uses the main effective seed, matching the integrated 0.5.40 contract.'},
                 ),
                 'refine_steps': (
                     'INT',
                     {
                         'default': 2, 'min': 1, 'max': 1000, 'step': 1,
-                        'tooltip': (
-                            'How many extra low-noise steps to run after the complete base sampler. '
-                            'Without Latent Hi-Res: stage2 runs the final low-sigma tail. With Latent Hi-Res: stage1 stops early, the denoised x0 is learned-upscaled, then refine_steps runs as an independent same-seed fresh-noise hi-res pass.'
-                        ),
+                        'tooltip': 'Legacy serialized input retained for workflow compatibility. Ignored since 0.6.24; Refine step count comes from Refine Sigmas.',
                     },
                 ),
                 'memory_mode': (
@@ -18781,7 +25069,25 @@ class MiniMaxH3LatentLabLongMediaSampler:
                         'tooltip': 'auto uses the validated production attention/VRAM policy. manual exposes all low-level tuning widgets.',
                     },
                 ),
-            }
+                # Keep this appended after all pre-0.6.40 widgets. ComfyUI serializes widget
+                # values positionally in saved workflows, so inserting it beside refine_enabled
+                # would shift legacy values. The frontend shows it next to the Refine controls
+                # semantically and hides it until Refine is enabled.
+                'windowed_refine': (
+                    'BOOLEAN',
+                    {
+                        'default': True,
+                        'tooltip': (
+                            'Allow memory-bounded temporal Refine windows for long/high-resolution video. '
+                            'Disable to force one full-latent Stage 2 pass for maximum temporal/lighting continuity. '
+                            'Exact-only Refine can require substantially more VRAM and will raise OOM instead of silently falling back to windows.'
+                        ),
+                    },
+                ),
+            },
+            'optional': {
+                'refine_sigmas': ('SIGMAS', {'tooltip': 'Independent sigma schedule for the Refine stage. Required when Refine is enabled.'}),
+            },
         }
 
     RETURN_TYPES = ('LATENT', 'INT', 'INT', 'INT', 'STRING')
@@ -18804,7 +25110,8 @@ class MiniMaxH3LatentLabLongMediaSampler:
                refine_enabled=False, refine_add_noise=False, refine_seed=0,
                refine_steps=2,
                memory_mode='auto',
-               sampler_mode='auto'):
+               sampler_mode='auto',
+               refine_sigmas=None, windowed_refine=True):
         from comfy_execution.graph_utils import GraphBuilder
 
         plan = long_media_plan
@@ -18907,6 +25214,19 @@ class MiniMaxH3LatentLabLongMediaSampler:
         # the large-geometry embedded-Sol safety/performance route.
         effective_attention_mode = requested_attention_mode
         attention_mode = effective_attention_mode
+        if requested_attention_mode == 'sol_h3':
+            # Release Sol-H3 policy: one GPU uses exact/dense attention.  These
+            # values apply only if the bounded embedded-Sol safety fallback is
+            # required; they match NVIDIA's validated H3 sparse routing policy.
+            sol_tau_start = 1.0
+            sol_tau_end = 1.0
+            sol_curve = 'linear'
+            sol_sink_conditioning = 'exact_kv_and_rows'
+            _lm_print(
+                '[MiniMaxH3 LongMedia][SOL-H3 PROFILE] exact one-GPU attention + AdaLN trajectory cache + '
+                'native Comfy H3 QK/RoPE/SwiGLU fusions; sparse fallback tau=1.0 exact-prefix-rows',
+                flush=True,
+            )
         if int(getattr(plan, 'passes', 1)) > 1 and requested_attention_mode == 'auto':
             _lm_print(
                 '[MiniMaxH3 LongMedia][ATTENTION CONTINUITY] '
@@ -18962,6 +25282,7 @@ class MiniMaxH3LatentLabLongMediaSampler:
             sol_sigma_lo=float(sol_sigma_lo),
             memory_mode=str(memory_mode),
             requested_memory_mode=str(requested_memory_mode),
+            sample_sigmas=sigmas,
         )
         traced_guider = mlp_chunker.out(0)
         ultra_pin_previous = None
@@ -18986,28 +25307,29 @@ class MiniMaxH3LatentLabLongMediaSampler:
         # 0.2.16 diagnostic build deliberately disables intra-step cache flushing:
         # we want an undistorted first-step allocator trace, including OOM events.
         guard_state = None
-        # 0.4.7 refiner: true two-stage Advanced split restored inside the unified runtime.
-        # The model lifecycle stays open across both stages; only inner_sample is
-        # invoked for the base and low-noise tail phases.
-        main_sigmas = sigmas
-        refine_sigmas = None
-        refine_steps_effective = 0
-        refine_tail_start = 0
+        # v0.6.24: MAIN and Refine own independent sigma inputs.  MAIN is
+        # never shortened when Refine is enabled, so enabling post-processing
+        # cannot change the established MultiClip generation trajectory.
+        validated_refine_sigmas = _lm_validate_refine_sigmas(
+            refine_sigmas, required=bool(refine_enabled)
+        )
         base_steps = max(0, int(sigmas.numel()) - 1) if torch.is_tensor(sigmas) else max(0, len(sigmas) - 1)
+        refine_steps_effective = (
+            max(0, int(validated_refine_sigmas.numel()) - 1)
+            if validated_refine_sigmas is not None else 0
+        )
+        refine_tail_start = int(base_steps)
         if bool(refine_enabled):
-            main_sigmas, refine_sigmas, base_steps, refine_tail_start, refine_steps_effective, _ = split_refine_sigmas(
-                sigmas, int(refine_steps)
-            )
             _lm_print(
-                '[MiniMaxH3 LongMedia][REFINER RESTORED] '
-                f'total_steps={int(base_steps)}; main_steps={int(refine_tail_start)}; '
-                f'refine_steps={int(refine_steps_effective)}; switch_step={int(refine_tail_start)}; '
-                'true_refiner=True; same_model_lifecycle=True; second_model_load=False',
+                '[MiniMaxH3 LongMedia][REFINER V624] '
+                f'main_steps={int(base_steps)} untouched=True; '
+                f'refine_steps={int(refine_steps_effective)}; dedicated_refine_sigmas=True; '
+                f'windowed_refine={bool(windowed_refine)}; '
+                'same_model_lifecycle=True; second_sampler_node=False',
                 flush=True,
             )
 
-        unified_runtime = graph.node(
-            "MiniMaxH3LatentLabUnifiedRuntimeSampler",
+        runtime_kwargs = dict(
             initial_av=initial_av,
             long_media_plan=plan,
             guider=traced_guider,
@@ -19023,7 +25345,14 @@ class MiniMaxH3LatentLabLongMediaSampler:
             latent_hires_precision=str(latent_hires_precision),
             latent_hires_align=int(latent_hires_align),
             refine_enabled=bool(refine_enabled),
-            refine_steps=int(refine_steps),
+            refine_steps=int(refine_steps),  # legacy serialized widget; ignored by v0.6.24 runtime
+            windowed_refine=bool(windowed_refine),
+        )
+        if validated_refine_sigmas is not None:
+            runtime_kwargs['refine_sigmas'] = validated_refine_sigmas
+        unified_runtime = graph.node(
+            "MiniMaxH3LatentLabUnifiedRuntimeSampler",
+            **runtime_kwargs,
         )
         stitched = unified_runtime.out(0)
         _lm_print(
@@ -19060,25 +25389,29 @@ class MiniMaxH3LatentLabLongMediaSampler:
             "latent_hires_scale": float(latent_hires_scale) if bool(latent_hires_enabled) else 1.0,
             "latent_hires_precision": str(latent_hires_precision) if bool(latent_hires_enabled) else None,
             "advanced_refine_enabled": bool(refine_enabled),
-            "advanced_refine_add_noise": bool(latent_hires_enabled),
+            "advanced_windowed_refine": bool(windowed_refine) if bool(refine_enabled) else None,
+            "advanced_refine_add_noise": bool(refine_enabled),
+            "advanced_refine_noise_policy": "one_global_deterministic_video_noise_field_audio_zero",
             "advanced_refine_legacy_add_noise_input_ignored": bool(refine_add_noise),
-            "advanced_refine_seed": None,
+            "advanced_refine_seed": int(seed) & 0xFFFFFFFFFFFFFFFF if bool(refine_enabled) else None,
             "advanced_refine_legacy_seed_input_ignored": int(refine_seed) & 0xFFFFFFFFFFFFFFFF,
-            "advanced_refine_steps_requested": int(refine_steps),
+            "advanced_refine_legacy_steps_input_ignored": int(refine_steps),
             "advanced_refine_steps_effective": int(refine_steps_effective),
             "advanced_refine_base_steps": int(base_steps),
-            "advanced_refine_total_model_steps": int(base_steps),
+            "advanced_refine_total_model_steps": int(base_steps + refine_steps_effective),
             "advanced_refine_tail_start": int(refine_tail_start),
-            "advanced_refine_interval_policy": ("independent_hires_second_pass" if bool(latent_hires_enabled) else "true_two_stage_split_inside_single_model_lifecycle"),
-            "advanced_refine_latent_source": ("stage1_denoised_x0_then_learned_upscale" if bool(latent_hires_enabled) else "stage1_in_progress_solver_state"),
+            "advanced_refine_interval_policy": "internal_sampler2_exact_or_windowed",
+            "advanced_refine_latent_source": ("complete_main_x0_then_learned_upscale" if bool(latent_hires_enabled) else "complete_main_x0"),
             "advanced_refine_latent_clone": False,
             "advanced_refine_latent_rebuild": False,
-            "advanced_refine_renoise": bool(latent_hires_enabled),
-            "advanced_refine_scheduler_source": ("independent_every_other_full_schedule" if bool(latent_hires_enabled) else "unified_runtime_true_advanced_split"),
-            "advanced_refine_audio_policy": "joint_AV_continues_through_refiner",
-            "advanced_refine_overlap_policy": "unchanged_single_execution",
+            "advanced_refine_renoise": bool(refine_enabled),
+            "advanced_refine_scheduler_source": "dedicated_refine_sigmas_input",
+            "advanced_refine_audio_policy": "audio_x0_frozen_and_restored_exact",
+            "advanced_refine_overlap_policy": "phase_safe_temporal_windows_exact_head_plus_smoothstep_overlap",
+            "advanced_refine_main_multiclip_policy": "unchanged",
             "external_sampler_refine_auto_detect": True,
-            "external_sampler_refine_policy": "per_clip_native_zero_noise_preserve_overlap",
+            "external_sampler_refine_policy": "stock_sampler2_output_no_post_merge_v0540",
+            "external_sampler_refine_recommended": False,
             "hybrid_keyframe_scope": (
                 "first_only_pass0_last_only_final"
                 if getattr(plan, 'mode', None) == 'hybrid' and plan.passes > 1
@@ -19118,7 +25451,7 @@ class MiniMaxH3LatentLabLongMediaSampler:
                 "enabled": bool(mlp_chunking_enabled),
                 "chunk_tokens_requested": int(requested_mlp_chunk_tokens),
                 "chunk_tokens_effective": int(effective_mlp_chunk_tokens),
-                "attention_unchanged": str(attention_mode) in ("auto", "existing"),
+                "attention_unchanged": str(attention_mode) in ("auto", "existing", "sol_h3"),
             },
             "attention": {
                 "mode": str(effective_attention_mode),
@@ -19130,6 +25463,14 @@ class MiniMaxH3LatentLabLongMediaSampler:
                     else "explicit_or_single_pass"
                 ),
                 "embedded_sol": str(attention_mode) in ("sol", "scheduled_sol"),
+                "sol_h3_profile": str(attention_mode) == "sol_h3",
+                "sol_h3_single_gpu_attention": ("existing_kitchen_exact_workspace_first" if str(attention_mode) == "sol_h3" else None),
+                "sol_h3_adaln_precompute": ("adaptive_by_vram_and_residency" if str(attention_mode) == "sol_h3" else None),
+                "sol_h3_fused_sparse_preprocess": str(attention_mode) == "sol_h3",
+                "sol_h3_fast_h3_4step": ("auto_detected_at_runtime" if str(attention_mode) == "sol_h3" else None),
+                "sol_h3_multi_gpu_ulysses": False,
+                "sol_h3_multi_gpu_note": ("not enabled in the single-process / heterogeneous Comfy runtime" if str(attention_mode) == "sol_h3" else None),
+                "sol_h3_existing_fusions": ("Comfy Kitchen fused QK+partial-RoPE and linear_input_act SwiGLU retained" if str(attention_mode) == "sol_h3" else None),
                 "sol_tau_start": float(sol_tau_start),
                 "sol_tau_end": float(sol_tau_end),
                 "sol_curve": str(sol_curve),
@@ -19215,7 +25556,14 @@ class MiniMaxH3LatentLabLongMediaDecode:
                 ),
                 'batch_size': (
                     'INT',
-                    {'default': 1, 'min': 1, 'max': 16, 'step': 1},
+                    {
+                        'default': 1, 'min': 1, 'max': 16, 'step': 1,
+                        'tooltip': (
+                            'MiniMax H3 native VAE spatial-tile parallelism. 1 = Auto '
+                            '(4 tiles/call on a cleared 16GB-class GPU, 8 on 24GB+). '
+                            'OOM automatically falls back to smaller batches. Other VAEs ignore this value.'
+                        ),
+                    },
                 ),
                 'color_match_strength': (
                     'FLOAT',
@@ -19300,7 +25648,7 @@ class MiniMaxH3LatentLabLongMediaDecode:
                 raise RuntimeError('MultiClip native continuous decode found no stored segment video latents.')
             continuous_video = torch.cat(video_parts, dim=2)
             continuous_frames = int(frame_count_from_video_t(int(continuous_video.shape[2])))
-            expected_frames = int(plan.output_frames)
+            expected_frames = int(plan.generated_frames)
             if continuous_frames != expected_frames:
                 raise RuntimeError(
                     'MultiClip native continuous latent geometry mismatch: '
@@ -19309,6 +25657,8 @@ class MiniMaxH3LatentLabLongMediaDecode:
                 )
             images, video_decode_info = _decode_video_vae_safe(
                 video_vae, continuous_video, enable_tiling, tile_size, temporal_size,
+                batch_size=batch_size,
+                free_vram_bytes=((decode_barrier.get('after') or {}).get('driver_free') if isinstance(decode_barrier, dict) else None),
             )
             if images.dim() == 5:
                 images = images[0]
@@ -19335,6 +25685,8 @@ class MiniMaxH3LatentLabLongMediaDecode:
         else:
             images, video_decode_info = _decode_video_vae_safe(
                 video_vae, video, enable_tiling, tile_size, temporal_size,
+                batch_size=batch_size,
+                free_vram_bytes=((decode_barrier.get('after') or {}).get('driver_free') if isinstance(decode_barrier, dict) else None),
             )
             if images.dim() == 5:
                 images = images[0]
@@ -19368,6 +25720,11 @@ class MiniMaxH3LatentLabLongMediaDecode:
                 images[0] = images[1]
                 opening_anchor_suppressed_frames = 1
             opening_anchor_suppressed = True
+
+        # Director preview metadata is attached only after every final RGB output
+        # policy (first-frame restoration / color match) has been applied below.
+        director_preview_report = []
+
         def _compact_decode_snap(snap):
             if snap is None:
                 return None
@@ -19386,6 +25743,7 @@ class MiniMaxH3LatentLabLongMediaDecode:
             'decode_uses_plan_vaes': True,
             'video_decode': video_decode_info,
             'per_clip_native_video_decode': bool(use_per_clip_native_video_decode),
+            'director_take_previews': director_preview_report,
             'trimmed_video_frames': trimmed,
             'storyboard_duplicate_boundary_frame_removed': storyboard_duplicate_removed,
             'segmented_visible_opening_anchor_suppressed': opening_anchor_suppressed,
@@ -19518,6 +25876,154 @@ class MiniMaxH3LatentLabLongMediaDecode:
         loop_closure_applied = bool(isinstance(loop_closure_runtime, dict) and loop_closure_runtime.get('applied'))
         if color_match_strength > 0.0:
             images = _match_frames_color_to_reference(images, 0, color_match_strength)
+
+        # v0.5.52: persist compact per-take preview sprites after the final decoded
+        # RGB tensor is complete.  The browser can scrub/play these sprites directly,
+        # so Director playback does not require a second video encode or live RGB cache.
+        try:
+            _project_id = str(getattr(plan, 'director_project_id', '') or '').strip()
+            _clip_ids = list(getattr(plan, 'director_clip_ids', None) or ())
+            _clip_meta = list(getattr(plan, 'director_clip_metadata', None) or ())
+            if _project_id and _clip_ids and int(images.shape[0]) > 0:
+                import folder_paths
+                _preview_cache = _DirectorClipCache(folder_paths.get_output_directory(), _project_id)
+                # Source-video FPS is an import clock; generated H3 frames use FPS.
+                _fps = float(FPS)
+                _preview_policy_base = {
+                    'version': 4,
+                    'preview_cell_width': 640,
+                    'preview_jpeg_quality': 90,
+                    'video_fps': round(_fps, 6),
+                    'color_match_strength': round(float(color_match_strength), 6),
+                    'first_frame_mode': str(getattr(plan, 'first_frame_mode', '') or ''),
+                    'first_frame_blend_frames': int(getattr(plan, 'first_frame_blend_frames', 0) or 0),
+                    'suppress_visible_opening_anchor': bool(getattr(plan, 'suppress_visible_opening_anchor', False)),
+                    'image_shape': [int(v) for v in images.shape[1:]],
+                }
+                _cursor_seconds = 0.0
+                _monitor_waveform = audio.get('waveform') if isinstance(audio, dict) else None
+                _monitor_sample_rate = max(1, int(audio.get('sample_rate') or 32000)) if isinstance(audio, dict) else 32000
+                for _idx, _clip_id in enumerate(_clip_ids):
+                    _meta = _clip_meta[_idx] if _idx < len(_clip_meta) and isinstance(_clip_meta[_idx], dict) else {}
+                    _duration = max(float(_meta.get('duration') or 0.0), 0.0)
+                    if _duration <= 0.0 and _idx < len(getattr(plan, 'segment_lengths', ()) or ()):
+                        _duration = float(plan.segment_lengths[_idx]) / _fps
+                    _duration = max(_duration, 1.0 / _fps)
+                    _start_frame = min(int(images.shape[0]) - 1, max(0, int(round(_cursor_seconds * _fps))))
+                    _end_seconds = _cursor_seconds + _duration
+                    _end_frame = min(int(images.shape[0]), max(_start_frame + 1, int(round(_end_seconds * _fps))))
+                    _clip_frames = images[_start_frame:_end_frame]
+                    _preview_fingerprint = _director_canonical_hash({
+                        **_preview_policy_base,
+                        'clip_index': int(_idx),
+                        'duration': round(float(_duration), 6),
+                        'source_frame_count': int(_clip_frames.shape[0]),
+                    })
+                    _clip_monitor_audio = None
+                    _audio_preview_fingerprint = None
+                    if torch.is_tensor(_monitor_waveform) and int(_monitor_waveform.shape[-1]) > 0:
+                        _audio_start = max(0, int(round(_cursor_seconds * _monitor_sample_rate)))
+                        _audio_end = min(int(_monitor_waveform.shape[-1]), max(_audio_start + 1, int(round(_end_seconds * _monitor_sample_rate))))
+                        if _audio_start < int(_monitor_waveform.shape[-1]) and _audio_end > _audio_start:
+                            _clip_monitor_audio = {
+                                'waveform': _monitor_waveform[..., _audio_start:_audio_end],
+                                'sample_rate': int(_monitor_sample_rate),
+                            }
+                            _audio_preview_fingerprint = _director_canonical_hash({
+                                'version': 1, 'clip_index': int(_idx),
+                                'sample_rate': int(_monitor_sample_rate),
+                                'start_sample': int(_audio_start), 'end_sample': int(_audio_end),
+                                'request_id': str(getattr(plan, 'director_regeneration', {}) or ''),
+                            })
+                    _active_preview_meta = _preview_cache.active_metadata(_clip_id)
+                    _existing_sprite = str((_active_preview_meta or {}).get('preview_sprite_file') or '')
+                    _existing_sprite_path = (
+                        os.path.join(_preview_cache.output_root, _existing_sprite)
+                        if _existing_sprite else ''
+                    )
+                    if (
+                        _existing_sprite
+                        and str((_active_preview_meta or {}).get('preview_fingerprint') or '') == _preview_fingerprint
+                        and os.path.isfile(_existing_sprite_path)
+                    ):
+                        _audio_preview = None
+                        if _clip_monitor_audio is not None:
+                            try:
+                                _audio_preview = _preview_cache.attach_active_preview_audio(
+                                    _clip_id, _clip_monitor_audio, preview_fingerprint=_audio_preview_fingerprint
+                                )
+                            except Exception as _audio_preview_exc:
+                                _lm_print(
+                                    '[MiniMaxH3 LongMedia][DIRECTOR AUDIO PREVIEW FAILED] '
+                                    f'clip_id={_clip_id}; error={type(_audio_preview_exc).__name__}: {_audio_preview_exc}',
+                                    flush=True,
+                                )
+                        director_preview_report.append({
+                            'clip_id': str(_clip_id),
+                            'start_frame': int(_start_frame),
+                            'end_frame': int(_end_frame),
+                            'preview_file': (_active_preview_meta or {}).get('preview_file'),
+                            'preview_sprite_file': _existing_sprite,
+                            **(dict(_audio_preview or {})),
+                            'preview_reused': True,
+                        })
+                        _cursor_seconds = _end_seconds
+                        continue
+                    try:
+                        _preview = _preview_cache.attach_active_preview_sprite(
+                            _clip_id, _clip_frames, source_fps=_fps, duration_seconds=_duration,
+                            preview_fingerprint=_preview_fingerprint,
+                        )
+                        _audio_preview = None
+                        if _clip_monitor_audio is not None:
+                            _audio_preview = _preview_cache.attach_active_preview_audio(
+                                _clip_id, _clip_monitor_audio, preview_fingerprint=_audio_preview_fingerprint
+                            )
+                        director_preview_report.append({
+                            'clip_id': str(_clip_id),
+                            'start_frame': int(_start_frame),
+                            'end_frame': int(_end_frame),
+                            **(dict(_preview or {})),
+                            **(dict(_audio_preview or {})),
+                        })
+                    except Exception as _clip_preview_exc:
+                        # A preview failure must never invalidate an expensive render.
+                        # Fall back to one midpoint thumbnail, but report the real error.
+                        _mid_frame = min(
+                            int(images.shape[0]) - 1,
+                            max(_start_frame, int(round((_cursor_seconds + _duration * 0.5) * _fps))),
+                        )
+                        _fallback = None
+                        try:
+                            _fallback = _preview_cache.attach_active_preview(_clip_id, images[_mid_frame])
+                        except Exception:
+                            pass
+                        director_preview_report.append({
+                            'clip_id': str(_clip_id),
+                            'start_frame': int(_start_frame),
+                            'end_frame': int(_end_frame),
+                            'preview_file': _fallback,
+                            'error': f'{type(_clip_preview_exc).__name__}: {_clip_preview_exc}',
+                        })
+                        _lm_print(
+                            '[MiniMaxH3 LongMedia][DIRECTOR PREVIEW FALLBACK] '
+                            f'clip_id={_clip_id}; error={type(_clip_preview_exc).__name__}: {_clip_preview_exc}',
+                            flush=True,
+                        )
+                    _cursor_seconds = _end_seconds
+                _lm_director_send_preview_ready(plan, {
+                    'clips': [str(v) for v in _clip_ids],
+                    'preview_count': len(director_preview_report),
+                })
+        except Exception as _preview_exc:
+            director_preview_report = [{'error': f'{type(_preview_exc).__name__}: {_preview_exc}'}]
+            _lm_print(
+                '[MiniMaxH3 LongMedia][DIRECTOR PREVIEW FAILED] '
+                f'{type(_preview_exc).__name__}: {_preview_exc}',
+                flush=True,
+            )
+
+        report_data['director_take_previews'] = director_preview_report
         report_data['color_match_strength'] = float(color_match_strength)
         report_data['loop_closure_enabled'] = loop_closure_enabled
         report_data['loop_closure_frames_requested'] = int(loop_closure_frames if loop_closure_enabled else 0)
@@ -19556,6 +26062,7 @@ NODE_CLASS_MAPPINGS = {
     'MiniMaxH3LatentLabStitchContinuation': MiniMaxH3LatentLabStitchContinuation,
     'MiniMaxH3LatentLabInfo': MiniMaxH3LatentLabInfo,
     'MiniMaxH3LongMediaPlanner': MiniMaxH3LongMediaPlanner,
+    'MiniMaxH3LongMediaDirector': MiniMaxH3LongMediaDirector,
     'MiniMaxH3LongMediaCameras': MiniMaxH3LongMediaCameras,
     'MiniMaxH3LongMediaVideoReconstructor': MiniMaxH3LongMediaVideoReconstructor,
     'MiniMaxH3LatentLabLongMediaSetup': MiniMaxH3LatentLabLongMediaSetup,
@@ -19591,6 +26098,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     'MiniMaxH3LatentLabStitchContinuation': 'MiniMax H3 \u2022 Stitch Continuation',
     'MiniMaxH3LatentLabInfo': 'MiniMax H3 \u2022 AV Latent Info',
     'MiniMaxH3LongMediaPlanner': 'MiniMax H3 LongMedia Planner',
+    'MiniMaxH3LongMediaDirector': 'MiniMax H3 • LongMedia Director',
     'MiniMaxH3LongMediaCameras': 'MiniMax H3 LongMedia Cameras',
     'MiniMaxH3LongMediaVideoReconstructor': 'MiniMax H3 LongMedia Video Reconstructor',
     'MiniMaxH3LatentLabLongMediaSetup': 'MiniMax H3 \u2022 Long Media Setup',

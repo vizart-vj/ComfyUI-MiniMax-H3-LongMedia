@@ -61,6 +61,42 @@ def _reduce_v_kernel(
     tl.store(vc_ptr + ((batch * NB + block) * H + head) * D + d, summed)
 
 
+
+
+@triton.jit
+def _reduce_kv_kernel(
+    k_ptr, v_ptr, kc_ptr, vc_ptr, T,
+    k_s_b, k_s_t, k_s_h, v_s_b, v_s_t, v_s_h,
+    H: tl.constexpr, NB: tl.constexpr, D: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    """Fused Sol-H3 K-centroid + V-sum preprocessing.
+
+    The two summaries traverse identical 64-token blocks.  Keeping them in one
+    launch removes one grid launch and shares row/valid/address setup while
+    preserving the arithmetic of the former independent reducers.
+    """
+    block, batch_head = tl.program_id(0), tl.program_id(1)
+    batch, head = batch_head // H, batch_head % H
+    rows = block * BLOCK + tl.arange(0, BLOCK)
+    d = tl.arange(0, D)
+    valid = rows < T
+    kvals = tl.load(
+        k_ptr + batch * k_s_b + rows[:, None].to(tl.int64) * k_s_t + head * k_s_h + d[None, :],
+        mask=valid[:, None], other=0.0,
+    )
+    vvals = tl.load(
+        v_ptr + batch * v_s_b + rows[:, None].to(tl.int64) * v_s_t + head * v_s_h + d[None, :],
+        mask=valid[:, None], other=0.0,
+    )
+    block_len = tl.minimum(BLOCK, T - block * BLOCK).to(tl.float32)
+    mean = tl.sum(kvals.to(tl.float32), axis=0) / block_len
+    summed = tl.sum(vvals, axis=0)
+    base = ((batch * NB + block) * H + head) * D + d
+    tl.store(kc_ptr + base, mean)
+    tl.store(vc_ptr + base, summed)
+
+
 @triton.jit
 def _kc_stats_kernel(
     kc_ptr, mean_ptr, var_ptr,
@@ -228,12 +264,10 @@ def sol_attn_sm120(q, k, v, *, tau=1.3, scale=None, sink_blocks=(0, 0), sink_q=(
     # Only compact block summaries + thresholds are materialized here.
     kc = torch.empty((B, NB, H, D), device=q.device, dtype=torch.bfloat16)
     vc = torch.empty_like(kc)
-    _reduce_k_kernel[(NB, B * H)](
-        k, kc, T, k.stride(0), k.stride(1), k.stride(2),
-        H, NB, D, BLOCK_SIZE, num_warps=4,
-    )
-    _reduce_v_kernel[(NB, B * H)](
-        v, vc, T, v.stride(0), v.stride(1), v.stride(2),
+    _reduce_kv_kernel[(NB, B * H)](
+        k, v, kc, vc, T,
+        k.stride(0), k.stride(1), k.stride(2),
+        v.stride(0), v.stride(1), v.stride(2),
         H, NB, D, BLOCK_SIZE, num_warps=4,
     )
     kc_mean = torch.empty((B, H, D), device=q.device, dtype=torch.float32)
@@ -374,12 +408,10 @@ def prepare_kv_sm120(k, v):
     NBK = triton.cdiv(TK, BLOCK_SIZE)
     kc = torch.empty((B, NBK, H, D), device=k.device, dtype=torch.bfloat16)
     vc = torch.empty_like(kc)
-    _reduce_k_kernel[(NBK, B * H)](
-        k, kc, TK, k.stride(0), k.stride(1), k.stride(2),
-        H, NBK, D, BLOCK_SIZE, num_warps=4,
-    )
-    _reduce_v_kernel[(NBK, B * H)](
-        v, vc, TK, v.stride(0), v.stride(1), v.stride(2),
+    _reduce_kv_kernel[(NBK, B * H)](
+        k, v, kc, vc, TK,
+        k.stride(0), k.stride(1), k.stride(2),
+        v.stride(0), v.stride(1), v.stride(2),
         H, NBK, D, BLOCK_SIZE, num_warps=4,
     )
     kc_mean = torch.empty((B, H, D), device=k.device, dtype=torch.float32)

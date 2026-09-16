@@ -185,11 +185,28 @@ function lmRefreshSetupInputLabels(node) {
         }
     }
 
+    const director = lmFindInput(node, 'director');
+    const directorConnected = lmInputConnected(node, 'director');
+    if (directorConnected) {
+        const timelineWidget = lmWidget(node, 'timeline_mode');
+        if (timelineWidget && timelineWidget.value !== 'multiclip') timelineWidget.value = 'multiclip';
+    }
+    if (directorConnected) {
+        pictures.forEach((input, idx) => lmSetInputDisplay(input, `image_${idx + 1} • override Picture ${idx + 1}`));
+        videos.forEach((input, idx) => lmSetInputDisplay(input, `video_${idx + 1} • override Video ${idx + 1}`));
+        audios.forEach((input, idx) => lmSetInputDisplay(input, `audio_${idx + 1} • override Audio ${idx + 1}`));
+    }
+    if (director) lmSetInputDisplay(director, directorConnected ? 'director • owns Director timeline' : 'director');
     const clipPlan = lmFindInput(node, 'clip_plan');
-    if (clipPlan) lmSetInputDisplay(clipPlan, timeline === 'multiclip' ? 'clip_plan • active' : 'clip_plan • ignored');
+    if (clipPlan) {
+        const label = directorConnected
+            ? 'clip_plan • ignored by director'
+            : (timeline === 'multiclip' ? 'clip_plan • active' : 'clip_plan • ignored');
+        lmSetInputDisplay(clipPlan, label);
+    }
 
     const audioMode = lmWidget(node, 'audio_mode')?.value ?? 'auto';
-    if (audioMode === 'lip_sync') lmSetInputDisplay(audios[0], 'audio_1 • lip_sync');
+    if (!directorConnected && audioMode === 'lip_sync') lmSetInputDisplay(audios[0], 'audio_1 • lip_sync');
 }
 
 function lmSetCombo(node, name, values, fallback) {
@@ -229,6 +246,7 @@ function lmSanitizeSetup(node) {
     lmSetCombo(node, "reference_budget", ["low", "medium", "high", "max"], "low");
     lmSetCombo(node, "video_mode", ["auto", "preserve", "transform"], "auto");
     lmSetCombo(node, "audio_mode", ["auto", "preserve", "generate", "reference_only", "preserve_reference", "lip_sync"], "auto");
+    lmSetCombo(node, "motion_repair", ["off", "auto", "fluid", "strong"], "off");
     lmSetNumber(node, "width", 512, 32, 8192, true);
     lmSetNumber(node, "height", 512, 32, 8192, true);
     lmSetNumber(node, "manual_duration", 10.0, 0.1, 600.0, false);
@@ -258,7 +276,7 @@ function lmSanitizeSetup(node) {
     if (h3?.value === "legacy") h3.value = migrated[1];
     if (timeline?.value === "legacy") timeline.value = migrated[2];
 
-    lmSetCombo(node, "control_mode", ["auto", "manual"], "auto");
+    lmSetCombo(node, "control_mode", ["auto", "director", "manual"], "auto");
     lmSetCombo(node, "h3_mode", ["t2va", "fl2va", "ref2va", "hybrid", "video_ref_edit"], "hybrid");
     lmSetCombo(node, "timeline_mode", ["single", "segmented", "multiclip"], "single");
 
@@ -332,7 +350,7 @@ function lmSanitizeSampler(node) {
     lmRepairV459SamplerPositionalCorruption(node);
     lmSetNumber(node, "seed", 0, 0, 18446744073709551615, true);
     lmSetCombo(node, "memory_mode", ["auto", "normal", "low_vram", "ultra_low_vram"], "auto");
-    lmSetCombo(node, "sampler_mode", ["auto", "manual"], "auto");
+    lmSetCombo(node, "sampler_mode", ["auto", "director", "manual"], "auto");
     const mode = lmWidget(node, "sampler_mode")?.value ?? "auto";
     const specs = [
         ["video_context_denoise", 0.0, 0.0, 1.0, false],
@@ -354,7 +372,7 @@ function lmSanitizeSampler(node) {
         ["late_block_guard_min_cached_mb", 512, 0, 4096, true],
         ["step_boundary_cleanup_mb", 2048, 0, 8192, true],
     ];
-    lmSetCombo(node, "attention_mode", ["auto", "existing", "sol", "scheduled_sol"], "auto");
+    lmSetCombo(node, "attention_mode", ["auto", "existing", "sol_h3", "sol", "scheduled_sol"], "auto");
     lmSetCombo(node, "sol_curve", ["linear", "cosine", "sqrt", "smoothstep", "exponential", "step"], "linear");
     lmSetCombo(node, "sol_sink_conditioning", ["exact_kv", "exact_kv_and_rows", "off"], "exact_kv");
     lmSetBoolean(node, "offload_completed_segments", true);
@@ -795,6 +813,7 @@ function lmInstallSetupGroups(node) {
         ["prompt", "PROMPT / CANVAS"],
         ["timeline_mode", "TIMELINE / SEGMENTS"],
         ["loop_closure_enabled", "LOOP CLOSURE"],
+        ["motion_repair", "MOTION REPAIR"],
         ["resolution_mode", "MEDIA / REFERENCES"],
         ["release_guard", "MANUAL / DEBUG"],
     ];
@@ -823,6 +842,7 @@ function lmRefreshSetup(node) {
     lmMoveWidgetBefore(node, "timeline_mode", "duration_source");
     lmMoveWidgetBefore(node, "duration_source", "manual_duration");
     lmMoveWidgetBefore(node, "transition_frames", "loop_closure_enabled");
+    lmMoveWidgetBefore(node, "motion_repair", "resolution_mode");
     lmInstallSetupGroups(node);
 
     const loopStrengthWidget = lmWidget(node, "loop_closure_strength");
@@ -835,9 +855,21 @@ function lmRefreshSetup(node) {
     }
 
     lmSanitizeSetup(node);
-    const control = lmWidget(node, "control_mode")?.value ?? "auto";
+    const directorConnected = lmInputConnected(node, "director");
+    const controlWidget = lmWidget(node, "control_mode");
+    if (directorConnected && !node.__lmDirectorControlInitV548) {
+        if (controlWidget?.value === "auto") controlWidget.value = "director";
+        node.__lmDirectorControlInitV548 = true;
+    } else if (!directorConnected) {
+        node.__lmDirectorControlInitV548 = false;
+    }
+    const control = controlWidget?.value ?? "auto";
+    const directorControl = control === "director";
+    const timelineControlWidget = lmWidget(node, "timeline_mode");
+    // In Director mode the hidden Setup selector is transport-only; the Director
+    // top bar owns single/segmented/multiclip routing. Never rewrite it here.
     const h3Mode = lmWidget(node, "h3_mode")?.value ?? "hybrid";
-    const timeline = lmWidget(node, "timeline_mode")?.value ?? "single";
+    const timeline = timelineControlWidget?.value ?? "single";
     const audioMode = lmWidget(node, "audio_mode")?.value ?? "auto";
     const durationSource = lmWidget(node, "duration_source")?.value ?? "auto";
     const frameMode = lmWidget(node, "first_frame_mode")?.value ?? "latent_inject";
@@ -862,27 +894,27 @@ function lmRefreshSetup(node) {
     // New semantic selectors are always visible. Reconstruction can still own
     // execution through its socket, but Setup's selected state remains inspectable.
     lmSetWidgetVisible(lmWidget(node, "control_mode"), true);
-    lmSetWidgetVisible(h3Widget, true);
-    lmSetWidgetVisible(timelineWidget, true);
+    lmSetWidgetVisible(h3Widget, !directorControl);
+    lmSetWidgetVisible(timelineWidget, !directorControl);
 
     // Timeline ownership is a first-class control even in control_mode=auto.
     // H3 mode only changes the meaning of `auto` (video_ref_edit => video_1);
     // explicit video/audio/manual/longest_input choices stay user-owned.
-    lmSetWidgetVisible(lmWidget(node, "duration_source"), true);
-    lmSetWidgetVisible(lmWidget(node, "manual_duration"), !multiclip && !reconstruct && (durationSource === "manual" || manual));
+    lmSetWidgetVisible(lmWidget(node, "duration_source"), !directorControl);
+    lmSetWidgetVisible(lmWidget(node, "manual_duration"), !directorControl);
 
     // Segment size is meaningful only for fixed segmentation. Manual shows it
     // regardless so advanced users can stage a configuration before switching.
-    lmSetWidgetVisible(segmentDuration, segmented || manual);
+    lmSetWidgetVisible(segmentDuration, !directorControl && (segmented || manual));
     // Requested feature: transition magnitude belongs to BOTH Segmented and
     // MultiClip, and is also directly available in Manual.
     lmSetWidgetVisible(transition, segmented || multiclip || manual);
 
     // Hybrid owns image-injection parameters. FL2VA is intentionally pure native
     // keyframe conditioning and never exposes/inherits these controls.
-    lmSetWidgetVisible(lmWidget(node, "first_frame_mode"), hybrid || manual);
-    lmSetWidgetVisible(lmWidget(node, "first_frame_denoise"), manual || (hybrid && frameMode === "latent_inject"));
-    lmSetWidgetVisible(lmWidget(node, "first_frame_blend_frames"), manual || (hybrid && frameMode === "blend"));
+    lmSetWidgetVisible(lmWidget(node, "first_frame_mode"), !directorControl && (hybrid || manual));
+    lmSetWidgetVisible(lmWidget(node, "first_frame_denoise"), !directorControl && (manual || (hybrid && frameMode === "latent_inject")));
+    lmSetWidgetVisible(lmWidget(node, "first_frame_blend_frames"), !directorControl && (manual || (hybrid && frameMode === "blend")));
 
     // Manual is a control level, not a workflow. It exposes the old low-level
     // conditioning selector and common diagnostic knobs without changing sampler UI.
@@ -902,22 +934,23 @@ function lmRefreshSetup(node) {
     lmSetWidgetVisible(lmWidget(node, "loop_closure_enabled"), true);
     lmSetWidgetVisible(lmWidget(node, "loop_closure_frames"), loopEnabled || manual);
     lmSetWidgetVisible(lmWidget(node, "loop_closure_strength"), loopEnabled || manual);
+    lmSetWidgetVisible(lmWidget(node, "motion_repair"), true);
 
-    for (const name of [
-        "prompt", "width", "height", "resolution_mode", "reference_budget",
-        "video_fps", "video_mode", "audio_mode", "release_guard",
-    ]) lmSetWidgetVisible(lmWidget(node, name), true);
-
-    // In Auto keep the surface concise. Manual opens the deeper media policy
-    // knobs that were previously always visible.
+    for (const name of ["width", "height", "resolution_mode", "reference_budget", "video_fps"]) {
+        lmSetWidgetVisible(lmWidget(node, name), true);
+    }
+    // In Director control the Director owns the global prompt and audio behavior.
+    // Setup keeps canvas/media-performance controls plus explicit socket overrides.
+    lmSetWidgetVisible(lmWidget(node, "prompt"), !directorControl);
+    lmSetWidgetVisible(lmWidget(node, "audio_mode"), !directorControl);
     lmSetWidgetVisible(lmWidget(node, "reference_budget"), true);
-    lmSetWidgetVisible(lmWidget(node, "video_mode"), manual || h3Mode === "video_ref_edit");
+    lmSetWidgetVisible(lmWidget(node, "video_mode"), !directorControl && (manual || h3Mode === "video_ref_edit"));
     lmSetWidgetVisible(lmWidget(node, "release_guard"), manual);
 
     for (const name of [
         "__lm_setup_group_control_mode", "__lm_setup_group_h3_mode", "__lm_setup_group_prompt",
         "__lm_setup_group_timeline_mode", "__lm_setup_group_loop_closure_enabled",
-        "__lm_setup_group_resolution_mode", "__lm_setup_group_release_guard",
+        "__lm_setup_group_motion_repair", "__lm_setup_group_resolution_mode", "__lm_setup_group_release_guard",
     ]) lmSetWidgetVisible(lmWidget(node, name), true);
 
     lmRefreshSetupInputLabels(node);
@@ -944,7 +977,7 @@ function lmInstallPresentationSafeSerialize(node) {
         }
         // LiteGraph widgets_values is positional. Temporarily remove decorative
         // section headers so they cannot shift saved values across schema inputs.
-        this.widgets = allWidgets.filter((w) => !w?.__lmGroupHeader);
+        this.widgets = allWidgets.filter((w) => !w?.__lmGroupHeader && !w?.__lmPresentationOnly);
         try {
             return originalSerialize.apply(this, args);
         } finally {
@@ -953,8 +986,55 @@ function lmInstallPresentationSafeSerialize(node) {
     };
 }
 
+function lmInstallSamplerUiLevel(node) {
+    if (!node || node.__lmSamplerUiLevelInstalled) return;
+    node.__lmSamplerUiLevelInstalled = true;
+    node.properties = node.properties || {};
+    if (!['basic', 'advanced', 'debug'].includes(node.properties.lmSamplerUiLevel)) {
+        node.properties.lmSamplerUiLevel = 'basic';
+    }
+    if (typeof node.addDOMWidget === 'function' && typeof document !== 'undefined') {
+        const wrap = document.createElement('div');
+        wrap.style.cssText = 'display:flex;align-items:center;gap:8px;width:100%;box-sizing:border-box;padding:3px 6px;font:11px system-ui;color:#b9c2ce';
+        const label = document.createElement('span'); label.textContent = 'VIEW'; label.style.cssText='font-weight:800;font-size:9px;letter-spacing:.06em';
+        const select = document.createElement('select');
+        select.style.cssText='flex:1;background:#171a20;color:#e7ebf0;border:1px solid #343a44;border-radius:4px;padding:4px';
+        for (const [value, text] of [['basic','Basic'],['advanced','Advanced'],['debug','Debug']]) {
+            const option = document.createElement('option'); option.value=value; option.textContent=text; option.selected=value===node.properties.lmSamplerUiLevel; select.append(option);
+        }
+        select.onpointerdown = (event) => event.stopPropagation();
+        select.onchange = () => { node.properties.lmSamplerUiLevel = select.value; lmRefreshSampler(node); };
+        wrap.append(label, select);
+        const w = node.addDOMWidget('__lm_sampler_ui_level', 'longmedia_sampler_level', wrap, { serialize:false, hideOnZoom:false, getMinHeight:()=>30, getMaxHeight:()=>30, getValue:()=>undefined, setValue:()=>{} });
+        if (w) { w.__lmPresentationOnly = true; w.serialize = false; w.serializeValue = () => undefined; }
+    }
+}
+
+const LM_SAMPLER_BASIC = new Set([
+    'seed','sampler_mode','memory_mode','offload_completed_segments',
+    'latent_hires_enabled','latent_hires_model','latent_hires_scale',
+    'refine_enabled','windowed_refine'
+]);
+const LM_SAMPLER_ADVANCED = new Set([
+    ...LM_SAMPLER_BASIC,
+    'video_context_denoise','audio_context_denoise','mlp_chunk_tokens','attention_mode',
+    'sol_tau_start','sol_tau_end','sol_curve','sol_min_tokens','sol_dense_percent',
+    'sol_sink_conditioning','sol_qkv_chunk_tokens','sol_out_proj_chunk_tokens',
+    'latent_hires_precision','latent_hires_align'
+]);
+
+function lmSamplerUiAllowed(node, widget) {
+    if (!widget || widget.__lmPresentationOnly || widget.__lmGroupHeader) return true;
+    const level = String(node?.properties?.lmSamplerUiLevel || 'basic');
+    if (level === 'debug') return true;
+    const name = String(widget.name || '');
+    return (level === 'advanced' ? LM_SAMPLER_ADVANCED : LM_SAMPLER_BASIC).has(name) || Boolean(widget.type === 'converted-widget');
+}
+
 function lmInstallSamplerGroups(node) {
     lmInstallNamedWidgetPersistence(node);
+    lmInstallPresentationSafeSerialize(node);
+    lmInstallSamplerUiLevel(node);
     if (!node || node.__lmSamplerGroupsV526 || typeof node.addCustomWidget !== "function") return;
     node.__lmSamplerGroupsV526 = true;
     const groups = [
@@ -973,21 +1053,27 @@ function lmInstallSamplerGroups(node) {
 function lmRefreshSampler(node) {
     lmInstallSamplerGroups(node);
     lmSanitizeSampler(node);
-    // v0.3.22 A/B controls: sampler_mode=auto keeps every tuning widget visible.
-    // AUTO values begin at the production defaults, but user edits are explicit
-    // overrides and must survive refresh/mode changes.
-    for (const w of node.widgets ?? []) lmSetWidgetVisible(w, true);
+    // v0.5.51 presentation tiers. Hidden widgets keep their serialized values exactly;
+    // Basic/Advanced only change visibility, never reset tuning.
+    for (const w of node.widgets ?? []) lmSetWidgetVisible(w, lmSamplerUiAllowed(node, w));
     // v0.3.50 true-refine split: these serialized legacy controls stay in the
     // backend schema for old workflow compatibility but have no valid role in a
     // continuous two-stage diffusion trajectory. Keep them hidden in the UI.
     lmSetWidgetVisible(lmWidget(node, "refine_add_noise"), false);
     lmSetWidgetVisible(lmWidget(node, "refine_seed"), false);
+    lmSetWidgetVisible(lmWidget(node, "refine_steps"), false);
     lmSyncHiresModelState(node);
     const hiresEnabled = Boolean(lmWidget(node, "latent_hires_enabled")?.value);
     for (const name of ["latent_hires_model", "latent_hires_scale", "latent_hires_precision", "latent_hires_align"])
-        lmSetWidgetVisible(lmWidget(node, name), hiresEnabled);
+        lmSetWidgetVisible(lmWidget(node, name), hiresEnabled && lmSamplerUiAllowed(node, lmWidget(node, name)));
     const refineEnabled = Boolean(lmWidget(node, "refine_enabled")?.value);
-    lmSetWidgetVisible(lmWidget(node, "refine_steps"), refineEnabled);
+    const windowedRefine = lmWidget(node, "windowed_refine");
+    if (windowedRefine) {
+        windowedRefine.label = "windowed refine";
+        lmSetWidgetVisible(windowedRefine, refineEnabled && lmSamplerUiAllowed(node, windowedRefine));
+    }
+    const refineInput = (node.inputs ?? []).find((input) => input?.name === "refine_sigmas");
+    if (refineInput) refineInput.label = "Refine Sigmas";
     const targetWidth = Math.max(Number(node.size?.[0]) || 0, 420);
     const targetHeight = Number(node.computeSize?.()?.[1] ?? node.size?.[1]);
     if (Number.isFinite(targetHeight) && targetHeight > 0 &&
@@ -1065,6 +1151,37 @@ function lmWireModeCallback(node, modeName, refresh, scheduleInitial = true) {
     if (scheduleInitial) lmScheduleModeRefresh(node, refresh);
 }
 
+function lmPruneLegacyDirectorInputs(node) {
+    if (!node?.inputs) return false;
+    const legacy = new Set(["director_media", "director_plan", "camera_plan"]);
+    let changed = false;
+    for (let i = node.inputs.length - 1; i >= 0; i -= 1) {
+        if (!legacy.has(String(node.inputs[i]?.name || ""))) continue;
+        // Intermediate Director builds exposed separate transport sockets. The current
+        // contract carries timeline + camera + media through Setup.director only.
+        try {
+            if (typeof node.removeInput === "function") node.removeInput(i);
+            else {
+                if (node.inputs[i]?.link != null) {
+                    try { node.disconnectInput?.(i); } catch (_) {}
+                }
+                node.inputs.splice(i, 1);
+            }
+        } catch (_) {
+            if (node.inputs[i]?.link != null) {
+                try { node.disconnectInput?.(i); } catch (_) {}
+            }
+            node.inputs.splice(i, 1);
+        }
+        changed = true;
+    }
+    if (changed) {
+        console.warn("[MiniMaxH3 LongMedia 0.5.49] removed legacy Director transport inputs; use Setup.director only");
+        node.graph?.setDirtyCanvas?.(true, true);
+    }
+    return changed;
+}
+
 app.registerExtension({
     name: "MiniMaxH3LatentLab.ReleaseFacade030",
     async beforeConfigureGraph() {
@@ -1076,7 +1193,11 @@ app.registerExtension({
             lmInstallNamedWidgetPersistence(node);
             requestAnimationFrame(() => {
                 lmPruneLegacyPromptInput(node);
-                setTimeout(() => lmPruneLegacyPromptInput(node), 0);
+                lmPruneLegacyDirectorInputs(node);
+                setTimeout(() => {
+                    lmPruneLegacyPromptInput(node);
+                    lmPruneLegacyDirectorInputs(node);
+                }, 0);
             });
             lmWireSetupConnectionRefresh(node);
             lmWireModeCallback(node, "control_mode", lmRefreshSetup, !lmConfiguringGraph);
@@ -1086,6 +1207,7 @@ app.registerExtension({
             lmWireModeCallback(node, "loop_closure_enabled", lmRefreshSetup, !lmConfiguringGraph);
             lmWireModeCallback(node, "workflow_mode", lmRefreshSetup, !lmConfiguringGraph);
             lmWireModeCallback(node, "audio_mode", lmRefreshSetup, !lmConfiguringGraph);
+            lmWireModeCallback(node, "motion_repair", lmRefreshSetup, !lmConfiguringGraph);
             lmWireModeCallback(node, "duration_source", lmRefreshSetup, !lmConfiguringGraph);
             lmWireModeCallback(node, "generation_mode", lmRefreshSetup, !lmConfiguringGraph);
             lmWireModeCallback(node, "conditioning_mode", lmRefreshSetup, !lmConfiguringGraph);
@@ -1113,6 +1235,7 @@ app.registerExtension({
                 lmInstallNamedWidgetPersistence(node);
                 lmRestoreNamedWidgetState(node);
                 lmPruneLegacyPromptInput(node);
+                lmPruneLegacyDirectorInputs(node);
                 lmWireSetupConnectionRefresh(node);
                 lmWireModeCallback(node, "control_mode", lmRefreshSetup, false);
                 lmWireModeCallback(node, "h3_mode", lmRefreshSetup, false);
@@ -1121,6 +1244,7 @@ app.registerExtension({
                 lmWireModeCallback(node, "loop_closure_enabled", lmRefreshSetup, false);
                 lmWireModeCallback(node, "workflow_mode", lmRefreshSetup, false);
                 lmWireModeCallback(node, "audio_mode", lmRefreshSetup, false);
+                lmWireModeCallback(node, "motion_repair", lmRefreshSetup, false);
                 lmWireModeCallback(node, "duration_source", lmRefreshSetup, false);
                 lmWireModeCallback(node, "generation_mode", lmRefreshSetup, false);
                 lmWireModeCallback(node, "conditioning_mode", lmRefreshSetup, false);
