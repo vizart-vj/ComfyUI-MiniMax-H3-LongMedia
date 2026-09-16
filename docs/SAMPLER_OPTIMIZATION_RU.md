@@ -1,6 +1,6 @@
 # Sampler, VRAM и производительность
 
-Рекомендации для текущей ветки LongMedia 0.6.40.
+Рекомендации для текущей ветки LongMedia 0.6.41.
 
 ## Production default
 

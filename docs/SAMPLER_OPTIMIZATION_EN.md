@@ -1,6 +1,6 @@
 # Sampler, VRAM and Performance Guide
 
-These recommendations describe the current 0.6.40 line.
+These recommendations describe the current 0.6.41 line.
 
 ## Production Default
 

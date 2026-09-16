@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.41
+
+- Fixed the monolithic Stage-2 Refiner AV device handoff: refined video is restored to the Stage-1 storage device/dtype before native AV repacking, while exact Stage-1 audio remains untouched.
+- Added fail-fast AV device-contract validation around native latent packing to catch mixed CPU/CUDA stream ownership at the producing stage instead of promoting the whole AV latent to VRAM.
+
 ## 0.6.40
 
 - Consolidated the Director 0.6 production line around semantic `t2va`, `fl2va`, `ref2va`, `hybrid` and `video_ref_edit` routing.

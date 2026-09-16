@@ -1,4 +1,4 @@
-__version__ = "0.6.40"
+__version__ = "0.6.41"
 
 from . import lora_compat as _lora_compat  # noqa: F401
 from . import fasth3_vsa_compat as _fasth3_vsa_compat  # noqa: F401

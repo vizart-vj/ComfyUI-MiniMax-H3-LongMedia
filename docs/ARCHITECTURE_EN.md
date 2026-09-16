@@ -1,6 +1,6 @@
 # LongMedia Architecture
 
-This document describes the current LongMedia 0.6.40 runtime architecture. Public control names and internal identifiers are kept exactly as they appear in the UI/code.
+This document describes the current LongMedia 0.6.41 runtime architecture. Public control names and internal identifiers are kept exactly as they appear in the UI/code.
 
 ## Semantic Setup Contract
 

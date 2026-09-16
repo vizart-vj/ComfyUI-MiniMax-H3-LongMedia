@@ -21685,6 +21685,32 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
         return out
 
     @staticmethod
+    def _validate_native_stream_devices(streams, *, context: str):
+        """Fail early when an AV NestedTensor would cross devices at pack_latents().
+
+        LongMedia deliberately allows completed latents to live on CPU between sampling
+        stages.  ``comfy.utils.pack_latents`` ultimately concatenates the streams and
+        therefore requires one device, but silently moving both streams to the model
+        device would defeat the offload policy for large video latents.  Device ownership
+        must instead be resolved by the stage that produced the mismatched stream.
+        """
+        stream_list = list(streams)
+        devices = [str(getattr(stream, 'device', 'unknown')) for stream in stream_list]
+        if len(set(devices)) > 1:
+            raise RuntimeError(
+                '[MiniMaxH3 LongMedia][AV DEVICE CONTRACT] '
+                f'{context}: pack_latents requires one device, got {devices}. '
+                'Resolve the producing-stage handoff instead of moving the whole AV latent to CUDA.'
+            )
+        return stream_list
+
+    @classmethod
+    def _pack_native_streams(cls, streams, *, context: str):
+        import comfy.utils
+        stream_list = cls._validate_native_stream_devices(streams, context=context)
+        return comfy.utils.pack_latents(stream_list)
+
+    @staticmethod
     def _run_stock_sample_with_reused_lifecycle(
         guider, device, noise, latent_image, sampler, sigmas, denoise_mask,
         callback, disable_pbar, seed,
@@ -22217,6 +22243,9 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
         if len(streams) != 2:
             raise RuntimeError(f'Internal Sampler #2 expected 2 AV streams, got {len(streams)}.')
         source_video, source_audio = streams
+        self._validate_native_stream_devices(
+            streams, context='internal_sampler2_source'
+        )
         saved_original_conds = getattr(guider, 'original_conds', None)
         saved_conds = getattr(guider, 'conds', None)
         saved_model_options = getattr(guider, 'model_options', None)
@@ -22343,7 +22372,34 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                     )
                 # Hard output contract: Stage 2 never rewrites audio, even if a
                 # sampler implementation introduces numerical changes under mask=0.
-                result = comfy.nested_tensor.NestedTensor((refined_streams[0], source_audio))
+                #
+                # CFGGuider.sample() executes the monolithic solve on ``device`` and
+                # can therefore return VIDEO on CUDA even when Stage-1 ``source_native``
+                # is CPU/offloaded.  Re-attaching exact Stage-1 audio at that point used
+                # to create NestedTensor(cuda_video, cpu_audio), which then exploded in
+                # pack_latents(torch.cat).  The correct handoff is the same one already
+                # used by the windowed path: return refined VIDEO to Stage-1 VIDEO's
+                # storage device/dtype, while preserving the exact Stage-1 AUDIO object.
+                # This is an offload/ownership repair, not a math change, and never moves
+                # the large AV latent wholesale onto CUDA just to make packing succeed.
+                refined_video = refined_streams[0]
+                if (refined_video.device != source_video.device
+                        or refined_video.dtype != source_video.dtype):
+                    _lm_print(
+                        '[MiniMaxH3 LongMedia][INTERNAL SAMPLER2 DEVICE HANDOFF] '
+                        f'video={refined_video.device}/{refined_video.dtype}'
+                        f'->{source_video.device}/{source_video.dtype}; '
+                        f'audio={source_audio.device}/{source_audio.dtype}; '
+                        'audio_passthrough=stage1_exact; policy=restore_stage1_storage',
+                        flush=True,
+                    )
+                    refined_video = refined_video.to(
+                        device=source_video.device, dtype=source_video.dtype
+                    )
+                result = comfy.nested_tensor.NestedTensor((refined_video, source_audio))
+                self._validate_native_stream_devices(
+                    result.unbind(), context='internal_sampler2_exact_return'
+                )
                 _restore_guider_state()
                 return result
             except torch.OutOfMemoryError:
@@ -23665,7 +23721,7 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                     stage1_audio_exact = None
                     if getattr(sampled_native, 'is_nested', False):
                         sampled_streams = list(sampled_native.unbind())
-                        sampled_packed, _ = comfy.utils.pack_latents(sampled_streams)
+                        sampled_packed, _ = self._pack_native_streams(sampled_streams, context='stage1_sample_output')
                         if bool(latent_hires_enabled):
                             if len(sampled_streams) != 2:
                                 raise RuntimeError(
@@ -23709,7 +23765,7 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                         lowres_x0 = comfy.nested_tensor.NestedTensor((x0_streams[0], stage1_audio_bridge))
                         x0_streams = list(lowres_x0.unbind())
                         x0_shapes = [x.shape for x in x0_streams]
-                        x0_packed, _ = comfy.utils.pack_latents(x0_streams)
+                        x0_packed, _ = self._pack_native_streams(x0_streams, context='stage1_x0_continuation')
                         base_continuation_output = self._unpack_segment_output(local, x0_packed, x0_shapes)
                     else:
                         base_continuation_output = self._unpack_segment_output(local, sampled_packed, latent_shapes)
@@ -23739,7 +23795,7 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                         )
                         sampled_native = comfy.nested_tensor.NestedTensor((hires_video, hires_audio))
                         latent_shapes = [x.shape for x in sampled_native.unbind()]
-                        sampled_packed, _ = comfy.utils.pack_latents(sampled_native.unbind())
+                        sampled_packed, _ = self._pack_native_streams(sampled_native.unbind(), context='latent_hires_stage2_input')
                         _lm_print(
                             '[MiniMaxH3 LongMedia][LATENT HIRES X0] '
                             f'video_after={tuple(hires_video.shape)}; audio_shape={tuple(hires_audio.shape)}; '
@@ -23772,7 +23828,7 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                             geometry_changed=bool(latent_hires_enabled),
                             windowed_refine=bool(windowed_refine),
                         )
-                        sampled_packed, _ = comfy.utils.pack_latents(sampled_native.unbind())
+                        sampled_packed, _ = self._pack_native_streams(sampled_native.unbind(), context='internal_sampler2_output')
                         latent_shapes = [x.shape for x in sampled_native.unbind()]
                         _lm_print(
                             '[MiniMaxH3 LongMedia][INTERNAL SAMPLER2 COMPLETE] '
@@ -23898,7 +23954,7 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                             sampled_native = comfy.nested_tensor.NestedTensor((
                                 merged_video, detail_base_audio
                             ))
-                            sampled_packed, _ = comfy.utils.pack_latents(sampled_native.unbind())
+                            sampled_packed, _ = self._pack_native_streams(sampled_native.unbind(), context='reconstruction_detail_output')
                             latent_shapes = [x.shape for x in sampled_native.unbind()]
                             _lm_print(
                                 '[MiniMaxH3 LongMedia][RECON DETAIL LAYER] '
@@ -24144,7 +24200,7 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                                                 _mr_working_video, _mr_base_audio,
                                             ))
                                             latent_shapes = [x.shape for x in sampled_native.unbind()]
-                                            sampled_packed, _ = comfy.utils.pack_latents(sampled_native.unbind())
+                                            sampled_packed, _ = self._pack_native_streams(sampled_native.unbind(), context='motion_repair_output')
                                             _mr_report['applied'] = True
                                             _mr_report['reason'] = 'selective_window_temporal_repair_completed'
                                             _mr_report['windows_applied'] = _mr_windows_applied

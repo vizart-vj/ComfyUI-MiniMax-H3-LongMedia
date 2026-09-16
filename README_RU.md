@@ -4,7 +4,7 @@ Production-oriented ComfyUI nodes для **MiniMax H3**: long-form video/audio g
 
 ![screenshot](ex.png)
 
-**Текущий релиз: 0.6.40.**
+**Текущий релиз: 0.6.41.**
 
 ## Документация
 
@@ -90,7 +90,7 @@ longest_input
 
 См. [Режимы LongMedia](docs/MODES_GUIDE_RU.md).
 
-## LongMedia Director 0.6.40
+## LongMedia Director 0.6.41
 
 Director — unified authoring surface для MAIN timing, prompts, WHO & WHAT media, ролей REF/FIRST/LAST, cameras, temporal embeddings, audio policy, resolution policy, Program Monitor и TAKE management.
 

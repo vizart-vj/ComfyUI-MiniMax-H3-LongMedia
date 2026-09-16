@@ -1,4 +1,4 @@
-# LongMedia Director 0.6.40 — Complete Guide
+# LongMedia Director 0.6.41 — Complete Guide
 
 LongMedia Director is the timeline-oriented authoring surface for **MiniMax H3 • LongMedia**. It combines shot timing, semantic references, FIRST/LAST frame anchors, cameras, temporal embeddings, audio policy, preview/review and TAKE management in one Director document.
 
