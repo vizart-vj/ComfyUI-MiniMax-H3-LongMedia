@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.42
+
+- Restored a real high-VRAM/native H3 compute path: `memory_mode=normal` now preserves Sampler MLP/VRAM controls instead of silently forcing low-VRAM floors and caps.
+- `mlp_chunk_tokens=0` now truly disables LongMedia MLP chunking; compatible `normal + existing + guards=0` runs can execute stock ComfyUI H3 DiT blocks without the LongMedia block wrapper.
+- Manual MLP chunk values up to the public 131072-token limit now reach runtime in `normal`, while `low_vram` and `ultra_low_vram` retain bounded safety envelopes and still honor explicit zero/off controls.
+- Corrected Sampler diagnostics so requested, policy-effective and runtime compute settings are distinguishable; inactive Sol controls no longer report Sol streaming/implementation as active.
+
 ## 0.6.41
 
 - Fixed the monolithic Stage-2 Refiner AV device handoff: refined video is restored to the Stage-1 storage device/dtype before native AV repacking, while exact Stage-1 audio remains untouched.

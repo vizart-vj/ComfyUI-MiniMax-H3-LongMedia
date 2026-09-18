@@ -1458,7 +1458,7 @@
       }
     },
     "longmedia_director_p1": {
-      "version": "0.6.41",
+      "version": "0.6.42",
       "semantic_timeline": true,
       "setup_timeline_mode": "multiclip",
       "note": "WHO & WHAT names Setup numbered media slots; Director timeline, camera transitions and media are passed to Setup through one director connection."

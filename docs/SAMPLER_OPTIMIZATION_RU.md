@@ -1,6 +1,6 @@
 # Sampler, VRAM и производительность
 
-Рекомендации для текущей ветки LongMedia 0.6.41.
+Рекомендации для текущей ветки LongMedia 0.6.42.
 
 ## Production default
 
@@ -28,7 +28,7 @@ LongMedia рассчитывает на coordinated dynamic residency больш
 Рекомендуется. Выбирает профиль по model size, quantization/backend, VRAM и packed sequence geometry.
 
 ### `normal`
-Используйте только если model + activation workspace уверенно помещаются.
+Используйте, если model + activation workspace уверенно помещаются. В 0.6.42 это **user-authoritative high-VRAM профиль**: значения chunk/reserve/guard из Sampler сохраняются и больше не подменяются low-VRAM floors. `mlp_chunk_tokens=0` реально отключает LongMedia MLP chunking. При `attention_mode=existing`, `vram_activation_reserve_mb=0` и отключённых block/step guards resident-модель может идти через stock ComfyUI H3 DiT block path.
 
 ### `low_vram`
 Более жёсткие activation/residency limits и агрессивнее chunking.
@@ -100,6 +100,8 @@ late_block_guard_start
 late_block_guard_target_mb
 step_boundary_cleanup_mb
 ```
+
+В `normal` значение `0` является настоящим выключателем MLP chunking и тех VRAM guards/reserves, где UI допускает ноль. Положительные MLP значения до 131072 доходят до runtime без скрытого cap, поэтому 8192/16384/32768/65536/131072 становятся реальными A/B compute settings. `low_vram` и `ultra_low_vram` сохраняют bounded safety caps.
 
 Не уменьшайте все chunks заранее. Начните с Auto и меняйте по одному pressure point.
 

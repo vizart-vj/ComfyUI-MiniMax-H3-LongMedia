@@ -4754,24 +4754,37 @@ def _h3_runtime_auto_policy(
     sol_qkv_chunk_tokens,
     sol_out_proj_chunk_tokens,
     vram_activation_reserve_mb,
+    memory_mode='normal',
 ):
-    """Return conservative backend-aware startup settings.
+    """Return backend-aware startup settings without falsifying user controls.
 
-    NVFP4 is the proven reference path and is intentionally left untouched.
-    INT8/BF16-class backends start with more activation headroom and smaller
-    activation chunks; block0 AUTO VRAM still adapts guards after the first
-    successful block.
+    ``normal`` is the high-VRAM / user-authoritative compute profile: values
+    arriving from the public Sampler are preserved exactly, including 0 meaning
+    disabled.  ``low_vram`` and ``ultra_low_vram`` retain the conservative
+    backend caps below because those profiles explicitly trade throughput for
+    bounded activation memory.
     """
     backend = str(backend or 'unknown').lower()
 
     policy = {
         'backend': backend,
         'name': 'user-defaults',
+        'memory_mode': str(memory_mode or 'normal'),
         'chunk_tokens': int(chunk_tokens),
         'sol_qkv_chunk_tokens': int(sol_qkv_chunk_tokens),
         'sol_out_proj_chunk_tokens': int(sol_out_proj_chunk_tokens),
         'vram_activation_reserve_mb': int(vram_activation_reserve_mb),
     }
+
+    # High-VRAM NORMAL must be a real tuning surface.  Previous releases first
+    # accepted up to 131072 in the widget and then silently clamped INT8/BF16
+    # back to 8K-16K here.  Preserve the requested values all the way to the
+    # block runtime; pressure-driven demotion remains available only when a
+    # bounded low-VRAM profile was explicitly/automatically selected.
+    if str(memory_mode or 'normal') == 'normal':
+        policy['name'] = f'{backend}-normal-user-authoritative'
+        policy['quant_variant'] = str(quant_variant or '').lower() or None
+        return policy
 
     if backend == 'nvfp4':
         policy['name'] = 'nvfp4-proven'
@@ -9297,7 +9310,7 @@ class _H3MLPChunkPatch:
     def __init__(self, index, state, chunk_tokens=8192):
         self.index = int(index)
         self.state = state
-        self.chunk_tokens = max(256, int(chunk_tokens))
+        self.chunk_tokens = max(256, int(chunk_tokens)) if int(chunk_tokens) > 0 else 0
 
     @staticmethod
     def _extract_block(original_block):
@@ -9628,6 +9641,13 @@ class _H3MLPChunkPatch:
         state = self.state
         if not bool(state.get('adaptive_memory_governor_enabled', True)):
             return
+        # NORMAL is the explicit high-VRAM/user-authoritative profile.  Its
+        # Sampler values must remain stable across blocks so A/B tuning changes
+        # the actual compute path instead of being silently replaced by the
+        # adaptive low-VRAM ladder. Emergency OOM behavior remains owned by the
+        # selected ComfyUI backend and any explicitly enabled guards.
+        if bool(state.get('normal_user_authoritative', False)):
+            return
         if not torch.cuda.is_available():
             return
         try:
@@ -9854,13 +9874,17 @@ class _H3MLPChunkPatch:
             )
 
     def _auto_vram_controller_after_probe(self, token_count):
-        """TEST controller: tune runtime memory knobs once after block 0.
+        """Tune bounded-profile runtime knobs once after block 0.
 
-        User values are treated as the SAFE baseline.  The controller only
-        becomes more aggressive when block 0 completed successfully and the
-        post-block memory snapshot shows meaningful recoverable headroom.
+        NORMAL is intentionally excluded: it is the high-VRAM/user-authoritative
+        profile and must preserve the public Sampler values exactly. LOW/ULTRA
+        keep the measured post-block safety controller.
         """
         state = self.state
+        if bool(state.get('normal_user_authoritative', False)):
+            state['auto_vram_controller_done'] = True
+            state['auto_vram_controller_mode'] = 'USER_NORMAL'
+            return
         if self.index != 0 or state.get('auto_vram_controller_done'):
             return
         state['auto_vram_controller_done'] = True
@@ -10469,10 +10493,22 @@ class _H3MLPChunkPatch:
         token_count = int(x.shape[0])
         self.state['current_token_count'] = token_count
         self.state['last_token_count'] = token_count
+        state = self.state
+
+        # 0 is a real OFF switch.  Keep the surrounding LongMedia attention /
+        # memory wrapper when other controls require it, but execute the H3 FFN
+        # exactly as stock ComfyUI does: one full norm2 -> MLP -> gated residual.
+        # This avoids turning ``0`` into a hidden 256/512-token chunk.
+        if not bool(state.get('mlp_chunking_enabled', self.chunk_tokens > 0)):
+            state['stock_mlp_math'] = True
+            state['mlp_monolithic_calls'] = int(state.get('mlp_monolithic_calls', 0) or 0) + 1
+            state['max_sequence_tokens'] = max(int(state.get('max_sequence_tokens', 0)), token_count)
+            h = self._mod_scale_shift(block.norm2(x), shift, scale, segments)
+            return self._mod_gate(x, gate, block.mlp(h), segments)
+
         # AUTO controller may raise/lower the runtime MLP chunk after
         # block-0 calibration.  self.chunk_tokens remains the user/manual fallback.
         runtime_chunk_tokens = int(self.state.get('chunk_tokens', self.chunk_tokens) or self.chunk_tokens)
-        state = self.state
         _ultra_streaming = str(state.get('memory_mode', 'normal')) == 'ultra_low_vram'
         _chunk_floor = 64 if _ultra_streaming else 256
         chunk_tokens = min(max(_chunk_floor, runtime_chunk_tokens), max(1, token_count))
@@ -12004,7 +12040,7 @@ class MiniMaxH3LatentLabMLPChunking:
         return {
             'required': {
                 'guider': ('GUIDER',),
-                'chunk_tokens': ('INT', {'default': 8192, 'min': 256, 'max': 131072, 'step': 256}),
+                'chunk_tokens': ('INT', {'default': 8192, 'min': 0, 'max': 131072, 'step': 256}),
                 'max_blocks': ('INT', {'default': 128, 'min': 1, 'max': 256, 'step': 1}),
                 'sol_mode': (['auto', 'existing', 'sol_h3', 'sol', 'scheduled_sol'], {'default': 'existing'}),
                 'sol_tau_start': ('FLOAT', {'default': 1.3, 'min': 0.0, 'max': 4.0, 'step': 0.05}),
@@ -12106,6 +12142,7 @@ class MiniMaxH3LatentLabMLPChunking:
             sol_qkv_chunk_tokens=sol_qkv_chunk_tokens,
             sol_out_proj_chunk_tokens=sol_out_proj_chunk_tokens,
             vram_activation_reserve_mb=vram_activation_reserve_mb,
+            memory_mode=str(memory_mode),
         )
 
         # Apply startup policy locally.  Public node inputs and workflow ABI stay
@@ -12440,7 +12477,8 @@ class MiniMaxH3LatentLabMLPChunking:
             'model_runtime_policy': dict(runtime_policy),
             'memory_mode': str(memory_mode),
             'requested_memory_mode': str(requested_memory_mode),
-            'adaptive_memory_governor_enabled': True,
+            'normal_user_authoritative': str(memory_mode) == 'normal',
+            'adaptive_memory_governor_enabled': str(memory_mode) != 'normal',
             'adaptive_memory_zone': 'CALIBRATION_SAFE',
             'memory_policy_mode': str(memory_mode),
             'model_size_bytes': int(_model_size_b or 0),
@@ -12448,9 +12486,12 @@ class MiniMaxH3LatentLabMLPChunking:
             'stock_transformer_math': True,
             'adaptive_memory_adjustments': 0,
             'ultra_stage_barrier_required': True,
-            # V29 backend-aware throughput AUTO MLP controller. NVFP4 remains on the
-            # proven fixed path; W4A8 adapts up to 8192 tokens from actual CUDA headroom.
-            'auto_mlp_chunk_enabled': str(runtime_profile.get('quant_variant') or '').lower() == 'w4a8',
+            # V29 backend-aware AUTO MLP controller remains available only in
+            # bounded profiles. NORMAL must not rewrite a manual chunk request.
+            'auto_mlp_chunk_enabled': (
+                str(memory_mode) != 'normal'
+                and str(runtime_profile.get('quant_variant') or '').lower() == 'w4a8'
+            ),
             'auto_mlp_chunk_last': None,
             'auto_mlp_chunk_changes': 0,
             'auto_mlp_chunk_safety_mb': 640,
@@ -12625,7 +12666,10 @@ class MiniMaxH3LatentLabMLPChunking:
             'oom_block': None,
             'oom_message': None,
             'oom_stats': None,
+            'mlp_chunking_enabled': int(chunk_tokens) > 0,
+            'mlp_chunk_tokens_requested_at_wrapper': int(chunk_tokens),
             'mlp_chunked_calls': 0,
+            'mlp_monolithic_calls': 0,
             'max_sequence_tokens': 0,
             'max_chunks_per_mlp': 0,
             'announced': False,
@@ -12717,13 +12761,35 @@ class MiniMaxH3LatentLabMLPChunking:
             )
             state['v28_native_quant_announced'] = True
 
-        for i in range(int(max_blocks)):
-            key = ('double_block', i)
-            if key in dit:
-                state['skipped_existing_patch_indices'].append(i)
-                continue
-            dit[key] = _H3MLPChunkPatch(i, state, chunk_tokens=int(chunk_tokens))
-            state['patched_block_indices'].append(i)
+        _native_block_passthrough = bool(
+            str(memory_mode) == 'normal'
+            and str(sol_mode).lower() == 'existing'
+            and int(chunk_tokens) <= 0
+            and int(vram_activation_reserve_mb) <= 0
+            and int(inter_block_vram_guard_mb) <= 0
+            and int(inter_block_guard_emergency_mb) <= 0
+            and int(late_block_guard_target_mb) <= 0
+            and int(step_boundary_cleanup_mb) <= 0
+            and not _out_of_core_streaming
+            and not isinstance(_fasth3_contract, dict)
+            and not isinstance(_fastvideo_vsa_contract, dict)
+        )
+        state['native_block_passthrough'] = bool(_native_block_passthrough)
+        if _native_block_passthrough:
+            _lm_print(
+                '[MiniMaxH3 LongMedia][NATIVE COMPUTE PASSTHROUGH] '
+                'MLP chunking=OFF, attention=EXISTING, activation reserve/guards=OFF, model resident; '
+                'stock ComfyUI H3 DiT blocks execute without LongMedia block replacement',
+                flush=True,
+            )
+        else:
+            for i in range(int(max_blocks)):
+                key = ('double_block', i)
+                if key in dit:
+                    state['skipped_existing_patch_indices'].append(i)
+                    continue
+                dit[key] = _H3MLPChunkPatch(i, state, chunk_tokens=int(chunk_tokens))
+                state['patched_block_indices'].append(i)
         if state['patched_block_indices']:
             state['last_patched_block_index'] = max(
                 state['patched_block_indices']
@@ -12747,8 +12813,13 @@ class MiniMaxH3LatentLabMLPChunking:
                 + ','.join(map(str, state['skipped_existing_patch_indices'])),
                 flush=True,
             )
-        if hasattr(wrapped, 'model_patcher'):
-            _install_h3_final_output_streaming(wrapped.model_patcher, state, chunk_tokens=int(chunk_tokens))
+        if hasattr(wrapped, 'model_patcher') and not _native_block_passthrough:
+            # MLP=0 disables MLP chunking; it must not accidentally force the
+            # independent FP32 final-head streamer down to a pathological 256
+            # token window. Keep its established 24K baseline unless MLP has an
+            # explicit positive chunk request.
+            _final_chunk = int(chunk_tokens) if int(chunk_tokens) > 0 else 24576
+            _install_h3_final_output_streaming(wrapped.model_patcher, state, chunk_tokens=_final_chunk)
         return (wrapped, state)
 
 
@@ -13314,6 +13385,17 @@ class MiniMaxH3LatentLabVRAMCacheCleanup:
                 'oom_stats': block_trace_state.get('oom_stats'),
                 'activation_reserve': block_trace_state.get('activation_reserve'),
                 'vram_activation_reserve_mb': block_trace_state.get('vram_activation_reserve_mb'),
+                'native_block_passthrough': bool(block_trace_state.get('native_block_passthrough', False)),
+                'requested_attention_mode': block_trace_state.get('requested_attention_mode'),
+                'runtime_attention_mode': block_trace_state.get('auto_attention_selected_mode') or block_trace_state.get('sol_mode'),
+                'sol_calls': int(block_trace_state.get('sol_calls', 0) or 0),
+                'mlp_chunking_enabled': bool(block_trace_state.get('mlp_chunking_enabled', False)),
+                'mlp_chunk_tokens_runtime': int(block_trace_state.get('chunk_tokens', 0) or 0),
+                'auto_mlp_chunk_last': block_trace_state.get('auto_mlp_chunk_last'),
+                'mlp_chunked_calls': int(block_trace_state.get('mlp_chunked_calls', 0) or 0),
+                'mlp_monolithic_calls': int(block_trace_state.get('mlp_monolithic_calls', 0) or 0),
+                'max_chunks_per_mlp': int(block_trace_state.get('max_chunks_per_mlp', 0) or 0),
+                'stock_mlp_math': bool(block_trace_state.get('stock_mlp_math', False)),
                 'step_boundary_transitions': list(block_trace_state.get('step_boundary_transitions', [])),
                 'step_boundary_forward_times': list(block_trace_state.get('step_boundary_forward_times', [])),
             }
@@ -25222,6 +25304,20 @@ class MiniMaxH3LatentLabLongMediaSampler:
             )
 
         sampler_mode = str(sampler_mode or 'auto')
+        requested_controls = {
+            'mlp_chunk_tokens': int(mlp_chunk_tokens),
+            'sol_qkv_chunk_tokens': int(sol_qkv_chunk_tokens),
+            'sol_out_proj_chunk_tokens': int(sol_out_proj_chunk_tokens),
+            'vram_activation_reserve_mb': int(vram_activation_reserve_mb),
+            'inter_block_vram_guard_mb': int(inter_block_vram_guard_mb),
+            'inter_block_guard_cooldown_blocks': int(inter_block_guard_cooldown_blocks),
+            'inter_block_guard_emergency_mb': int(inter_block_guard_emergency_mb),
+            'inter_block_guard_emergency_cooldown_blocks': int(inter_block_guard_emergency_cooldown_blocks),
+            'late_block_guard_start': int(late_block_guard_start),
+            'late_block_guard_target_mb': int(late_block_guard_target_mb),
+            'late_block_guard_min_cached_mb': int(late_block_guard_min_cached_mb),
+            'step_boundary_cleanup_mb': int(step_boundary_cleanup_mb),
+        }
         requested_memory_mode = str(memory_mode or 'auto')
         memory_profile = _resolve_h3_memory_mode(guider, requested_memory_mode)
         memory_mode = str(memory_profile['effective'])
@@ -25238,25 +25334,37 @@ class MiniMaxH3LatentLabLongMediaSampler:
         except Exception:
             _ram_avail_gb = 0.0
         offload_completed_segments = True if memory_mode in ('low_vram','ultra_low_vram') or _ratio > 1.0 else bool(offload_completed_segments)
+        def _clamp(value, lo, hi):
+            return max(int(lo), min(int(value), int(hi)))
+
+        def _bounded_nonzero(value, lo, hi):
+            value = int(value)
+            return 0 if value <= 0 else _clamp(value, lo, hi)
+
         if memory_mode == 'normal':
-            vram_activation_reserve_mb = max(256, min(int(vram_activation_reserve_mb), 768))
-            inter_block_vram_guard_mb = max(768, min(int(inter_block_vram_guard_mb), 1280))
-            late_block_guard_target_mb = max(1792, min(int(late_block_guard_target_mb), 3072))
-            step_boundary_cleanup_mb = max(1024, min(int(step_boundary_cleanup_mb), 1792))
-            mlp_chunk_tokens = min(max(int(mlp_chunk_tokens), 512), 8192)
+            # NORMAL is now genuinely user-authoritative.  Values are limited only
+            # by the public widget ABI; importantly every documented 0=disabled
+            # setting remains zero and MLP may use the full 131072-token range.
+            vram_activation_reserve_mb = _clamp(vram_activation_reserve_mb, 0, 12288)
+            inter_block_vram_guard_mb = _clamp(inter_block_vram_guard_mb, 0, 8192)
+            late_block_guard_target_mb = _clamp(late_block_guard_target_mb, 0, 12288)
+            step_boundary_cleanup_mb = _clamp(step_boundary_cleanup_mb, 0, 8192)
+            mlp_chunk_tokens = _clamp(mlp_chunk_tokens, 0, 131072)
         elif memory_mode == 'low_vram':
-            vram_activation_reserve_mb = max(768, min(int(vram_activation_reserve_mb), 1536))
-            inter_block_vram_guard_mb = max(1280, min(int(inter_block_vram_guard_mb), 2048))
-            late_block_guard_target_mb = max(2560, min(int(late_block_guard_target_mb), 4096))
-            step_boundary_cleanup_mb = max(1536, min(int(step_boundary_cleanup_mb), 2560))
-            mlp_chunk_tokens = min(max(int(mlp_chunk_tokens), 256), 4096)
+            # Bounded profiles keep their safety envelopes, but explicit OFF is
+            # still respected instead of being silently converted to a floor.
+            vram_activation_reserve_mb = _bounded_nonzero(vram_activation_reserve_mb, 768, 1536)
+            inter_block_vram_guard_mb = _bounded_nonzero(inter_block_vram_guard_mb, 1280, 2048)
+            late_block_guard_target_mb = _bounded_nonzero(late_block_guard_target_mb, 2560, 4096)
+            step_boundary_cleanup_mb = _bounded_nonzero(step_boundary_cleanup_mb, 1536, 2560)
+            mlp_chunk_tokens = _bounded_nonzero(mlp_chunk_tokens, 256, 4096)
         else:  # ultra_low_vram
-            vram_activation_reserve_mb = max(1792, min(int(vram_activation_reserve_mb), 2816))
-            inter_block_vram_guard_mb = max(2048, min(int(inter_block_vram_guard_mb), 3072))
-            late_block_guard_target_mb = max(3328, min(int(late_block_guard_target_mb), 4608))
-            step_boundary_cleanup_mb = max(2048, min(int(step_boundary_cleanup_mb), 3072))
-            inter_block_guard_cooldown_blocks = min(max(int(inter_block_guard_cooldown_blocks), 1), 3)
-            mlp_chunk_tokens = min(max(int(mlp_chunk_tokens), 128), 2048)
+            vram_activation_reserve_mb = _bounded_nonzero(vram_activation_reserve_mb, 1792, 2816)
+            inter_block_vram_guard_mb = _bounded_nonzero(inter_block_vram_guard_mb, 2048, 3072)
+            late_block_guard_target_mb = _bounded_nonzero(late_block_guard_target_mb, 3328, 4608)
+            step_boundary_cleanup_mb = _bounded_nonzero(step_boundary_cleanup_mb, 2048, 3072)
+            inter_block_guard_cooldown_blocks = _clamp(inter_block_guard_cooldown_blocks, 0, 3)
+            mlp_chunk_tokens = _bounded_nonzero(mlp_chunk_tokens, 128, 2048)
 
         _lm_print('[MiniMaxH3 LongMedia][MEMORY POLICY V3] '
             f"requested={memory_profile['requested']} effective={memory_mode}; model={(float(_ms)/(1024**3)) if _ms else 0.0:.1f}GB GPU={(float(_gs)/(1024**3)) if _gs else 0.0:.1f}GB; "
@@ -25301,9 +25409,9 @@ class MiniMaxH3LatentLabLongMediaSampler:
                 f'mlp_chunk={int(mlp_chunk_tokens)}',
                 flush=True,
             )
-        requested_mlp_chunk_tokens = int(mlp_chunk_tokens)
-        effective_mlp_chunk_tokens = requested_mlp_chunk_tokens if requested_mlp_chunk_tokens > 0 else (1 << 30)
-        mlp_chunking_enabled = requested_mlp_chunk_tokens > 0
+        requested_mlp_chunk_tokens = int(requested_controls['mlp_chunk_tokens'])
+        effective_mlp_chunk_tokens = int(mlp_chunk_tokens)
+        mlp_chunking_enabled = effective_mlp_chunk_tokens > 0
         try:
             _sig = sigmas.detach().float().cpu() if torch.is_tensor(sigmas) else torch.as_tensor(sigmas, dtype=torch.float32)
             sol_sigma_hi = float(_sig[0]) if _sig.numel() else 1.0
@@ -25314,7 +25422,7 @@ class MiniMaxH3LatentLabLongMediaSampler:
         mlp_chunker = graph.node(
             "MiniMaxH3LatentLabMLPChunking",
             guider=guider,
-            chunk_tokens=effective_mlp_chunk_tokens,
+            chunk_tokens=int(effective_mlp_chunk_tokens),
             max_blocks=128,
             sol_mode=str(attention_mode),
             sol_tau_start=float(sol_tau_start),
@@ -25496,6 +25604,21 @@ class MiniMaxH3LatentLabLongMediaSampler:
                 "reason": str(memory_profile.get('reason')),
                 "model_gb": (round(float(memory_profile.get('model_bytes')) / (1024**3), 3) if memory_profile.get('model_bytes') else None),
                 "gpu_gb": (round(float(memory_profile.get('gpu_bytes')) / (1024**3), 3) if memory_profile.get('gpu_bytes') else None),
+                "user_controls": dict(requested_controls),
+                "policy_effective_controls": {
+                    "mlp_chunk_tokens": int(effective_mlp_chunk_tokens),
+                    "sol_qkv_chunk_tokens": int(sol_qkv_chunk_tokens),
+                    "sol_out_proj_chunk_tokens": int(sol_out_proj_chunk_tokens),
+                    "vram_activation_reserve_mb": int(vram_activation_reserve_mb),
+                    "inter_block_vram_guard_mb": int(inter_block_vram_guard_mb),
+                    "inter_block_guard_cooldown_blocks": int(inter_block_guard_cooldown_blocks),
+                    "inter_block_guard_emergency_mb": int(inter_block_guard_emergency_mb),
+                    "inter_block_guard_emergency_cooldown_blocks": int(inter_block_guard_emergency_cooldown_blocks),
+                    "late_block_guard_start": int(late_block_guard_start),
+                    "late_block_guard_target_mb": int(late_block_guard_target_mb),
+                    "late_block_guard_min_cached_mb": int(late_block_guard_min_cached_mb),
+                    "step_boundary_cleanup_mb": int(step_boundary_cleanup_mb),
+                },
             },
             "transport_policy": {
                 "sampler_pinned_memory_fastpath": "recent_aimdo_native_tensorwise_int8_preserve_user_pins",
@@ -25503,10 +25626,11 @@ class MiniMaxH3LatentLabLongMediaSampler:
                 "giant_int8_mlp_floor": "post_block0_probe_2048_if_90k_150k_and_headroom",
             },
             "low_vram_mlp": {
-                "mode": "token_chunk_exact",
+                "mode": ("token_chunk_exact" if mlp_chunking_enabled else "disabled_stock_mlp"),
                 "enabled": bool(mlp_chunking_enabled),
                 "chunk_tokens_requested": int(requested_mlp_chunk_tokens),
                 "chunk_tokens_effective": int(effective_mlp_chunk_tokens),
+                "normal_mode_user_authoritative": bool(memory_mode == "normal"),
                 "attention_unchanged": str(attention_mode) in ("auto", "existing", "sol_h3"),
             },
             "attention": {
@@ -25534,9 +25658,9 @@ class MiniMaxH3LatentLabLongMediaSampler:
                 "sol_dense_percent": float(sol_dense_percent),
                 "sol_sink_conditioning": str(sol_sink_conditioning),
                 "sol_qkv_chunk_tokens": int(sol_qkv_chunk_tokens),
-                "sol_qkv_streaming_enabled": int(sol_qkv_chunk_tokens) > 0,
+                "sol_qkv_streaming_enabled": bool(str(attention_mode) in ("sol", "scheduled_sol") and int(sol_qkv_chunk_tokens) > 0),
                 "sol_out_proj_chunk_tokens": int(sol_out_proj_chunk_tokens),
-                "sol_out_proj_chunking_enabled": int(sol_out_proj_chunk_tokens) > 0,
+                "sol_out_proj_chunking_enabled": bool(str(attention_mode) in ("sol", "scheduled_sol") and int(sol_out_proj_chunk_tokens) > 0),
                 "vram_activation_reserve_mb": int(vram_activation_reserve_mb),
                 "inter_block_vram_guard_mb": int(inter_block_vram_guard_mb),
                 "inter_block_guard_cooldown_blocks": int(inter_block_guard_cooldown_blocks),
@@ -25547,7 +25671,15 @@ class MiniMaxH3LatentLabLongMediaSampler:
                 "late_block_guard_min_cached_mb": int(late_block_guard_min_cached_mb),
                 "step_boundary_cleanup_mb": int(step_boundary_cleanup_mb),
                 "mlp_inplace_reuse": True,
-                "implementation": "LongMedia embedded SM120 BF16 Sol-Attn (Apache-2.0 adapted)",
+                "implementation": (
+                    "LongMedia embedded SM120 BF16 Sol-Attn (Apache-2.0 adapted)"
+                    if str(attention_mode) in ("sol", "scheduled_sol")
+                    else (
+                        "ComfyUI H3 optimized_attention / exact Kitchen primary"
+                        if str(attention_mode) in ("existing", "sol_h3")
+                        else "AUTO runtime-resolved: ComfyUI existing or LongMedia bounded Sol"
+                    )
+                ),
             },
             "input_geometry": input_geometry,
             "total_frames": plan.output_frames,
