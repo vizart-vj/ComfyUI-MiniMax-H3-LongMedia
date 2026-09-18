@@ -1,50 +1,9 @@
 {
   "id": "7ffee890-e965-41b8-a8bd-05f3cc8e0568",
   "revision": 0,
-  "last_node_id": 147,
-  "last_link_id": 227,
+  "last_node_id": 150,
+  "last_link_id": 228,
   "nodes": [
-    {
-      "id": 9,
-      "type": "BasicGuider",
-      "pos": [
-        420,
-        -170
-      ],
-      "size": [
-        370,
-        50
-      ],
-      "flags": {},
-      "order": 13,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "model",
-          "type": "MODEL",
-          "link": 66
-        },
-        {
-          "name": "conditioning",
-          "type": "CONDITIONING",
-          "link": 60
-        }
-      ],
-      "outputs": [
-        {
-          "name": "GUIDER",
-          "type": "GUIDER",
-          "links": [
-            16
-          ]
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfy-core",
-        "ver": "0.30.1",
-        "Node name for S&R": "BasicGuider"
-      }
-    },
     {
       "id": 5,
       "type": "CLIPLoader",
@@ -106,7 +65,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 8,
+      "order": 11,
       "mode": 0,
       "inputs": [
         {
@@ -151,7 +110,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 7,
+      "order": 10,
       "mode": 0,
       "inputs": [
         {
@@ -282,7 +241,7 @@
         240
       ],
       "flags": {},
-      "order": 16,
+      "order": 19,
       "mode": 0,
       "inputs": [
         {
@@ -358,7 +317,7 @@
         110
       ],
       "flags": {},
-      "order": 14,
+      "order": 17,
       "mode": 0,
       "inputs": [
         {
@@ -474,205 +433,6 @@
       }
     },
     {
-      "id": 2,
-      "type": "MiniMaxH3LatentLabLongMediaSampler",
-      "pos": [
-        820,
-        -210
-      ],
-      "size": [
-        450,
-        480
-      ],
-      "flags": {},
-      "order": 15,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "initial_av",
-          "type": "LATENT",
-          "link": 210
-        },
-        {
-          "name": "long_media_plan",
-          "type": "LONG_MEDIA_PLAN",
-          "link": 2
-        },
-        {
-          "name": "guider",
-          "type": "GUIDER",
-          "link": 16
-        },
-        {
-          "name": "sampler",
-          "type": "SAMPLER",
-          "link": 17
-        },
-        {
-          "name": "sigmas",
-          "type": "SIGMAS",
-          "link": 18
-        },
-        {
-          "label": "Refine Sigmas",
-          "name": "refine_sigmas",
-          "shape": 7,
-          "type": "SIGMAS",
-          "link": null
-        }
-      ],
-      "outputs": [
-        {
-          "name": "final_av",
-          "type": "LATENT",
-          "slot_index": 0,
-          "links": [
-            211
-          ]
-        },
-        {
-          "name": "total_frames",
-          "type": "INT",
-          "slot_index": 1,
-          "links": null
-        },
-        {
-          "name": "trim_frames",
-          "type": "INT",
-          "slot_index": 2,
-          "links": null
-        },
-        {
-          "name": "passes",
-          "type": "INT",
-          "slot_index": 3,
-          "links": null
-        },
-        {
-          "name": "report",
-          "type": "STRING",
-          "slot_index": 4,
-          "links": null
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "MiniMaxH3LatentLabLongMediaSampler",
-        "lmSamplerUiLevel": "basic",
-        "__lm_hires_model_last_v040": "false",
-        "__lm_named_widget_state_v040": {
-          "seed": 42,
-          "control_after_generate": "randomize",
-          "video_context_denoise": 0,
-          "audio_context_denoise": 0,
-          "offload_completed_segments": true,
-          "mlp_chunk_tokens": 24576,
-          "attention_mode": "sol",
-          "sol_tau_start": 1.3,
-          "sol_tau_end": 0.8,
-          "sol_curve": "linear",
-          "sol_min_tokens": 4096,
-          "sol_dense_percent": 0,
-          "sol_sink_conditioning": "exact_kv",
-          "sol_qkv_chunk_tokens": 8192,
-          "sol_out_proj_chunk_tokens": 24576,
-          "vram_activation_reserve_mb": 4096,
-          "inter_block_vram_guard_mb": 2048,
-          "inter_block_guard_cooldown_blocks": 4,
-          "inter_block_guard_emergency_mb": 512,
-          "inter_block_guard_emergency_cooldown_blocks": 3,
-          "late_block_guard_start": 40,
-          "late_block_guard_target_mb": 6144,
-          "late_block_guard_min_cached_mb": 512,
-          "step_boundary_cleanup_mb": 2048,
-          "latent_hires_enabled": false,
-          "latent_hires_model": "(disabled)",
-          "latent_hires_scale": 1,
-          "latent_hires_precision": "fp32",
-          "latent_hires_align": 32,
-          "refine_enabled": true,
-          "refine_add_noise": false,
-          "refine_seed": 0,
-          "refine_steps": 2,
-          "memory_mode": "auto",
-          "sampler_mode": "auto"
-        }
-      },
-      "widgets_values": [
-        42,
-        "randomize",
-        0,
-        0,
-        true,
-        24576,
-        "sol",
-        1.3,
-        0.8,
-        "linear",
-        4096,
-        0,
-        "exact_kv",
-        8192,
-        24576,
-        4096,
-        2048,
-        4,
-        512,
-        3,
-        40,
-        6144,
-        512,
-        2048,
-        false,
-        "(disabled)",
-        1,
-        "fp32",
-        32,
-        true,
-        false,
-        0,
-        2,
-        "auto",
-        "auto"
-      ],
-      "widgets_values_named": {
-        "seed": 42,
-        "control_after_generate": "randomize",
-        "video_context_denoise": 0,
-        "audio_context_denoise": 0,
-        "offload_completed_segments": true,
-        "mlp_chunk_tokens": 24576,
-        "attention_mode": "sol",
-        "sol_tau_start": 1.3,
-        "sol_tau_end": 0.8,
-        "sol_curve": "linear",
-        "sol_min_tokens": 4096,
-        "sol_dense_percent": 0,
-        "sol_sink_conditioning": "exact_kv",
-        "sol_qkv_chunk_tokens": 8192,
-        "sol_out_proj_chunk_tokens": 24576,
-        "vram_activation_reserve_mb": 4096,
-        "inter_block_vram_guard_mb": 2048,
-        "inter_block_guard_cooldown_blocks": 4,
-        "inter_block_guard_emergency_mb": 512,
-        "inter_block_guard_emergency_cooldown_blocks": 3,
-        "late_block_guard_start": 40,
-        "late_block_guard_target_mb": 6144,
-        "late_block_guard_min_cached_mb": 512,
-        "step_boundary_cleanup_mb": 2048,
-        "latent_hires_enabled": false,
-        "latent_hires_model": "(disabled)",
-        "latent_hires_scale": 1,
-        "latent_hires_precision": "fp32",
-        "latent_hires_align": 32,
-        "refine_enabled": true,
-        "refine_add_noise": false,
-        "refine_seed": 0,
-        "refine_steps": 2,
-        "memory_mode": "auto",
-        "sampler_mode": "auto"
-      }
-    },
-    {
       "id": 16,
       "type": "VHS_VideoCombine",
       "pos": [
@@ -684,7 +444,7 @@
         340
       ],
       "flags": {},
-      "order": 17,
+      "order": 20,
       "mode": 0,
       "inputs": [
         {
@@ -846,7 +606,7 @@
       "flags": {
         "collapsed": false
       },
-      "order": 12,
+      "order": 15,
       "mode": 0,
       "inputs": [
         {
@@ -897,7 +657,7 @@
       "flags": {
         "collapsed": false
       },
-      "order": 11,
+      "order": 14,
       "mode": 0,
       "inputs": [
         {
@@ -940,7 +700,7 @@
       "flags": {
         "collapsed": false
       },
-      "order": 9,
+      "order": 12,
       "mode": 0,
       "inputs": [
         {
@@ -991,7 +751,7 @@
       "flags": {
         "collapsed": false
       },
-      "order": 10,
+      "order": 13,
       "mode": 0,
       "inputs": [
         {
@@ -1186,6 +946,437 @@
         "first_frame_denoise": 0.25,
         "first_frame_blend_frames": 3
       }
+    },
+    {
+      "id": 2,
+      "type": "MiniMaxH3LatentLabLongMediaSampler",
+      "pos": [
+        830,
+        -200
+      ],
+      "size": [
+        450,
+        504
+      ],
+      "flags": {},
+      "order": 18,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "initial_av",
+          "type": "LATENT",
+          "link": 210
+        },
+        {
+          "name": "long_media_plan",
+          "type": "LONG_MEDIA_PLAN",
+          "link": 2
+        },
+        {
+          "name": "guider",
+          "type": "GUIDER",
+          "link": 16
+        },
+        {
+          "name": "sampler",
+          "type": "SAMPLER",
+          "link": 17
+        },
+        {
+          "name": "sigmas",
+          "type": "SIGMAS",
+          "link": 18
+        },
+        {
+          "label": "Refine Sigmas",
+          "name": "refine_sigmas",
+          "shape": 7,
+          "type": "SIGMAS",
+          "link": 228
+        }
+      ],
+      "outputs": [
+        {
+          "name": "final_av",
+          "type": "LATENT",
+          "slot_index": 0,
+          "links": [
+            211
+          ]
+        },
+        {
+          "name": "total_frames",
+          "type": "INT",
+          "slot_index": 1,
+          "links": null
+        },
+        {
+          "name": "trim_frames",
+          "type": "INT",
+          "slot_index": 2,
+          "links": null
+        },
+        {
+          "name": "passes",
+          "type": "INT",
+          "slot_index": 3,
+          "links": null
+        },
+        {
+          "name": "report",
+          "type": "STRING",
+          "slot_index": 4,
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "MiniMaxH3LatentLabLongMediaSampler",
+        "lmSamplerUiLevel": "basic",
+        "__lm_hires_model_last_v040": "false",
+        "__lm_named_widget_state_v040": {
+          "seed": 42,
+          "control_after_generate": "randomize",
+          "video_context_denoise": 0,
+          "audio_context_denoise": 0,
+          "offload_completed_segments": true,
+          "mlp_chunk_tokens": 24576,
+          "attention_mode": "sol",
+          "sol_tau_start": 1.3,
+          "sol_tau_end": 0.8,
+          "sol_curve": "linear",
+          "sol_min_tokens": 4096,
+          "sol_dense_percent": 0,
+          "sol_sink_conditioning": "exact_kv",
+          "sol_qkv_chunk_tokens": 8192,
+          "sol_out_proj_chunk_tokens": 24576,
+          "vram_activation_reserve_mb": 4096,
+          "inter_block_vram_guard_mb": 2048,
+          "inter_block_guard_cooldown_blocks": 4,
+          "inter_block_guard_emergency_mb": 512,
+          "inter_block_guard_emergency_cooldown_blocks": 3,
+          "late_block_guard_start": 40,
+          "late_block_guard_target_mb": 6144,
+          "late_block_guard_min_cached_mb": 512,
+          "step_boundary_cleanup_mb": 2048,
+          "latent_hires_enabled": false,
+          "latent_hires_model": "(disabled)",
+          "latent_hires_scale": 1,
+          "latent_hires_precision": "fp32",
+          "latent_hires_align": 32,
+          "refine_enabled": true,
+          "refine_add_noise": false,
+          "refine_seed": 0,
+          "refine_steps": 2,
+          "memory_mode": "auto",
+          "sampler_mode": "auto",
+          "windowed_refine": true
+        }
+      },
+      "widgets_values": [
+        42,
+        "randomize",
+        0,
+        0,
+        true,
+        24576,
+        "sol",
+        1.3,
+        0.8,
+        "linear",
+        4096,
+        0,
+        "exact_kv",
+        8192,
+        24576,
+        4096,
+        2048,
+        4,
+        512,
+        3,
+        40,
+        6144,
+        512,
+        2048,
+        false,
+        "(disabled)",
+        1,
+        "fp32",
+        32,
+        true,
+        false,
+        0,
+        2,
+        "auto",
+        "auto",
+        true
+      ],
+      "widgets_values_named": {
+        "seed": 42,
+        "control_after_generate": "randomize",
+        "video_context_denoise": 0,
+        "audio_context_denoise": 0,
+        "offload_completed_segments": true,
+        "mlp_chunk_tokens": 24576,
+        "attention_mode": "sol",
+        "sol_tau_start": 1.3,
+        "sol_tau_end": 0.8,
+        "sol_curve": "linear",
+        "sol_min_tokens": 4096,
+        "sol_dense_percent": 0,
+        "sol_sink_conditioning": "exact_kv",
+        "sol_qkv_chunk_tokens": 8192,
+        "sol_out_proj_chunk_tokens": 24576,
+        "vram_activation_reserve_mb": 4096,
+        "inter_block_vram_guard_mb": 2048,
+        "inter_block_guard_cooldown_blocks": 4,
+        "inter_block_guard_emergency_mb": 512,
+        "inter_block_guard_emergency_cooldown_blocks": 3,
+        "late_block_guard_start": 40,
+        "late_block_guard_target_mb": 6144,
+        "late_block_guard_min_cached_mb": 512,
+        "step_boundary_cleanup_mb": 2048,
+        "latent_hires_enabled": false,
+        "latent_hires_model": "(disabled)",
+        "latent_hires_scale": 1,
+        "latent_hires_precision": "fp32",
+        "latent_hires_align": 32,
+        "refine_enabled": true,
+        "refine_add_noise": false,
+        "refine_seed": 0,
+        "refine_steps": 2,
+        "memory_mode": "auto",
+        "sampler_mode": "auto",
+        "windowed_refine": true
+      }
+    },
+    {
+      "id": 9,
+      "type": "BasicGuider",
+      "pos": [
+        410,
+        -190
+      ],
+      "size": [
+        370,
+        50
+      ],
+      "flags": {},
+      "order": 16,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 66
+        },
+        {
+          "name": "conditioning",
+          "type": "CONDITIONING",
+          "link": 60
+        }
+      ],
+      "outputs": [
+        {
+          "name": "GUIDER",
+          "type": "GUIDER",
+          "links": [
+            16
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.30.1",
+        "Node name for S&R": "BasicGuider"
+      }
+    },
+    {
+      "id": 150,
+      "type": "ManualSigmas",
+      "pos": [
+        830,
+        480
+      ],
+      "size": [
+        410,
+        60
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "sigmas",
+          "name": "sigmas",
+          "type": "STRING",
+          "widget": {
+            "name": "sigmas"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "SIGMAS",
+          "name": "SIGMAS",
+          "type": "SIGMAS",
+          "links": []
+        }
+      ],
+      "title": "5 step Sigmas",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.5.1",
+        "Node name for S&R": "ManualSigmas",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "version": "7.5.2",
+          "input_ue_unconnectable": {}
+        },
+        "enableTabs": false,
+        "tabWidth": 65,
+        "tabXOffset": 10,
+        "hasSecondTab": false,
+        "secondTabText": "Send Back",
+        "secondTabOffset": 80,
+        "secondTabWidth": 65
+      },
+      "widgets_values": [
+        "0.9231, 0.8780, 0.8000, 0.6316, 0.3158, 0.0000"
+      ],
+      "widgets_values_named": {
+        "sigmas": "0.9231, 0.8780, 0.8000, 0.6316, 0.3158, 0.0000"
+      },
+      "color": "#101523",
+      "bgcolor": "#191e2e"
+    },
+    {
+      "id": 149,
+      "type": "ManualSigmas",
+      "pos": [
+        830,
+        430
+      ],
+      "size": [
+        350,
+        60
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 8,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "sigmas",
+          "name": "sigmas",
+          "type": "STRING",
+          "widget": {
+            "name": "sigmas"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "SIGMAS",
+          "name": "SIGMAS",
+          "type": "SIGMAS",
+          "links": []
+        }
+      ],
+      "title": "4 step Sigmas",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.5.1",
+        "Node name for S&R": "ManualSigmas",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "version": "7.5.2",
+          "input_ue_unconnectable": {}
+        },
+        "enableTabs": false,
+        "tabWidth": 65,
+        "tabXOffset": 10,
+        "hasSecondTab": false,
+        "secondTabText": "Send Back",
+        "secondTabOffset": 80,
+        "secondTabWidth": 65
+      },
+      "widgets_values": [
+        "0.9035, 0.8000, 0.6316, 0.3158, 0.0000"
+      ],
+      "widgets_values_named": {
+        "sigmas": "0.9035, 0.8000, 0.6316, 0.3158, 0.0000"
+      },
+      "color": "#101523",
+      "bgcolor": "#191e2e"
+    },
+    {
+      "id": 148,
+      "type": "ManualSigmas",
+      "pos": [
+        830,
+        370
+      ],
+      "size": [
+        300,
+        60
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "sigmas",
+          "name": "sigmas",
+          "type": "STRING",
+          "widget": {
+            "name": "sigmas"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "SIGMAS",
+          "name": "SIGMAS",
+          "type": "SIGMAS",
+          "links": [
+            228
+          ]
+        }
+      ],
+      "title": "3 step Sigmas",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.5.1",
+        "Node name for S&R": "ManualSigmas",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "version": "7.5.2",
+          "input_ue_unconnectable": {}
+        },
+        "enableTabs": false,
+        "tabWidth": 65,
+        "tabXOffset": 10,
+        "hasSecondTab": false,
+        "secondTabText": "Send Back",
+        "secondTabOffset": 80,
+        "secondTabWidth": 65
+      },
+      "widgets_values": [
+        "0.8500, 0.6316, 0.3158, 0.0000"
+      ],
+      "widgets_values_named": {
+        "sigmas": "0.8500, 0.6316, 0.3158, 0.0000"
+      },
+      "color": "#101523",
+      "bgcolor": "#191e2e"
     }
   ],
   "links": [
@@ -1356,6 +1547,14 @@
       1,
       4,
       "H3_LONGMEDIA_DIRECTOR"
+    ],
+    [
+      228,
+      148,
+      0,
+      2,
+      5,
+      "SIGMAS"
     ]
   ],
   "groups": [
@@ -1436,10 +1635,10 @@
   "extra": {
     "workflow_name": "MiniMax-H3-LongMedia-SAFE-1080p-15s",
     "ds": {
-      "scale": 0.6934334949442053,
+      "scale": 1.0152559799478111,
       "offset": [
-        2448.336293000699,
-        530.3528534031443
+        275.53048010933895,
+        295.58154617241536
       ]
     },
     "frontendVersion": "1.51.9",
