@@ -22355,10 +22355,16 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
         noise_streams = list(full_noise.unbind())
         if len(noise_streams) != 2:
             raise RuntimeError(f'Internal Sampler #2 noise has {len(noise_streams)} streams, expected 2.')
-        full_noise_video, _full_noise_audio_unused = noise_streams
+        full_noise_video, full_noise_audio = noise_streams
         # Stage 2 is a VIDEO refiner. Audio from Stage 1 is authoritative context,
-        # not a second diffusion target. Keep its noise identically zero.
-        frozen_audio_noise = torch.zeros_like(source_audio)
+        # not a second diffusion target. Keep its noise identically zero.  Crucially,
+        # stock comfy.sample.prepare_noise() constructs NestedTensor noise streams on
+        # CPU even when the Stage-1 AV latent currently lives on CUDA.  Building the
+        # frozen audio stream from source_audio would therefore create mixed-device
+        # noise and fail inside CFGGuider.sample()->pack_latents() before sampling.
+        # Zero the stock-prepared audio noise instead so video/audio noise preserve
+        # the exact device/dtype contract produced by ComfyUI.
+        frozen_audio_noise = torch.zeros_like(full_noise_audio)
 
         latent_t = int(source_video.shape[2])
         lat_h = int(source_video.shape[3])
@@ -22437,6 +22443,9 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                 # Preserve Stage-1 audio as a frozen AV context stream.  The model
                 # can still attend to it while only video receives Refine-Sigma noise.
                 exact_noise = comfy.nested_tensor.NestedTensor((full_noise_video, frozen_audio_noise))
+                self._validate_native_stream_devices(
+                    exact_noise.unbind(), context='internal_sampler2_exact_noise'
+                )
                 exact_mask = comfy.nested_tensor.NestedTensor((
                     torch.ones_like(source_video, dtype=torch.float32),
                     torch.zeros_like(source_audio, dtype=torch.float32),
@@ -22605,8 +22614,18 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                     noise_video = full_noise_video[:, :, v0:v1].contiguous()
                     # Audio is context-only in Stage 2: no fresh noise is ever
                     # injected into it, regardless of exact/windowed execution.
-                    noise_audio = torch.zeros_like(local_audio)
+                    # Keep the noise stream on the same device/dtype as stock
+                    # prepare_noise() (normally CPU); local_audio may be CUDA on the
+                    # high-VRAM/native path and must not dictate noise ownership.
+                    noise_audio = torch.zeros(
+                        tuple(local_audio.shape),
+                        dtype=full_noise_audio.dtype,
+                        device=full_noise_audio.device,
+                    )
                     local_noise = comfy.nested_tensor.NestedTensor((noise_video, noise_audio))
+                    self._validate_native_stream_devices(
+                        local_noise.unbind(), context='internal_sampler2_window_noise'
+                    )
 
                     # Freeze both context wings; denoise the owner core with the full
                     # Refine Sigmas trajectory. No low-frequency/detail suppression.

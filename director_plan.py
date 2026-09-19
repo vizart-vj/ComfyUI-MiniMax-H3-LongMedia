@@ -191,6 +191,7 @@ def _normalize_shot(item: Any, index: int, subject_ids: set[str]) -> dict[str, A
         "clip_id": str(item.get("clip_id") or item.get("id") or "").strip() or _id("shot"),
         "name": str(item.get("name") or item.get("clip_name") or f"Shot {index + 1}").strip()[:120],
         "prompt": str(item.get("prompt") or "").strip(),
+        "start": (None if item.get("start") in (None, "") else max(0.0, _finite_float(item.get("start"), 0.0))),
         "duration": duration,
         "seed": seed,
         "subjects": selected,
@@ -436,14 +437,19 @@ def normalize_document(raw: Any) -> dict[str, Any]:
     if not shots_raw:
         shots_raw = [default_shot(0, 5.0)]
     shots = [_normalize_shot(item, i, subject_ids) for i, item in enumerate(shots_raw)]
+    cursor = 0.0
+    for shot in shots:
+        if shot.get("start") is None:
+            shot["start"] = cursor
+        shot["start"] = max(0.0, float(shot["start"]))
+        cursor = max(cursor, float(shot["start"]) + float(shot["duration"]))
+    shots.sort(key=lambda shot: float(shot.get("start") or 0.0))
 
     camera_raw = data.get("camera_blocks") if isinstance(data.get("camera_blocks"), list) else []
     camera_blocks = [_normalize_camera_block(item, i) for i, item in enumerate(camera_raw[:MAX_CAMERA_BLOCKS])]
     if not isinstance(data.get("camera_blocks"), list):
-        cursor = 0.0
         for shot in shots:
-            camera_blocks.append(default_camera_block(cursor, shot["duration"]))
-            cursor += shot["duration"]
+            camera_blocks.append(default_camera_block(float(shot.get("start") or 0.0), shot["duration"]))
 
     audio_raw = data.get("audio_blocks") if isinstance(data.get("audio_blocks"), list) else []
     audio_blocks = [
@@ -894,11 +900,27 @@ def compile_director_plan(
     shots = document["shots"]
     native_character_replace = _native_character_replace_contract(document)
 
-    starts: list[float] = []
+    starts: list[float] = [float(shot.get("start") or 0.0) for shot in shots]
     cursor = 0.0
-    for shot in shots:
-        starts.append(cursor)
-        cursor += float(shot["duration"])
+    previous_end = 0.0
+    for index, (shot, start) in enumerate(zip(shots, starts)):
+        duration = float(shot["duration"])
+        if index == 0 and start > 1e-4:
+            raise ValueError(
+                f"Director BASE starts with an empty gap from 0.00s to {start:.2f}s. "
+                "Use Fill Gap in the BASE timeline before rendering."
+            )
+        if start < previous_end - 1e-4:
+            raise ValueError(
+                f"Director BASE clips overlap near {start:.2f}s. Move/trim the clips so they do not overlap."
+            )
+        if start > previous_end + 1e-4:
+            raise ValueError(
+                f"Director BASE contains an empty gap from {previous_end:.2f}s to {start:.2f}s. "
+                "Right-click the gap and choose Fill Gap before rendering."
+            )
+        previous_end = start + duration
+        cursor = max(cursor, previous_end)
 
     camera_states: list[dict[str, Any]] = []
     shot_camera_blocks: list[list[dict[str, Any]]] = []

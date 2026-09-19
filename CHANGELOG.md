@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.6.50
+
+- Fixed Refiner AV noise-stream device ownership on the high-VRAM/native path: frozen Stage-1 audio noise now follows ComfyUI's stock `prepare_noise()` device/dtype contract in both exact and windowed Stage-2 sampling, preventing mixed CPU/CUDA nested noise before `guider.sample()`.
+- Expanded Director TAKE management with checkbox multi-select, Select All/Clear, batch delete, folder-tree navigation and `MOVE TO` for moving one or many TAKEs into existing folders.
+- Reworked Director layers as first-class editor objects with selection, rename, duplicate/delete where valid, enable/lock/mute controls, per-layer properties, and consistent context-menu targeting.
+- Added persistent per-layer vertical resizing by dragging each track separator; the global track-height control can still reset all tracks to one shared height.
+- Fixed vertical layout stretch/gap artifacts after timeline, prompt and inspector resizing; removed the redundant outer Inspector resize shell while preserving prompt-field resizing.
+- Reorganized the Director toolbar into icon-only groups separated by dividers, removed duplicate import actions, and moved Selected TAKE directly above the timeline.
+- Added NLE-style timeline context menus and keyboard editing actions for Duplicate, Copy, Cut, Paste, Delete, clip knife and all-layer knife operations.
+- Fixed `Knife clip here` so it splits only the context-clicked clip/block; `Knife all layers here` remains the explicit global cut action.
+- Added movable timeline blocks with less aggressive Magnet snapping and Alt-drag snap bypass for free positioning.
+- BASE clips can now be trimmed or shifted to author real gaps without automatic collapse; unresolved BASE gaps are rejected before execution with an explicit Fill Gap message instead of being silently rewritten.
+- Added type-aware `Fill Gap` actions for BASE, CAMERA, AUDIO and custom layers, creating a correctly typed block across the clicked empty interval.
+- Added a dedicated blank timeline creation zone whose context menu can create Prompt, Embedding, Character, Reference, Video and Audio layers plus applicable core timeline blocks.
+- Global scissors now split all unlocked blocks crossing the playhead, while the dedicated MultiClip `+ CLIP` action remains MAIN-only.
+- Improved TAKE-panel scrolling/opacity and folder presentation so preview cards no longer bleed above the panel header.
+
 ## 0.6.42
 
 - Restored a real high-VRAM/native H3 compute path: `memory_mode=normal` now preserves Sampler MLP/VRAM controls instead of silently forcing low-VRAM floors and caps.

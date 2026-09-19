@@ -1,6 +1,6 @@
 # Sampler, VRAM and Performance Guide
 
-These recommendations describe the current 0.6.42 line.
+These recommendations describe the current 0.6.50 line.
 
 ## Production Default
 
@@ -22,7 +22,7 @@ Do not use `--disable-dynamic-vram` for normal production runs; LongMedia's over
 Recommended. Selects a profile from model size, quantization/backend, GPU VRAM and packed sequence geometry.
 
 ### `normal`
-Use when model + activation workspace fit comfortably. In 0.6.42 this is the **user-authoritative high-VRAM profile**: Sampler chunk/reserve/guard values are preserved instead of being silently replaced by low-VRAM floors. `mlp_chunk_tokens=0` truly disables LongMedia MLP chunking. With `attention_mode=existing`, `vram_activation_reserve_mb=0` and block/step guards disabled, a resident model can use the stock ComfyUI H3 DiT block path.
+Use when model + activation workspace fit comfortably. In 0.6.50 this is the **user-authoritative high-VRAM profile**: Sampler chunk/reserve/guard values are preserved instead of being silently replaced by low-VRAM floors. `mlp_chunk_tokens=0` truly disables LongMedia MLP chunking. With `attention_mode=existing`, `vram_activation_reserve_mb=0` and block/step guards disabled, a resident model can use the stock ComfyUI H3 DiT block path.
 
 ### `low_vram`
 Uses tighter activation/residency limits and more aggressive chunking.
