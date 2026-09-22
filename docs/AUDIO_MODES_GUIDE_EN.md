@@ -306,3 +306,19 @@ prompt          -> how each <Audio N> affects the visuals and performance
 ```
 
 This separation allows source character replacement, exact source-performance preservation, arbitrary redubbing, source-video continuation, trimming, and audio-reactive visual edits without introducing separate workflow modes.
+
+## Director MEDIA -> GENERATED audio continuation
+
+Director BASE continuation is separate from the global `audio_mode`. Each MAIN block has an `AUDIO CONTINUATION` value:
+
+```text
+AUTO
+CONTINUE
+FRESH
+```
+
+For an imported MEDIA parent, `AUTO`/`CONTINUE` uses only the final overlap-sized soundtrack tail as H3 continuation context when audio is available. `FRESH` omits that parent audio latent from the child keyframe. In every case, the old MEDIA soundtrack itself remains untouched in the visible timeline.
+
+For a GENERATED parent, continuation comes from the saved native TAKE audio state rather than re-encoding the old decoded waveform.
+
+Final mixed assembly canonicalizes PCM pieces to `[1,C,L]`. If any piece is stereo, mono pieces are duplicated sample-for-sample into two channels. No sample-rate conversion or stereo remix is introduced by this channel normalization.

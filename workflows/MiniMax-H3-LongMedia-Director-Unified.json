@@ -613,15 +613,15 @@
         "exact_kv",
         8192,
         24576,
-        4096,
+        2048,
         2048,
         4,
         512,
         3,
         40,
-        6144,
+        4096,
         512,
-        2048,
+        1024,
         false,
         "(disabled)",
         1,
@@ -1458,7 +1458,7 @@
       }
     },
     "longmedia_director_p1": {
-      "version": "0.6.50",
+      "version": "0.6.54",
       "semantic_timeline": true,
       "setup_timeline_mode": "multiclip",
       "note": "WHO & WHAT names Setup numbered media slots; Director timeline, camera transitions and media are passed to Setup through one director connection."

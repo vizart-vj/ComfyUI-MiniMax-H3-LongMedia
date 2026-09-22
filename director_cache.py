@@ -717,6 +717,52 @@ class DirectorClipCache:
         take["metadata"] = dict(metadata)
         return metadata
 
+    def promote_active_take_for_append(
+        self,
+        clip_id: Any,
+        *,
+        geometry_fingerprint: str,
+        semantic_fingerprint: str,
+        outgoing_contract_fingerprint: str,
+        overlap_frames: int,
+    ) -> dict[str, Any] | None:
+        """Upgrade a reused prefix TAKE before a new dependent child is rendered.
+
+        This is deliberately metadata-only: the approved AV tensors remain byte-for-byte
+        unchanged.  It is used both for historical one-shot Director TAKEs and for a
+        previously-last MultiClip TAKE whose outgoing contract becomes meaningful after
+        appending a new clip.  Boundary hashes are recomputed from the stored continuation
+        tensors for the current overlap contract and an outgoing seam id is reserved so
+        the child can bind to it atomically when saved.
+        """
+        take = self.load_active(clip_id)
+        if take is None:
+            return None
+        metadata = dict(take.get("metadata") or {})
+        revision = str(metadata.get("revision") or "").strip()
+        if not revision:
+            return None
+        video = take.get("continuation_video")
+        audio = take.get("continuation_audio")
+        if not torch.is_tensor(video) or not torch.is_tensor(audio):
+            return None
+
+        overlap = max(0, int(overlap_frames))
+        metadata["geometry_fingerprint"] = str(geometry_fingerprint or "")
+        metadata["semantic_fingerprint"] = str(semantic_fingerprint or "")
+        metadata["outgoing_contract_fingerprint"] = str(outgoing_contract_fingerprint or "")
+        metadata["overlap_frames"] = overlap
+        metadata["boundary_hash_version"] = BOUNDARY_HASH_VERSION
+        metadata["incoming_boundary_hash"] = _av_boundary_hash(video, audio, overlap, edge="head")
+        metadata["outgoing_boundary_hash"] = _av_boundary_hash(video, audio, overlap, edge="tail")
+        metadata["seam_lineage_version"] = SEAM_LINEAGE_VERSION
+        if not str(metadata.get("outgoing_seam_id") or "").strip():
+            metadata["outgoing_seam_id"] = self._new_seam_id()
+        metadata["incremental_append_promoted"] = True
+        metadata["incremental_append_promoted_at_unix"] = time.time()
+        self._write_take_metadata(clip_id, revision, metadata)
+        return dict(metadata)
+
     def seam_compatible(
         self,
         left_clip_id: Any,

@@ -56,6 +56,19 @@ Planner владеет clip prompts, durations, names и опциональны�
 
 Planner авторитетен только при `timeline_mode=multiclip`.
 
+### Director BASE continuation
+
+В Director MultiClip есть два BASE type:
+
+```text
+GENERATED -> native TAKE continuation
+MEDIA     -> immutable external delivery media
+```
+
+Оба дают child одинаковый continuation concept, но источник разный. GENERATED parent предоставляет сохранённый native H3 latent/audio state. У MEDIA нет native H3 latent, поэтому VAE-encode получает только editorial tail window, который прикрепляется к fresh child target как native frame-0 keyframe. MEDIA никогда не становится target x0 или diffusion render unit.
+
+External continuation cache ключуется по media fingerprint, trim range, target geometry и overlap и хранит tail state на CPU.
+
 ## Общий AV latent
 
 MiniMax H3 использует nested AV latent:
@@ -66,6 +79,8 @@ audio: [B, 32, 2, T40]
 ```
 
 LongMedia сохраняет нативную MiniMax temporal lattice и проверяет согласованность AV duration на границах сборки.
+
+Для mixed Director timeline финальная сборка run-aware: непрерывные GENERATED runs проходят VideoVAE decode, а MEDIA RGB/audio вставляется напрямую. Hidden continuation overlap удаляется только из generated child. Mixed audio использует canonical `[1,C,L]`, поддерживает mono/stereo без resampling; mono точно дублируется, если timeline требует stereo.
 
 ## References и source editing
 
@@ -124,6 +139,9 @@ LongMedia координирует lifetime activations с текущими Comf
 
 Ключевые механизмы:
 
+- packed-storage-aware AUTO routing для quantized INT8/W4A8/NVFP4 checkpoints;
+- file-backed Windows loading больших safetensors через ComfyUI ModelMMAP/TensorFileSlice, когда они доступны;
+
 - streamed/chunked transformer MLP и output projections;
 - embedded Sol paths для bounded long-sequence execution;
 - exact Comfy Kitchen EXISTING query streaming, когда full fused QKV не помещается;
@@ -131,7 +149,8 @@ LongMedia координирует lifetime activations с текущими Comf
 - guarded native INT8 residency на constrained GPU;
 - sampler-entry memory isolation для cache-driven reruns;
 - очистка transient CUDA references между повторными Queue;
-- RAM-pressure-aware pinned-host-memory policy.
+- RAM-pressure-aware pinned-host-memory policy;
+- selective conditioning scope, который пропускает повторный TE/control encode cached Director clips и освобождает TE residency до diffusion sampling без aggressive Windows working-set trimming.
 
 На constrained native INT8 системах speculative dynamic-VBAR prefetch ограничивается, чтобы следующий block не резервировал competing transfer destination, пока текущие activations ещё живы.
 

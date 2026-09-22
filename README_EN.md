@@ -4,7 +4,19 @@ Production-oriented ComfyUI nodes for **MiniMax H3** long-form video/audio gener
 
 ![screenshot](ex.png)
 
-**Current release: 0.6.50.**
+**Current release: 0.6.54.**
+
+## What changed since public v0.6.50
+
+- **True selective regeneration:** clip-only rerenders sample only the requested GENERATED clip when cached seam contracts remain valid; From Here samples only the dependent suffix.
+- **Immutable MEDIA blocks:** imported video can sit directly on the BASE timeline and remain outside diffusion.
+- **Native continuation:** GENERATED parents reuse saved TAKE latent state; external MEDIA parents encode only the required tail and attach it as a native frame-0 H3 keyframe.
+- **O(1)-style append:** adding the next clip reuses prior TAKE/cache state instead of rebuilding the whole timeline.
+- **Quantized AUTO routing:** INT8/W4A8/NVFP4 policy uses packed physical storage and activation headroom rather than BF16-equivalent logical size.
+- **Windows/AIMDO safety:** large checkpoints remain file-backed through ComfyUI `ModelMMAP` / `TensorFileSlice`; no eager full-model RAM load.
+- **Mixed AV assembly:** original MEDIA is preserved outside VideoVAE; mono/stereo timeline audio is assembled with an explicit channel contract.
+
+See [0.6.54 Release Notes](docs/RELEASE_NOTES_0.6.54_EN.md).
 
 ## Documentation
 
@@ -90,7 +102,7 @@ longest_input
 
 See [Operating Modes](docs/MODES_GUIDE_EN.md).
 
-## LongMedia Director 0.6.50
+## LongMedia Director 0.6.54
 
 Director is the unified authoring surface for MAIN timing, prompts, WHO & WHAT media, REF/FIRST/LAST roles, cameras, temporal embeddings, audio policy, resolution policy, Program Monitor review and TAKE management.
 
@@ -101,6 +113,8 @@ Long Media Setup  (control_mode=director)
 ```
 
 Current TAKE storage is TAKE-centric. CREATE makes an active empty workspace; the next successful render fills that same TAKE. Restore applies the complete saved Director state atomically.
+
+Since 0.6.54 continuation formally separates `GENERATED` and `MEDIA`: `GENERATED → GENERATED` reuses the saved native TAKE latent, while `MEDIA → GENERATED` creates a fresh H3 target and pins only the VAE-encoded external tail as a native frame-0 `minimax_keyframes` guide. The imported full video never becomes a diffusion target and never takes a full-video VAE roundtrip.
 
 See [Director Complete Guide](docs/DIRECTOR_GUIDE_EN.md).
 
@@ -132,6 +146,6 @@ memory_mode    = auto
 attention_mode = auto
 ```
 
-Keep ComfyUI Dynamic VRAM enabled. Current runtime includes repeat-Queue transient CUDA reference cleanup, guarded native INT8 residency, exact Existing/Kitchen fallback paths and safe Latent Hi-Res model offload.
+Keep ComfyUI Dynamic VRAM enabled. Current runtime includes repeat-Queue transient CUDA reference cleanup, packed-storage-aware quantized AUTO routing, guarded native INT8 residency, exact Existing/Kitchen fallback paths, file-backed Windows large-safetensors loading and safe Latent Hi-Res model offload. Explicit manual Sampler values remain authoritative in NORMAL/AUTO-normal profiles.
 
 See [Sampler, VRAM and Performance](docs/SAMPLER_OPTIMIZATION_EN.md).

@@ -125,6 +125,11 @@ class LongMediaPlan:
     director_timeline_snapshot: Any = None
     director_regeneration: Any = None
     director_reference_fingerprint: str = ""
+    # v0.6.51: BASE timeline can contain immutable external MEDIA blocks.
+    # Entries are aligned 1:1 with director_clip_ids / segment indices.
+    director_base_kinds: Any = None
+    director_base_media: Any = None
+    director_audio_continuation: Any = None
     # Optional latent-native temporal anti-smear policy configured by LongMedia Setup.
     # off keeps the historical sampling path bit-for-bit; auto/fluid/strong arm
     # a selective second pass only on motion-overloaded temporal regions.

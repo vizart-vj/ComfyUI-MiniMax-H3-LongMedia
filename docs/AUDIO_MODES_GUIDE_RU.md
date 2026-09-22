@@ -307,3 +307,19 @@ prompt          -> как каждый <Audio N> влияет на visuals и pe
 ```
 
 Такое разделение позволяет выполнять source character replacement, точное сохранение source performance, произвольный redub, продолжение source video, trimming и audio-reactive visual edits без введения отдельных workflow modes.
+
+## Director MEDIA -> GENERATED audio continuation
+
+Director BASE continuation отделён от глобального `audio_mode`. У каждого MAIN block есть `AUDIO CONTINUATION`:
+
+```text
+AUTO
+CONTINUE
+FRESH
+```
+
+Для импортированного MEDIA parent `AUTO`/`CONTINUE` использует только soundtrack tail размером с overlap как H3 continuation context, если звук доступен. `FRESH` не прикрепляет parent audio latent к child keyframe. При любом режиме сам старый MEDIA soundtrack остаётся untouched в видимом timeline.
+
+Для GENERATED parent continuation берётся из сохранённого native TAKE audio state, без повторного encode старой decoded waveform.
+
+Финальная mixed assembly приводит PCM pieces к `[1,C,L]`. Если хотя бы один piece stereo, mono pieces дублируются sample-for-sample в два канала. Эта channel normalization не делает sample-rate conversion или stereo remix.

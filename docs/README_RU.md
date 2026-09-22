@@ -26,6 +26,7 @@
 
 ## Релиз
 
+- [Release Notes 0.6.54](RELEASE_NOTES_0.6.54_RU.md)
 - [Release Notes 0.6.40](RELEASE_NOTES_0.6.40_RU.md)
 
 История разработки сведена в корневой [CHANGELOG](../CHANGELOG.md), а не разложена по десяткам отдельных release-note файлов.

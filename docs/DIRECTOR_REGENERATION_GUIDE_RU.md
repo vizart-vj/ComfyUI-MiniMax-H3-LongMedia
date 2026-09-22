@@ -1,62 +1,84 @@
 # LongMedia Director — Selective Regeneration и TAKE Workflow
 
-Руководство описывает текущую модель regeneration в Director 0.6.50.
+Руководство описывает текущую модель regeneration в Director 0.6.54.
 
-## TAKE — верхнеуровневая сохранённая ревизия
+## TAKE — сохранённая ревизия
 
-Хранилище Director теперь TAKE-centric. Пользовательские ревизии принадлежат TAKE, а не отдельным clip-cache папкам.
+Хранилище Director остаётся TAKE-centric. TAKE содержит полный authored Director state плюс совместимые clip-level cache/continuation данные. `CREATE TAKE` создаёт активную пустую ревизию; следующий успешный render заполняет именно её. Restore атомарно возвращает MAIN, prompts, WHO & WHAT media, FIRST/LAST/REF roles, CAMERA/AUDIO/EMBEDDING tracks, resolution policy и режимы Director.
 
-Концептуально:
+## BASE types участвуют по-разному
 
 ```text
-longmedia_director/
-├── Unsorted/
-│   └── <take>/
-│       ├── take.json
-│       ├── state/
-│       │   ├── director.json
-│       │   └── global_prompt.txt
-│       ├── clips/
-│       │   └── <clip_id>/latent.safetensors
-│       └── previews/
-└── _runtime/
+GENERATED = H3 render unit + TAKE/cache + native continuation state
+MEDIA     = immutable external video; никогда не H3 render unit
 ```
 
-Пользовательские project folders находятся рядом с `Unsorted`. `_runtime` хранит служебные runtime pointers и не является коллекцией TAKE.
+MEDIA может быть continuation parent для следующего GENERATED clip, но никогда не семплируется само.
 
-## CREATE TAKE
+## Правила Selective MultiClip
 
-CREATE создаёт полный пустой TAKE workspace и сразу делает его активной редакцией. Следующий успешный render заполняет именно этот TAKE; завершение render не создаёт дополнительную соседнюю ревизию.
+### Regenerate Clip
 
-## Restore
+Обычная generated chain:
 
-Выбор/Restore TAKE заменяет Director document сохранённым snapshot целиком, а не переключает только preview branch. Возвращаются timeline media, WHO & WHAT media, prompts, GLOBAL PROMPT, роли FIRST/LAST/REF, camera/audio/extra tracks, resolution policy и режимы Director.
+```text
+Clip1 -> Clip2 -> Clip3
+Regenerate Clip3
 
-Browser media cache инвалидируется, чтобы UI показывал именно восстановленную ревизию, а не старый preview state.
+Clip1 = TAKE HIT
+Clip2 = TAKE HIT
+Clip3 = SAMPLE
+```
 
-## Duplicate, rename и folders
+Если incoming/outgoing seam contracts валидны, clip-only regeneration семплирует ровно один target. Если безопасный two-sided lock невозможен, backend расширяет dependency range вместо использования несовместимого cached suffix.
 
-- Duplicate создаёт новый TAKE из полного snapshot исходной ревизии.
-- Rename меняет и видимое имя TAKE, и имя его директории.
-- TAKE cards можно переносить между пользовательскими project folders.
-- `Unsorted` используется по умолчанию, если отдельная папка проекта не выбрана.
+MEDIA chain:
 
-## Selective MultiClip regeneration
+```text
+Video MEDIA -> Clip1 -> Clip2
+Regenerate Clip2
 
-В MultiClip LongMedia может повторно использовать approved cached clip states и перегенерировать только invalidated range. Dependency checks консервативны: если incoming/outgoing continuation несовместим, invalidated range расширяется, а небезопасный cached suffix не используется как будто он валиден.
+Video = untouched
+Clip1 = TAKE HIT
+Clip2 = SAMPLE
+```
 
-При активном Latent Hi-Res display state и continuation state могут иметь разную геометрию, поэтому runtime сохраняет данные и для видимого результата, и для handoff следующему clip.
+Regenerate Clip1 оставляет Video untouched и семплирует только Clip1. Clip2 становится stale, но автоматически не запускается.
 
-## Single и segmented timelines
+### Regenerate From Here
 
-В single/segmented активный TAKE финализируется из final stitched AV. Это не меняет ownership MultiClip selective cache: пользовательский TAKE остаётся верхнеуровневой ревизией, а runtime clip pointers остаются служебной деталью внутри `_runtime`.
+Сохраняет валидированный prefix и семплирует выбранный GENERATED clip плюс все зависимые GENERATED clips справа. MEDIA остаются immutable и никогда не попадают в `sampled_indices`.
+
+## Добавление нового clip
+
+Append после cached GENERATED parent использует сохранённый native TAKE tail/motion/audio continuation и семплирует только новый clip. Append после MEDIA создаёт fresh child target, кодирует только external overlap tail и прикрепляет его как native frame-0 H3 keyframe.
+
+Главный runtime invariant:
+
+```text
+one new GENERATED clip = one H3 sampling target
+```
+
+## External MEDIA cache
+
+Cache key включает source identity, editorial trim range, geometry и overlap. Tail latents хранятся на CPU. Повторное использование той же неизменённой MEDIA boundary поэтому не требует повторного VideoVAE/audio-tail encode.
+
+Авторитетен именно видимый MEDIA range: trimmed/reused source продолжается от конца BASE block, а не от физического конца исходного файла.
+
+## Final assembly
+
+- GENERATED runs декодируются через H3 VideoVAE.
+- MEDIA RGB/audio вставляется в финальный timeline напрямую.
+- Hidden overlap для MEDIA continuation вырезается из видимого child output.
+- Исходный MEDIA audio не регенерируется.
+- Mixed mono/stereo pieces нормализуются к `[1,C,L]`; mono точно дублируется, когда нужен stereo output.
 
 ## Refine / Latent Hi-Res
 
-Selective regeneration не меняет контракт Refine. Stage 2 — video refiner; аудио Stage 1 сохраняется точно. Большие high-resolution Stage 2 passes могут выполняться bounded temporal windows.
+Selective regeneration не меняет Refine contract. Stage 2 остаётся video-only; Stage-1 audio сохраняется как exact passthrough.
 
 См. также:
 
 - [Director — полное руководство](DIRECTOR_GUIDE_RU.md)
-- [Integrated Refine и Latent Hi-Res](TWO_PASS_LATENT_HIRES_REFINER_GUIDE_RU.md)
-- [Режимы работы](MODES_GUIDE_RU.md)
+- [Архитектура](ARCHITECTURE_RU.md)
+- [Sampler, VRAM и производительность](SAMPLER_OPTIMIZATION_RU.md)

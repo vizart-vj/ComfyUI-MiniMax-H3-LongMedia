@@ -1,6 +1,6 @@
 # Sampler, VRAM и производительность
 
-Рекомендации для текущей ветки LongMedia 0.6.50.
+Рекомендации для текущей ветки LongMedia 0.6.54.
 
 ## Production default
 
@@ -25,10 +25,10 @@ LongMedia рассчитывает на coordinated dynamic residency больш
 ## Memory Modes
 
 ### `auto`
-Рекомендуется. Выбирает профиль по model size, quantization/backend, VRAM и packed sequence geometry.
+Рекомендуется. Выбирает профиль по quantization/backend, VRAM, реальному packed storage модели, activation headroom и packed sequence geometry. Quantized H3 не маршрутизируется только по BF16-equivalent logical `model_size`.
 
 ### `normal`
-Используйте, если model + activation workspace уверенно помещаются. В 0.6.50 это **user-authoritative high-VRAM профиль**: значения chunk/reserve/guard из Sampler сохраняются и больше не подменяются low-VRAM floors. `mlp_chunk_tokens=0` реально отключает LongMedia MLP chunking. При `attention_mode=existing`, `vram_activation_reserve_mb=0` и отключённых block/step guards resident-модель может идти через stock ComfyUI H3 DiT block path.
+Используйте, если model + activation workspace уверенно помещаются. В 0.6.54 это **user-authoritative high-VRAM профиль**: значения chunk/reserve/guard из Sampler сохраняются и больше не подменяются low-VRAM floors. `mlp_chunk_tokens=0` реально отключает LongMedia MLP chunking. При `attention_mode=existing`, `vram_activation_reserve_mb=0` и отключённых block/step guards resident-модель может идти через stock ComfyUI H3 DiT block path.
 
 ### `low_vram`
 Более жёсткие activation/residency limits и агрессивнее chunking.
@@ -51,6 +51,18 @@ LongMedia рассчитывает на coordinated dynamic residency больш
 
 ### `scheduled_sol`
 Использует Sol с явным sigma/tau schedule.
+
+## Quantized storage против logical model size
+
+INT8/W4A8/NVFP4 checkpoints могут сообщать BF16-equivalent logical model size значительно больше реального packed storage. AUTO policy рассматривает эти величины отдельно и учитывает packed weights, scales/non-quantized tensors и activation headroom при выборе residency/chunking. Поэтому ~16 GB GPU не переводится в `ultra_low_vram` только потому, что quantized model логически сообщает ~30+ GB.
+
+Явные пользовательские значения остаются авторитетными в NORMAL/AUTO-normal. Например, `mlp_chunk_tokens=24576` не переписывается скрыто в 8192/2048 legacy low-VRAM heuristic.
+
+## Windows large safetensors / AIMDO
+
+В Windows LongMedia сохраняет file-backed путь ComfyUI `ModelMMAP` / `TensorFileSlice` для больших diffusion checkpoints, когда он доступен. Полный 20–30 GB state_dict не читается в RAM через eager pread как штатный workaround. Quantization metadata и DynamicVRAM/AIMDO partial residency сохраняются.
+
+Host-RAM cleanup освобождает patcher refs, conditioning temporaries и Python refs, но намеренно не применяет aggressive `EmptyWorkingSet`/file-cache trimming, способный превратить clean cache в page-fault churn.
 
 ## Native INT8 на 16 GB-классе
 

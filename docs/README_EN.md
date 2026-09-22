@@ -26,6 +26,7 @@ This release ships only current user-facing documentation. Every topic has an En
 
 ## Release
 
+- [0.6.54 Release Notes](RELEASE_NOTES_0.6.54_EN.md)
 - [0.6.40 Release Notes](RELEASE_NOTES_0.6.40_EN.md)
 
 Historical development notes are consolidated in the root [CHANGELOG](../CHANGELOG.md) instead of being shipped as dozens of separate release-note files.

@@ -1,62 +1,84 @@
 # LongMedia Director — Selective Regeneration and TAKE Workflow
 
-This guide describes the current 0.6.50 Director regeneration model.
+This guide describes the current 0.6.54 Director regeneration model.
 
-## TAKE is the top-level saved revision
+## TAKE is the saved revision
 
-Director TAKE storage is TAKE-centric. User-visible revisions live under the LongMedia Director library rather than being owned by individual clip-cache folders.
+Director storage is TAKE-centric. A TAKE stores the complete authored Director state plus compatible clip-level cache/continuation data. `CREATE TAKE` creates the active empty revision; the next successful render fills that same TAKE. Restore replaces the Director document atomically, including MAIN, prompts, WHO & WHAT media, FIRST/LAST/REF roles, CAMERA/AUDIO/EMBEDDING tracks, resolution policy and Director modes.
 
-Conceptually:
+## BASE types participate differently
 
 ```text
-longmedia_director/
-├── Unsorted/
-│   └── <take>/
-│       ├── take.json
-│       ├── state/
-│       │   ├── director.json
-│       │   └── global_prompt.txt
-│       ├── clips/
-│       │   └── <clip_id>/latent.safetensors
-│       └── previews/
-└── _runtime/
+GENERATED = H3 render unit + TAKE/cache + native continuation state
+MEDIA     = immutable external video; never an H3 render unit
 ```
 
-User-created project folders sit beside `Unsorted`. `_runtime` contains service/runtime pointers and is not a TAKE collection.
+MEDIA can be a continuation parent for the immediately following GENERATED clip, but it is never sampled itself.
 
-## CREATE TAKE
+## Selective MultiClip rules
 
-CREATE makes a complete empty TAKE workspace and immediately makes it the active editor revision. The next successful render fills that same TAKE; it does not create a second sibling revision just because the render completed.
+### Regenerate Clip
 
-## Restore
+For a normal generated chain:
 
-Selecting/Restoring a TAKE replaces the Director document from the stored snapshot rather than restoring only a preview branch. The restored state includes timeline media, WHO & WHAT media, prompts, GLOBAL PROMPT, FIRST/LAST/REF roles, camera/audio/extra tracks, resolution policy and Director modes.
+```text
+Clip1 -> Clip2 -> Clip3
+Regenerate Clip3
 
-Browser media caches are invalidated so the UI reflects the restored revision instead of stale preview state.
+Clip1 = TAKE HIT
+Clip2 = TAKE HIT
+Clip3 = SAMPLE
+```
 
-## Duplicate, rename and folders
+When both incoming and outgoing seam contracts are valid, clip-only regeneration samples exactly one target. If a safe two-sided lock is impossible, the backend expands the dependency range rather than pretending an incompatible cached suffix is valid.
 
-- Duplicate creates a new TAKE from the complete source snapshot.
-- Rename changes both the visible TAKE name and its directory name.
-- TAKE cards can be moved between user-created project folders.
-- `Unsorted` is the default collection when no project folder is selected.
+For a MEDIA chain:
 
-## Selective MultiClip regeneration
+```text
+Video MEDIA -> Clip1 -> Clip2
+Regenerate Clip2
 
-For MultiClip, LongMedia can reuse approved cached clip states and regenerate only the invalidated range. Dependency checks remain conservative: if an incoming/outgoing continuation is incompatible, the invalidated range expands rather than pretending an unsafe cached suffix is reusable.
+Video = untouched
+Clip1 = TAKE HIT
+Clip2 = SAMPLE
+```
 
-Continuation and display states can differ when Latent Hi-Res is active, so the runtime keeps the state needed for both visible output and downstream clip handoff.
+Regenerating Clip1 leaves Video untouched and samples Clip1 only. Clip2 becomes stale but is not automatically sampled.
 
-## Single and segmented timelines
+### Regenerate From Here
 
-Single/segmented renders finalize the active TAKE from the final stitched AV. This is separate from MultiClip selective-cache ownership: the user-visible TAKE is still the top-level revision, while runtime clip pointers remain implementation detail under `_runtime`.
+Keeps the validated prefix and samples the selected GENERATED clip plus all dependent GENERATED clips after it. MEDIA blocks stay immutable and are never added to `sampled_indices`.
+
+## Appending a new clip
+
+Appending after a cached GENERATED parent uses the saved native TAKE tail/motion/audio continuation and samples only the new clip. Appending after MEDIA builds a fresh child target, encodes only the external overlap tail, and attaches that tail as a native frame-0 H3 keyframe.
+
+The runtime invariant is:
+
+```text
+one new GENERATED clip = one H3 sampling target
+```
+
+## External MEDIA cache
+
+External continuation cache keys include source identity, editorial trim range, geometry and overlap. Cached tail latents are retained on CPU. Reusing the same unchanged MEDIA boundary therefore skips VideoVAE/audio-tail re-encoding.
+
+The visible MEDIA range is authoritative: a trimmed or reused source continues from the end of the BASE block, not from the physical end of the source file.
+
+## Final assembly
+
+- GENERATED runs are decoded through H3 VideoVAE.
+- MEDIA RGB/audio is inserted directly into the final timeline.
+- The hidden overlap used for MEDIA continuation is removed from the visible child output.
+- Original MEDIA audio is not regenerated.
+- Mixed mono/stereo pieces are normalized to `[1,C,L]`; mono is duplicated exactly when stereo output is required.
 
 ## Refine / Latent Hi-Res
 
-Selective regeneration does not change the Refine contract. Stage 2 is a video refiner; Stage-1 audio is preserved exactly. Large high-resolution Stage 2 work can use bounded temporal windows.
+Selective regeneration does not change the Refine contract. Stage 2 is video-only; Stage-1 audio remains exact passthrough.
 
 See also:
 
 - [Director Complete Guide](DIRECTOR_GUIDE_EN.md)
-- [Integrated Refine and Latent Hi-Res](TWO_PASS_LATENT_HIRES_REFINER_GUIDE_EN.md)
-- [Operating Modes](MODES_GUIDE_EN.md)
+- [Architecture](ARCHITECTURE_EN.md)
+- [Sampler, VRAM and Performance](SAMPLER_OPTIMIZATION_EN.md)

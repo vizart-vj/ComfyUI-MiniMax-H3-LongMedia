@@ -99,6 +99,8 @@ def default_shot(index: int = 0, duration: float = 5.0) -> dict[str, Any]:
         "first_frame_anchor": False,
         "last_frame_anchor": False,
         "source_in": 0.0,
+        "base_kind": "generated",
+        "audio_continuation": "AUTO",
     }
 
 
@@ -200,6 +202,8 @@ def _normalize_shot(item: Any, index: int, subject_ids: set[str]) -> dict[str, A
         "first_frame_anchor": bool(item.get("first_frame_anchor", False)),
         "last_frame_anchor": bool(item.get("last_frame_anchor", False)),
         "source_in": max(0.0, _finite_float(item.get("source_in"), 0.0)),
+        "base_kind": ("media" if str(item.get("base_kind") or "generated").strip().lower() == "media" else "generated"),
+        "audio_continuation": (str(item.get("audio_continuation") or "AUTO").strip().upper() if str(item.get("audio_continuation") or "AUTO").strip().upper() in {"AUTO", "CONTINUE", "FRESH"} else "AUTO"),
     }
 
 
@@ -1131,6 +1135,9 @@ def compile_director_plan(
             "director_source_out_seconds": float(shot.get("source_in") or 0.0) + float(shot["duration"]),
             "director_first_frame_anchor": bool(shot.get("first_frame_anchor")),
             "director_last_frame_anchor": bool(shot.get("last_frame_anchor")),
+            "director_base_kind": str(shot.get("base_kind") or "generated"),
+            "director_media_subject_id": (str(shot.get("media_subject_id") or "").strip() or None),
+            "director_audio_continuation": str(shot.get("audio_continuation") or "AUTO"),
         })
         camera_clips.append({"index": index + 1, **camera, "instruction": camera_instruction})
 
@@ -1204,6 +1211,8 @@ def compile_director_plan(
     report = json.dumps({
         "kind": director_plan["kind"],
         "shots": len(output_clips),
+        "generated_blocks": sum(1 for x in document["shots"] if str(x.get("base_kind") or "generated") == "generated"),
+        "media_blocks": sum(1 for x in document["shots"] if str(x.get("base_kind") or "generated") == "media"),
         "subjects": len(document["subjects"]),
         "camera_blocks": len(document["camera_blocks"]),
         "audio_blocks": len(document["audio_blocks"]),

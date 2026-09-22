@@ -1,4 +1,4 @@
-# LongMedia Director 0.6.50 — Complete Guide
+# LongMedia Director 0.6.54 — Complete Guide
 
 LongMedia Director is the timeline-oriented authoring surface for **MiniMax H3 • LongMedia**. It combines shot timing, semantic references, FIRST/LAST frame anchors, cameras, temporal embeddings, audio policy, preview/review and TAKE management in one Director document.
 
@@ -48,6 +48,32 @@ Director shows draggable clip markers. `+ CLIP` splits at the playhead and `− 
 ### `segmented`
 
 One semantic scene is split into internal fixed-duration execution segments for VRAM/stability. `SEG` / `SEG LEN` control the segmentation policy. Segmentation is not a storyboard cut and should preserve one continuous scene.
+
+## BASE block types: GENERATED and MEDIA
+
+Every MAIN BASE block has an explicit runtime type:
+
+- **GENERATED · H3 TAKE** — an H3 clip with TAKE/cache/continuation state. It can be regenerated and can be a continuation parent.
+- **MEDIA · immutable video** — imported external video. It is never an H3 render unit and is never diffusion-sampled.
+
+Dropping a Video onto a new/content-empty MAIN BASE block promotes it to `MEDIA`. A non-empty GENERATED block keeps its existing video-reference semantics unless `BASE TYPE` is changed explicitly.
+
+Valid chains include:
+
+```text
+GENERATED -> GENERATED -> GENERATED
+MEDIA -> GENERATED -> GENERATED
+MEDIA -> GENERATED -> MEDIA -> GENERATED
+```
+
+### Native continuation contract
+
+Director hides the parent implementation from the child sampler:
+
+- `GENERATED -> GENERATED`: the child reuses the parent TAKE's saved native video/audio continuation state. The parent clip is not sampled or VideoVAE-encoded again.
+- `MEDIA -> GENERATED`: Director takes only the visible end tail of the MEDIA block, resamples that tail onto H3's continuation clock, VideoVAE-encodes only that window, and attaches the encoded tail as a native frame-0 `minimax_keyframes` guide to a **fresh child target**.
+
+The full imported movie never becomes target x0, is never covered by a noise mask, and is never sent through a full-video VAE roundtrip just to extend it. The hidden continuation overlap is removed from the visible child output during final assembly.
 
 ## MAIN shots, Ripple and snapping
 
@@ -157,6 +183,16 @@ The top `AUDIO` selector exposes the normal LongMedia audio contract:
 For native lip-sync, use `audio_strength = 1.0`. Audio 1 is the authoritative target clock; additional audio references can still be used for music, rhythm or ambience where the selected mode permits it.
 
 See [Audio Modes](AUDIO_MODES_GUIDE_EN.md).
+
+### Per-BASE audio continuation
+
+Each MAIN block also has `AUDIO CONTINUATION`:
+
+- `AUTO` — continue audio context across an adjacent BASE boundary when a usable parent audio tail exists;
+- `CONTINUE` — explicitly request continuation behavior;
+- `FRESH` — start the GENERATED child with fresh audio context even if the parent has audio.
+
+For imported MEDIA, only the required audio tail is encoded as continuation context. The original MEDIA soundtrack remains untouched in the old portion of the timeline. Final mixed MEDIA/GENERATED assembly accepts mono or stereo pieces; when stereo is required, mono is duplicated exactly to both channels rather than remixed/resampled.
 
 ## Program Monitor
 

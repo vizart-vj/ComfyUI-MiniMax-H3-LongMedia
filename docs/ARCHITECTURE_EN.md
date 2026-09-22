@@ -1,6 +1,6 @@
 # LongMedia Architecture
 
-This document describes the current LongMedia 0.6.50 runtime architecture. Public control names and internal identifiers are kept exactly as they appear in the UI/code.
+This document describes the current LongMedia 0.6.54 runtime architecture. Public control names and internal identifiers are kept exactly as they appear in the UI/code.
 
 ## Semantic Setup Contract
 
@@ -56,6 +56,19 @@ Planner owns clip prompts, durations, names and optional per-clip seeds. Cameras
 
 Planner is authoritative only in `timeline_mode=multiclip`.
 
+### Director BASE continuation
+
+Director MultiClip has two BASE types:
+
+```text
+GENERATED -> native TAKE continuation
+MEDIA     -> immutable external delivery media
+```
+
+Both produce the same child-facing continuation concept, but their source differs. GENERATED parents provide saved native H3 latent/audio state. MEDIA parents have no native H3 latent, so only the editorial tail window is VAE-encoded and attached to a fresh child target as a native frame-0 keyframe. MEDIA never becomes target x0 or a diffusion render unit.
+
+External continuation cache is keyed by media fingerprint, trim range, target geometry and overlap and stores tail state on CPU.
+
 ## Shared AV Latent
 
 MiniMax H3 operates on a nested AV latent:
@@ -66,6 +79,8 @@ audio: [B, 32, 2, T40]
 ```
 
 LongMedia preserves native MiniMax temporal-lattice rules and validates AV duration alignment at assembly boundaries.
+
+For mixed Director timelines, final assembly is run-aware: contiguous GENERATED runs are VideoVAE-decoded, while MEDIA RGB/audio is inserted directly. Hidden continuation overlap is removed only from the generated child. Mixed audio uses canonical `[1,C,L]` layout and supports mono/stereo without resampling; mono is duplicated exactly when the timeline requires stereo.
 
 ## References and Source Editing
 
@@ -124,6 +139,9 @@ LongMedia coordinates activation lifetime with ComfyUI Dynamic VRAM/AIMDO.
 
 Current mechanisms include:
 
+- packed-storage-aware AUTO routing for quantized INT8/W4A8/NVFP4 checkpoints;
+- file-backed Windows large-safetensors loading through ComfyUI ModelMMAP/TensorFileSlice when available;
+
 - streamed/chunked transformer MLP and output projections;
 - embedded Sol paths for bounded long-sequence execution;
 - exact Comfy Kitchen EXISTING query streaming when full fused QKV cannot fit;
@@ -131,7 +149,8 @@ Current mechanisms include:
 - guarded native INT8 residency on constrained GPUs;
 - sampler-entry memory isolation for cache-driven reruns;
 - release of transient CUDA references that could survive through cached guider/runtime state;
-- RAM-pressure-aware pinned-host-memory policy.
+- RAM-pressure-aware pinned-host-memory policy;
+- selective conditioning scope that skips redundant TE/control encoding for cached Director clips and releases TE residency before diffusion sampling without aggressive Windows working-set trimming.
 
 On constrained native INT8 systems, speculative dynamic-VBAR prefetch is gated so the next block does not reserve a competing transfer destination while the current activation set is live.
 
