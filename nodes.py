@@ -111,6 +111,11 @@ except ImportError:
     from audio_assembly import concatenate_director_audio
 
 try:
+    from .conditioning_contract import copy_condition_branches as _copy_condition_branches
+except ImportError:
+    from conditioning_contract import copy_condition_branches as _copy_condition_branches
+
+try:
     from .hires_refine import (
         audio_window_bounds as _hires_audio_window_bounds,
         default_chunk_tokens as _hires_default_chunk_tokens,
@@ -194,6 +199,8 @@ try:
         normalize_document as _director_normalize_document,
         director_frame_anchor_contract as _director_frame_anchor_contract,
         director_picture_runtime_map as _director_picture_runtime_map,
+        director_enabled_render_indices as _director_enabled_render_indices,
+        director_validate_enabled_run_scope as _director_validate_enabled_run_scope,
     )
 except ImportError:
     from director_plan import (
@@ -202,6 +209,8 @@ except ImportError:
         normalize_document as _director_normalize_document,
         director_frame_anchor_contract as _director_frame_anchor_contract,
         director_picture_runtime_map as _director_picture_runtime_map,
+        director_enabled_render_indices as _director_enabled_render_indices,
+        director_validate_enabled_run_scope as _director_validate_enabled_run_scope,
     )
 try:
     from .director_cache import DirectorClipCache as _DirectorClipCache, canonical_hash as _director_canonical_hash
@@ -879,6 +888,12 @@ def _lm_refmod_source_payload(record: dict, document: dict, media: dict, project
     subject_id = str(record.get('source_subject_id') or '').strip()
     clip_id = str(record.get('source_clip_id') or '').strip()
     revision = str(record.get('source_take_revision') or '').strip()
+    if (source.lower().startswith(('input/', 'input\\'))
+            and source.lower().endswith('.safetensors')):
+        raise ValueError(
+            'This source is an already-encoded RefMod .safetensors artifact, not raw Director media. '
+            'Use it as-is, or add the original image/video/audio with CREATE FROM SOURCES to re-encode.'
+        )
     if source.startswith('subject:'):
         subject_id = source.split(':', 1)[1].strip()
     elif source.startswith('clip:'):
@@ -1368,7 +1383,8 @@ def _lm_refmod_encode_uploaded_sources(record: dict, sources: list[dict], video_
 
 
 def _lm_refmod_blocks_for_segment(record_by_id: dict, spans: list, document: dict,
-                                  media: dict, project_id: str, video_vae, audio_vae):
+                                  media: dict, project_id: str, video_vae, audio_vae,
+                                  loaded_cache: dict | None = None):
     """Load prepared records and return native blocks + authored routes.
 
     Setup deliberately never encodes here: an unprepared RefMod fails loudly so
@@ -1379,7 +1395,7 @@ def _lm_refmod_blocks_for_segment(record_by_id: dict, spans: list, document: dic
     )
     blocks = []
     specs = []
-    loaded = {}
+    loaded = loaded_cache if isinstance(loaded_cache, dict) else {}
     packed = []
     for raw in sorted((dict(v) for v in (spans or [])), key=lambda v: (int(v.get('order', 0)), str(v.get('refmod_id', '')))):
         refmod_id = str(raw.get('refmod_id') or '').strip()
@@ -9648,7 +9664,13 @@ def _run_h3_existing_ck_streamed_attention(
     rope_freqs,
     transformer_options: dict,
     state: dict,
-):
+    *,
+    query_intervals: tuple[
+        tuple[int, int, tuple[tuple[int, int], ...], tuple[tuple[int, int, float], ...]], ...
+    ] | None = None,
+    character_balance_by_query: dict[tuple[int, int], float] | None = None,
+    character_key_ranges: set[tuple[int, int]] | None = None,
+) -> torch.Tensor:
     """Exact low-VRAM Comfy-Kitchen EXISTING attention for giant H3 sequences.
 
     Contract:
@@ -9662,7 +9684,10 @@ def _run_h3_existing_ck_streamed_attention(
     CK documents unequal non-causal Q/K lengths, and its Q quantizer is local to
     independent 128-row blocks.  Therefore query chunking changes lifetime and
     launch geometry only; it does not change attention math, K anchoring, V
-    scaling, or the user-selected Comfy Kitchen backend.
+    scaling, or the user-selected Comfy Kitchen backend. Optional Director
+    routes add the same additive visibility/bias mask as the dense routed path.
+    Query actions stay on CK's 128-row scale boundaries; only a boundary tile
+    gets a small row-wise mask.
     """
     import comfy.model_management
     import comfy.quant_ops
@@ -9680,6 +9705,26 @@ def _run_h3_existing_ck_streamed_attention(
     inner = heads * head_dim
     chunk = _h3_existing_ck_stream_chunk_tokens(state)
     chunks = (seq + chunk - 1) // chunk
+    routed = query_intervals is not None
+    route_rows = tuple(query_intervals or ())
+    route_biases = character_balance_by_query if isinstance(character_balance_by_query, dict) else {}
+    character_ranges = character_key_ranges if isinstance(character_key_ranges, set) else set()
+    if routed:
+        cursor = 0
+        for route in route_rows:
+            if not isinstance(route, (tuple, list)) or len(route) != 4:
+                raise ValueError('Streamed RefMod attention received a malformed query route.')
+            route_start, route_stop = int(route[0]), int(route[1])
+            if route_start != cursor or route_stop <= route_start or route_stop > seq:
+                raise ValueError(
+                    'Streamed RefMod attention routes must tile the packed sequence; '
+                    f'expected {cursor}, got {route_start}:{route_stop} of {seq}.'
+                )
+            cursor = route_stop
+        if cursor != seq:
+            raise ValueError(
+                f'Streamed RefMod attention routes cover {cursor} rows, expected {seq}.'
+            )
     elem = max(1, int(x.element_size()))
     one_full = seq * inner * elem
     qkv_full = 3 * one_full
@@ -9835,12 +9880,19 @@ def _run_h3_existing_ck_streamed_attention(
     k_hnd = k_seq.transpose(1, 2)
     v_hnd = v_seq.transpose(1, 2)
     dummy_q = k_hnd[:, :, :1, :]
+    # Comfy Kitchen chooses CTA_K=64 for masked attention and CTA_K=128 for
+    # unmasked long D128/D256 attention. The mask values do not affect Q/K/V
+    # quantization, but its presence selects the matching packed layout.
+    kv_mask_hint = (
+        torch.zeros((1, 1, 1, seq), dtype=x.dtype, device=x.device)
+        if routed else None
+    )
     shared = prequantize_int8_attention(
         dummy_q, k_hnd, v_hnd,
         scale=float(head_dim ** -0.5),
-        attn_mask=None,
+        attn_mask=kv_mask_hint,
     )
-    del dummy_q, k_hnd, v_hnd, k_seq, v_seq
+    del dummy_q, k_hnd, v_hnd, k_seq, v_seq, kv_mask_hint
 
     # After BF K/V dies, reserve room for the full block result plus one query
     # chunk.  The allocator may reuse the just-freed K/V segments directly.
@@ -9853,19 +9905,117 @@ def _run_h3_existing_ck_streamed_attention(
     result = torch.empty_like(x)
 
     # CK chooses the Q Hadamard rotation from K length (D128: H4 for <=256,
-    # H128 for long K) and chooses CTA128 for long D128/D256 K.  Query replay
-    # must therefore use a small *long-shape* dummy K/V, not a one-row dummy,
-    # otherwise Q quantization would silently change.  1025 is the minimum
-    # length that reproduces the long-sequence rotation + CTA selection while
-    # keeping the dummy footprint tiny (~14 MiB at H3 D128/H56 BF16).
+    # H128 for long K), and chooses CTA_K from both K length and mask presence.
+    # Query replay therefore uses a small *long-shape* dummy K/V plus a zero
+    # mask hint when routing is active; this preserves the masked long-K layout
+    # without allocating a full Q-by-K mask for the quantizer. 1025 is the
+    # minimum length that reproduces long-sequence dispatch.
     ck_dummy_kv = x.new_zeros((1, heads, 1025, head_dim))
+    ck_dummy_mask = (
+        torch.zeros((1, 1, 1, 1025), dtype=x.dtype, device=x.device)
+        if routed else None
+    )
+
+    # Query INT8 scales are independent in 128-row groups. Keep every streamed
+    # projection boundary aligned to that contract. Adjacent route intervals
+    # with identical visibility/bias are coalesced; a 128-row tile that crosses
+    # a real route boundary gets a row-wise mask without changing Q quantization.
+    q_actions = []
+    if routed:
+        route_index = 0
+        mixed_tile_count = 0
+        for stream_start in range(0, seq, chunk):
+            stream_stop = min(seq, stream_start + chunk)
+            pending = None
+
+            def _flush_pending():
+                nonlocal pending
+                if pending is not None:
+                    q_actions.append((
+                        'uniform', int(pending[0]), int(pending[1]),
+                        ((int(pending[0]), int(pending[1]), pending[2], pending[3], pending[4]),),
+                    ))
+                    pending = None
+
+            tile_start = stream_start
+            while tile_start < stream_stop:
+                tile_stop = min(stream_stop, tile_start + 128)
+                pieces = []
+                cursor = tile_start
+                while cursor < tile_stop:
+                    while route_index < len(route_rows) and int(route_rows[route_index][1]) <= cursor:
+                        route_index += 1
+                    if route_index >= len(route_rows):
+                        raise RuntimeError('Streamed RefMod query route ended before the packed sequence.')
+                    qa, qb, hidden, active = route_rows[route_index]
+                    qa, qb = int(qa), int(qb)
+                    if qa > cursor or qb <= cursor:
+                        raise RuntimeError(
+                            f'Streamed RefMod query route has a gap or overlap at row {cursor}: {qa}:{qb}.'
+                        )
+                    piece_stop = min(tile_stop, qb)
+                    bias = float(route_biases.get((qa, qb), 0.0) or 0.0)
+                    pieces.append((
+                        int(cursor), int(piece_stop), tuple(hidden), tuple(active), bias,
+                    ))
+                    cursor = piece_stop
+
+                first = pieces[0]
+                first_signature = (first[2], first[3], first[4])
+                uniform = all((piece[2], piece[3], piece[4]) == first_signature for piece in pieces)
+                if uniform:
+                    if (pending is not None and pending[1] == tile_start
+                            and (pending[2], pending[3], pending[4]) == first_signature):
+                        pending[1] = tile_stop
+                    else:
+                        _flush_pending()
+                        pending = [tile_start, tile_stop, first[2], first[3], first[4]]
+                else:
+                    _flush_pending()
+                    q_actions.append(('mixed', tile_start, tile_stop, tuple(pieces)))
+                    mixed_tile_count += 1
+                tile_start = tile_stop
+            _flush_pending()
+        state['existing_ck_stream_refmod_route_actions'] = len(q_actions)
+        state['existing_ck_stream_refmod_mixed_tiles'] = mixed_tile_count
+    else:
+        q_actions = [
+            ('stock', start, min(seq, start + chunk), ())
+            for start in range(0, seq, chunk)
+        ]
+
+    def _attention_mask_for_action(action) -> torch.Tensor | None:
+        if not routed:
+            return None
+        kind, start, end, pieces = action
+        q_length = int(end) - int(start)
+        mask_rows = 1 if kind == 'uniform' else q_length
+        mask = torch.zeros((1, 1, mask_rows, seq), dtype=x.dtype, device=x.device)
+        neg = torch.finfo(x.dtype).min
+        for qa, qb, hidden, active, balance_bias in pieces:
+            row_start = 0 if kind == 'uniform' else max(0, int(qa) - int(start))
+            row_stop = 1 if kind == 'uniform' else min(q_length, int(qb) - int(start))
+            if row_stop <= row_start:
+                continue
+            for key_start, key_stop in hidden:
+                mask[..., row_start:row_stop, int(key_start):int(key_stop)] = neg
+            for key_start, key_stop, weight in active:
+                weight = max(0.0, min(1.0, float(weight)))
+                if weight <= 0.0:
+                    continue
+                bias = 0.0 if weight >= 1.0 - 1e-7 else math.log(max(weight, 1e-4))
+                if (int(key_start), int(key_stop)) in character_ranges:
+                    bias += weight * float(balance_bias)
+                mask[..., row_start:row_stop, int(key_start):int(key_stop)] = bias
+        return torch.broadcast_to(mask, (1, heads, q_length, seq))
 
     qkv_handle = _prepare_qkv_handle()
     out_handle = None
     row_sliced_q = bool(qkv_handle is not None)
     try:
-        for start in range(0, seq, chunk):
-            end = min(seq, start + chunk)
+        for action in q_actions:
+            _action_kind, start, end, _action_routes = action
+            start, end = int(start), int(end)
             q_rows = None
             qkv_part = None
             if qkv_handle is not None:
@@ -9889,15 +10039,19 @@ def _run_h3_existing_ck_streamed_attention(
             q_pack = prequantize_int8_attention(
                 q_hnd, ck_dummy_kv, ck_dummy_kv,
                 scale=shared.attention_scale,
-                attn_mask=None,
+                attn_mask=ck_dummy_mask,
             )
-            packed = _dc_replace(shared, q=q_pack.q, q_scale=q_pack.q_scale)
+            attention_mask = _attention_mask_for_action(action)
+            packed = _dc_replace(
+                shared, q=q_pack.q, q_scale=q_pack.q_scale,
+                attn_mask=attention_mask,
+            )
             del q_hnd, q4, q_part, q_rows
             if qkv_part is not None:
                 del qkv_part, _k_dead, _v_dead
 
             out_hnd = int8_attention_from_prequantized(packed)
-            del packed, q_pack
+            del packed, q_pack, attention_mask
             n = end - start
             flat = out_hnd.transpose(1, 2).contiguous().view(n, inner)
             del out_hnd
@@ -9920,14 +10074,17 @@ def _run_h3_existing_ck_streamed_attention(
         if out_handle not in (None, False):
             _int8_release_block_linear(out_handle)
 
-    del ck_dummy_kv
+    del ck_dummy_kv, ck_dummy_mask
     state['existing_ck_stream_row_sliced_q'] = bool(row_sliced_q)
     if not state.get('existing_ck_stream_projection_announced'):
         _lm_print(
             '[MiniMaxH3 LongMedia][EXISTING CK STREAM] '
             f'projection rows: KV={"native-sliced" if row_sliced_kv else "stock-chunked"}, '
             f'Q={"native-sliced" if row_sliced_q else "stock-chunked"}; '
-            'query replay completed against one globally prequantized K/V store',
+            f'query replay completed against one globally prequantized K/V store; '
+            f'director_routes={bool(routed)}; '
+            f'route_actions={int(state.get("existing_ck_stream_refmod_route_actions", 0) or 0)}; '
+            f'mixed_128_tiles={int(state.get("existing_ck_stream_refmod_mixed_tiles", 0) or 0)}',
             flush=True,
         )
         state['existing_ck_stream_projection_announced'] = True
@@ -10562,14 +10719,29 @@ def _run_h3_temporal_embedding_attention(attn, x, rope_freqs, transformer_option
             state['director_route_identity_announced'] = True
         return None
 
-    # Combined temporal routing needs one shared full K/V store. Preserve the
-    # existing exactness guard rather than silently splitting a Director shot.
+    # Combined temporal routing normally uses the selected optimized masked
+    # backend. When CK's giant-sequence guard is active, keep the MAIN shot in
+    # one sampler pass and route its mask through the existing exact Q-streamed
+    # CK carrier instead of requiring the dense fused-QKV allocation.
     if _h3_existing_ck_stream_needed(attn, x, transformer_options, state):
-        raise RuntimeError(
-            'Single-pass Director RefMod routing requires the dense exact Q/K/V path for this sequence, '
-            'but the current target requires streamed CK attention. Reduce target resolution/length or '
-            'remove interval-gated RefMods; LongMedia will not silently split the MAIN shot.'
+        result = _run_h3_existing_ck_streamed_attention(
+            attn, x, rope_freqs, transformer_options, state,
+            query_intervals=query_intervals,
+            character_balance_by_query=character_balance_by_query,
+            character_key_ranges=character_key_ranges,
         )
+        if not state.get('director_refmod_attention_announced'):
+            _lm_print(
+                '[MiniMaxH3 LongMedia][DIRECTOR REFMOD ATTENTION] '
+                f'members={len(refmod_route.members)}; target_cells={len(refmod_route.cells)}; '
+                f'query_partitions={len(query_intervals)}; temporal_controls={len(temporal_specs)}; '
+                'native_minimax_refs=True; authored_frame_clock=True; '
+                'attention=streamed Comfy Kitchen INT8 with exact routed mask; '
+                'MAIN split=False; TAKE continuity unchanged',
+                flush=True,
+            )
+            state['director_refmod_attention_announced'] = True
+        return result
 
     _ensure_h3_existing_workspace(attn, x, transformer_options, state)
     heads = int(attn.heads)
@@ -23606,8 +23778,10 @@ class MiniMaxH3LatentLabLongMediaSetup:
                 )
 
         # Resolve the selective-conditioning scope before RefMod source loading.
-        # This keeps cached prefix/suffix TAKEs free of redundant RefMod I/O/VAE.
+        # Ordinary selective runs skip unused conditioning; active RefMods widen
+        # the prepared scope below because the cache may widen sampling later.
         _director_required_conditioning_indices = None
+        _director_refmod_fallback_conditioning_scope = False
         if getattr(plan, 'mode', None) == 'multiclip' and multiclip_clips and director_cfg is not None:
             _regen_mode = str((director_regeneration_cfg or {}).get('mode') or 'none').strip().lower()
             _clip_ids_for_conditioning = [str(c.get('clip_id') or '') for c in multiclip_clips]
@@ -23622,6 +23796,23 @@ class MiniMaxH3LatentLabLongMediaSetup:
                 _selected = {i for i, cid in enumerate(_clip_ids_for_conditioning) if cid in _range_ids}
                 if _selected:
                     _director_required_conditioning_indices = _selected
+            # The sampler resolves cache validity after Setup has built all pass
+            # conditionings. A requested one-clip reroll can therefore expand to an
+            # earlier stale prefix or to the dependent suffix. If RefMods are active,
+            # preparing only the requested index leaves those newly-rendered passes
+            # with None conditioning and silently removes their RefMod. Keep all pass
+            # conditionings ready for the cache-dependent regeneration modes; cached
+            # units still skip diffusion in the sampler.
+            _has_active_director_refmods = any(
+                bool(c.get('director_refmod_spans'))
+                for c in multiclip_clips if isinstance(c, dict)
+            )
+            if (
+                _has_active_director_refmods
+                and _regen_mode in ('clip', 'from_here', 'recast')
+            ):
+                _director_required_conditioning_indices = set(range(len(multiclip_clips)))
+                _director_refmod_fallback_conditioning_scope = True
             if _director_required_conditioning_indices is not None and bool(getattr(plan, 'loop_closure_enabled', False)):
                 _director_required_conditioning_indices.add(max(0, len(multiclip_clips) - 1))
 
@@ -23645,6 +23836,7 @@ class MiniMaxH3LatentLabLongMediaSetup:
                     _base_ref_count = max(_base_ref_count, len(v329_native_refs[1]))
                 _block_rows = []
                 _spec_rows = []
+                _loaded_refmod_members = {}
                 _direct_clips_for_refmods = list((director_clip_plan or {}).get('clips') or [])
                 for _seg_idx in range(int(getattr(plan, 'passes', 1))):
                     if (_director_required_conditioning_indices is not None
@@ -23680,6 +23872,7 @@ class MiniMaxH3LatentLabLongMediaSetup:
                     _blocks, _raw_specs = _lm_refmod_blocks_for_segment(
                         _record_by_id, _raw_spans, _director_document,
                         director_media_cfg or {}, director_project_id, vae, audio_vae,
+                        loaded_cache=_loaded_refmod_members,
                     ) if _raw_spans else ([], [])
                     _localized_specs = _lm_localize_refmod_specs(
                         _raw_specs, plan=plan, segment_index=_seg_idx,
@@ -23716,7 +23909,8 @@ class MiniMaxH3LatentLabLongMediaSetup:
             _lm_print(
                 '[MiniMaxH3 LongMedia][DIRECTOR SETUP CONDITIONING SCOPE] '
                 f'mode={_regen_mode}; required_clips={[i + 1 for i in sorted(_director_required_conditioning_indices)]}; '
-                'cached_clips_skip_TE_and_RefMod_encode=True',
+                f'refmod_cache_fallback_safe={bool(_director_refmod_fallback_conditioning_scope)}; '
+                f'cached_clips_skip_TE_and_RefMod_encode={len(_director_required_conditioning_indices) < len(multiclip_clips)}',
                 flush=True,
             )
 
@@ -23816,6 +24010,7 @@ class MiniMaxH3LatentLabLongMediaSetup:
                 'embedding_spans': [dict(r) for r in (item.get('director_embedding_spans') or [])],
                 'refmod_spans': [dict(r) for r in (item.get('director_refmod_spans') or [])],
                 'base_kind': str(item.get('director_base_kind') or 'generated'),
+                'run_enabled': item.get('director_run_enabled') is not False,
                 'media_subject_id': (str(item.get('director_media_subject_id') or '').strip() or None),
                 'audio_continuation': str(item.get('director_audio_continuation') or 'AUTO').upper(),
             } for item in _director_clips)
@@ -23827,6 +24022,7 @@ class MiniMaxH3LatentLabLongMediaSetup:
                 if director_regeneration_cfg.get('mode') == 'recast' and not director_regeneration_cfg.get('source_revision'):
                     raise ValueError('Director Recast requires the selected source take revision.')
             _director_base_kinds = tuple(str(m.get('base_kind') or 'generated') for m in _director_meta)
+            _director_clip_enabled = tuple(m.get('run_enabled') is not False for m in _director_meta)
             _director_audio_continuation = tuple(str(m.get('audio_continuation') or 'AUTO').upper() for m in _director_meta)
             _director_base_media = [None for _ in _director_meta]
             if isinstance(director_media_cfg, dict):
@@ -23862,6 +24058,7 @@ class MiniMaxH3LatentLabLongMediaSetup:
                 director_node_id=str(director_node_id),
                 director_clip_ids=_director_ids,
                 director_clip_metadata=_director_meta,
+                director_clip_enabled=_director_clip_enabled,
                 director_timeline_snapshot=director_timeline_snapshot,
                 director_regeneration=dict(director_regeneration_cfg),
                 director_reference_fingerprint=str(director_reference_fingerprint),
@@ -25350,9 +25547,7 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
     @staticmethod
     def _copy_conds(original_conds):
         import comfy.samplers
-        conds = {}
-        for key, values in (original_conds or {}).items():
-            conds[key] = [item.copy() if hasattr(item, 'copy') else item for item in values]
+        conds = _copy_condition_branches(original_conds)
         comfy.samplers.preprocess_conds_hooks(conds)
         return conds
 
@@ -26626,12 +26821,35 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                 external_refine_global_mode = True
 
         external_refine_mode = bool(external_refine_global_mode)
-        if external_refine_mode and int(passes) > 1 and any(getattr(plan, 'segment_temporal_embeddings', None) or ()):
-            # Each MAIN has a different packed regional text presentation. Using
-            # pass 0's context/row offsets over the whole movie is invalid.
+        _segment_refmod_routes_for_refine = getattr(plan, 'segment_refmods', None) or ()
+        _has_segment_refmod_routes_for_refine = any(
+            bool(row) for row in _segment_refmod_routes_for_refine
+        )
+        _has_segment_temporal_routes_for_refine = any(
+            getattr(plan, 'segment_temporal_embeddings', None) or ()
+        )
+        if (
+            external_refine_mode
+            and int(passes) > 1
+            and (_has_segment_temporal_routes_for_refine or _has_segment_refmod_routes_for_refine)
+        ):
+            # MAIN clips own independent packed presentations. A single global
+            # Refine guider carries only pass 0's native refs and local frame gates,
+            # so later clips silently inherit the wrong RefMods (or none). Reuse
+            # the established per-MAIN Refine path whenever either route is active.
             external_refine_global_mode = False
-            _lm_print('[MiniMaxH3 LongMedia][DIRECTOR REFINE] refining each MAIN with its own '
-                      'regional conditioning clock; continuous final VAE decode preserved', flush=True)
+            _route_reasons = []
+            if _has_segment_temporal_routes_for_refine:
+                _route_reasons.append('temporal conditioning')
+            if _has_segment_refmod_routes_for_refine:
+                _route_reasons.append('per-MAIN RefMod conditioning')
+            _lm_print(
+                '[MiniMaxH3 LongMedia][DIRECTOR REFINE] '
+                f'reason={", ".join(_route_reasons)}; '
+                'refining each MAIN with its own native refs and local conditioning clock; '
+                'continuous final VAE decode preserved',
+                flush=True,
+            )
 
         # Director persistent per-clip selective cache. Branch-level selective
         # regeneration remains a native MultiClip feature. Single/segmented Director
@@ -26656,9 +26874,18 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
         director_recast_clip_ids = tuple(str(v) for v in (director_regeneration.get('recast_clip_ids') or ()) if str(v).strip())
         director_recast_source_revisions = {str(k): str(v) for k, v in ((director_regeneration.get('source_revisions') or {}).items()) if str(k).strip() and str(v).strip()}
         director_clip_ids = tuple(str(v) for v in (getattr(plan, 'director_clip_ids', None) or ()))
+        _director_enabled_values = tuple(getattr(plan, 'director_clip_enabled', None) or ())
+        if len(_director_enabled_values) != int(passes):
+            _director_enabled_values = tuple(True for _ in range(int(passes)))
+        _director_base_kind_values = tuple(getattr(plan, 'director_base_kinds', None) or ())
+        if len(_director_base_kind_values) != int(passes):
+            _director_base_kind_values = tuple('generated' for _ in range(int(passes)))
+        _director_enabled_run_indices = set(_director_enabled_render_indices(
+            _director_enabled_values, _director_base_kind_values,
+        ))
         director_media_indices = {i for i in range(int(passes)) if _lm_director_is_media(plan, i)}
         _director_render_units = build_director_render_units(
-            tuple(getattr(plan, 'director_base_kinds', None) or ('generated',) * int(passes))
+            _director_base_kind_values
         )
         director_generated_indices = {int(unit.editorial_index) for unit in _director_render_units}
         if director_media_indices:
@@ -26673,6 +26900,7 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
         director_cached_takes = {}
         director_render_indices = set(director_generated_indices)
         director_clip_only_target = None
+        director_clip_only_targets = set()
         director_recast_target = None
         director_recast_targets = set()
         director_recast_source_by_index = {}
@@ -26699,6 +26927,30 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
         director_geometry = {}
         director_semantic = {}
         director_outgoing_contract = {}
+        director_run_subset_requested = (
+            director_request_mode == 'none'
+            and len(_director_enabled_run_indices) < len(director_generated_indices)
+        )
+        if director_run_subset_requested:
+            if workflow_name != 'multiclip':
+                raise RuntimeError(
+                    'Director clip activation requires native MultiClip execution. '
+                    'Set the timeline to MultiClip before disabling individual MAIN clips.'
+                )
+            if bool(external_refine_global_mode) or bool(getattr(plan, 'loop_closure_enabled', False)):
+                raise RuntimeError(
+                    'Director clip activation cannot preserve a partial run while Global Refine or Loop Closure '
+                    'couples the complete timeline. Disable that coupled mode or enable every MAIN clip.'
+                )
+            if not director_project_id or len(director_clip_ids) != int(passes):
+                raise RuntimeError(
+                    'Director clip activation needs stable clip identities and persistent TAKE caching. '
+                    'Reload the Director node and retry.'
+                )
+            enabled_targets = _director_enabled_run_indices & director_generated_indices
+            if not enabled_targets:
+                raise RuntimeError('Enable at least one GENERATED MAIN clip before running the timeline.')
+            director_clip_only_targets = set(enabled_targets)
 
         _director_cache_allowed = bool(
             director_project_id
@@ -26707,6 +26959,11 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
             and not bool(getattr(plan, 'loop_closure_enabled', False))
             and len(director_clip_ids) == int(passes)
         )
+        if director_run_subset_requested and not _director_cache_allowed:
+            raise RuntimeError(
+                'Director clip activation requires the native MultiClip TAKE cache; '
+                'this render configuration cannot safely replay disabled clips.'
+            )
         if _director_cache_allowed:
             try:
                 import folder_paths
@@ -26769,6 +27026,25 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                         _legacy_prefix_promoted = True
                         director_cache_report['legacy_single_prefix_reused'] = True
                         director_cache_report['legacy_single_prefix_revision'] = str(_legacy_meta.get('revision') or '') or None
+
+                if director_run_subset_requested:
+                    _geometry_matches = tuple(
+                        index in director_media_indices
+                        or _lm_director_take_matches(
+                            _active_meta.get(index), director_geometry[index], None
+                        )
+                        for index in range(int(passes))
+                    )
+                    _validated_enabled = _director_validate_enabled_run_scope(
+                        _director_enabled_values,
+                        _director_base_kind_values,
+                        _geometry_matches,
+                    )
+                    director_clip_only_targets = set(_validated_enabled)
+                    if director_clip_only_targets != (_director_enabled_run_indices & director_generated_indices):
+                        raise RuntimeError(
+                            'Director partial RUN scope changed during cache validation; refusing to widen the render.'
+                        )
 
                 _target_index = (
                     director_clip_ids.index(director_target_id)
@@ -26958,13 +27234,24 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                         'reason': 'request_already_completed',
                     })
                 elif director_request_mode == 'none':
-                    # Normal Queue is incremental too. Adding clip N+1 replays the
-                    # approved prefix from disk and samples only the new dependency
-                    # suffix; changing an existing clip starts at the earliest stale one.
-                    director_render_indices, _auto_plan = _lm_director_auto_incremental_plan(
-                        _active_meta, director_geometry, director_semantic, int(passes)
-                    )
-                    director_cache_report.update(_auto_plan)
+                    if director_run_subset_requested:
+                        # Clip activation is an explicit run scope. Do not let the
+                        # ordinary stale-suffix planner silently widen it.
+                        director_render_indices = set(_director_enabled_run_indices & director_generated_indices)
+                        director_clip_only_targets = set(director_render_indices)
+                        director_cache_report.update({
+                            'effective_mode': 'enabled_clips_only',
+                            'render_indices': sorted(int(index) for index in director_render_indices),
+                            'reason': 'disabled_generated_clips_replayed_from_active_takes',
+                        })
+                    else:
+                        # Normal Queue is incremental too. Adding clip N+1 replays the
+                        # approved prefix from disk and samples only the new dependency
+                        # suffix; changing an existing clip starts at the earliest stale one.
+                        director_render_indices, _auto_plan = _lm_director_auto_incremental_plan(
+                            _active_meta, director_geometry, director_semantic, int(passes)
+                        )
+                        director_cache_report.update(_auto_plan)
                 elif director_request_mode == 'recast_range' and director_recast_targets:
                     _outside = [i for i in range(int(passes)) if i not in director_recast_targets]
                     _unsafe_outside = [
@@ -27059,6 +27346,7 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                     else:
                         director_render_indices = {_target_index}
                         director_clip_only_target = _target_index
+                        director_clip_only_targets = {_target_index}
                         director_cache_report.update({
                             'effective_mode': ('recast_take_preserve_audio' if director_request_mode == 'recast' else 'clip_only_two_sided_lock'),
                             'start_index': _target_index,
@@ -27105,6 +27393,11 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                                     f'{type(_promote_exc).__name__}:{_promote_exc}'
                                 )
             except Exception as _cache_exc:
+                if director_run_subset_requested:
+                    raise RuntimeError(
+                        'Director clip activation cannot continue without its TAKE cache: '
+                        f'{type(_cache_exc).__name__}: {_cache_exc}'
+                    ) from _cache_exc
                 if director_request_mode in ('recast', 'recast_range'):
                     raise RuntimeError(
                         f'Director Recast requires its selected persistent take cache: {type(_cache_exc).__name__}: {_cache_exc}'
@@ -27141,11 +27434,21 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
         # plus the old target take required as the right-side lock for clip-only reroll.
         if director_cache is not None:
             _needed_cached_indices = (set(range(int(passes))) - set(director_render_indices)) - set(director_media_indices)
+            if director_run_subset_requested:
+                # Enabled targets also need their previous TAKE: it supplies the
+                # exact frame/audio boundary that keeps cached neighbors unchanged.
+                _needed_cached_indices.update(director_clip_only_targets)
             if director_clip_only_target is not None and int(director_clip_only_target) < int(passes) - 1:
                 _needed_cached_indices.add(int(director_clip_only_target))
             for _cache_index in sorted(_needed_cached_indices):
                 _take = director_cache.load_active(director_clip_ids[_cache_index])
                 if _take is None:
+                    if director_run_subset_requested:
+                        raise RuntimeError(
+                            'Director clip activation needs an active cached TAKE for every timeline clip '
+                            f'to preserve unchanged output; clip {director_clip_ids[_cache_index]!r} has none. '
+                            'Render or restore the complete timeline once, then disable clips.'
+                        )
                     if director_request_mode in ('recast', 'recast_range'):
                         raise RuntimeError(
                             f'Director Recast cached dependency disappeared for clip {director_clip_ids[_cache_index]!r}; '
@@ -27375,6 +27678,41 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                         )
                         continue
 
+                    _director_clip_rows_for_sample = tuple(
+                        getattr(plan, 'director_clip_metadata', None) or ()
+                    )
+                    if int(segment_index) < len(_director_clip_rows_for_sample):
+                        _clip_row = _director_clip_rows_for_sample[int(segment_index)]
+                        _active_refmod_ids = {
+                            str(span.get('refmod_id') or '').strip()
+                            for span in (_clip_row.get('refmod_spans') or ())
+                            if isinstance(span, dict) and str(span.get('refmod_id') or '').strip()
+                        } if isinstance(_clip_row, dict) else set()
+                        _prepared_refmod_ids = {
+                            str(spec.get('refmod_id') or '').strip()
+                            for spec in (
+                                (getattr(plan, 'segment_refmods', None) or ())[int(segment_index)]
+                                if int(segment_index) < len(getattr(plan, 'segment_refmods', None) or ())
+                                else ()
+                            )
+                            if isinstance(spec, dict) and str(spec.get('refmod_id') or '').strip()
+                        }
+                        _missing_refmod_ids = sorted(_active_refmod_ids - _prepared_refmod_ids)
+                        if _missing_refmod_ids:
+                            raise RuntimeError(
+                                'Director RefMod conditioning is missing for generated clip '
+                                f'{int(segment_index) + 1}: {_missing_refmod_ids}. '
+                                'Setup and selective-regeneration scopes disagree; no unconditioned render was started.'
+                            )
+                        if _active_refmod_ids:
+                            _lm_print(
+                                '[MiniMaxH3 LongMedia][DIRECTOR REFMOD SAMPLE CONTRACT] '
+                                f'clip={int(segment_index)+1}; '
+                                f'active={sorted(_active_refmod_ids)}; '
+                                f'prepared={sorted(_prepared_refmod_ids)}',
+                                flush=True,
+                            )
+
                     if external_refine_global_mode:
                         segment_av = first_local
                         external_refine_mask_cleared = True
@@ -27523,8 +27861,7 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                             )
 
                     director_boundary_report = None
-                    if (director_clip_only_target is not None
-                            and int(segment_index) == int(director_clip_only_target)
+                    if (int(segment_index) in director_clip_only_targets
                             and int(segment_index) < int(passes) - 1):
                         _old_take = director_cached_takes.get(int(segment_index))
                         if _old_take is None and director_cache is not None:
@@ -27555,6 +27892,13 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                                 flush=True,
                             )
                         except Exception as _lock_exc:
+                            if director_run_subset_requested:
+                                raise RuntimeError(
+                                    'Director clip activation could not preserve the selected clip boundary; '
+                                    'no disabled clip was regenerated. '
+                                    f'clip={director_clip_ids[int(segment_index)]!r}; '
+                                    f'{type(_lock_exc).__name__}: {_lock_exc}'
+                                ) from _lock_exc
                             # Never force a one-clip edit when there is not enough free
                             # latent middle, geometry changed unexpectedly, or the cached
                             # right boundary cannot be represented exactly. Keep the cached
@@ -28339,8 +28683,7 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                     # cached neighbours. This post-pass restoration is deliberately after
                     # Latent Hi-Res / integrated refine so those stages cannot repaint a
                     # boundary that was frozen on the low-res H3 branch.
-                    if (director_clip_only_target is not None
-                            and int(segment_index) == int(director_clip_only_target)):
+                    if int(segment_index) in director_clip_only_targets:
                         _old_take = director_cached_takes.get(int(segment_index))
                         if _old_take is None and director_cache is not None:
                             _old_take = director_cache.load_active(director_clip_ids[int(segment_index)])
@@ -28494,6 +28837,12 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                                 },
                             )
                         except Exception as _take_save_exc:
+                            if director_run_subset_requested:
+                                raise RuntimeError(
+                                    'Director clip activation could not save the regenerated TAKE; '
+                                    'the run stopped instead of expanding to disabled clips. '
+                                    f'{type(_take_save_exc).__name__}: {_take_save_exc}'
+                                ) from _take_save_exc
                             # A cache filesystem problem must not destroy an otherwise
                             # valid expensive render. Stop trusting take reuse for the
                             # remaining suffix and finish it through normal H3 execution.

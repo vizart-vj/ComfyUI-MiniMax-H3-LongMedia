@@ -1,4 +1,4 @@
-# LongMedia Director 0.6.60 — Complete Guide
+# LongMedia Director 0.6.63 — Complete Guide
 
 LongMedia Director is the timeline-oriented authoring surface for **MiniMax H3 • LongMedia**. It combines shot timing, semantic references, FIRST/LAST frame anchors, cameras, temporal embeddings, audio policy, preview/review and TAKE management in one Director document.
 
@@ -161,6 +161,8 @@ Important timing behavior:
 
 H3 camera control is learned language conditioning, not explicit calibrated 3D camera extrinsics.
 
+Shared Camera presets can be created and edited from any CAMERA clip's settings. Select a saved preset to apply it to the clip; `SAVE AS` creates one, `OVERWRITE` updates the selected preset, and `DELETE` removes it from the library. The library is stored in the Director workflow and remains available to all current and future CAMERA clips.
+
 See [Long Media Cameras](CAMERAS_GUIDE_EN.md).
 
 ## H3 embedding tracks
@@ -287,6 +289,12 @@ Key actions include:
 - **Recast / source replacement tools** — rebuild the required native-reference branch while preserving unaffected timeline state where the dependency contract allows it.
 
 If exact seam locking is unsafe, LongMedia expands the invalidated region instead of pretending that an incompatible cached suffix is safe.
+
+### Choosing clips for ordinary RUN and merging
+
+- The RUN switch appears on hover and is also available in the context menu and clip settings. A disabled GENERATED clip keeps its active TAKE and stays on the timeline.
+- Partial ordinary RUN is available in MultiClip. Every GENERATED clip needs an active TAKE with matching geometry; otherwise execution stops before sampling. This protects the duration and seams of disabled clips.
+- Shift-click selects a contiguous range; Ctrl/Cmd-click toggles individual clips. Only adjacent GENERATED clips with active TAKEs can be merged. The reversible group displays as one timeline block and keeps its original TAKEs; its inspector keeps per-component RUN switches. **Restore original clip boundaries** or Undo restores the previous boundaries.
 
 See [Director Selective Regeneration](DIRECTOR_REGENERATION_GUIDE_EN.md).
 

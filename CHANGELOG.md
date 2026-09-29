@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.6.63
+
+### Director camera presets and conditioning safety
+
+- Camera presets can be created, applied, renamed/overwritten and deleted from any CAMERA clip. The shared preset library is serialized in the Director document, so it stays available to existing and newly created CAMERA clips and survives workflow reloads.
+- Missing optional ComfyUI conditioning branches are normalized to empty condition lists before guider preprocessing. A missing required positive branch now fails with an explicit error instead of an opaque `NoneType` iteration traceback.
+- Changing an AUDIO clip role from `diegetic` to `reactive` remains a supported edit and can invalidate that clip's generated TAKE; regeneration now handles absent optional conditioning branches safely.
+
+## 0.6.62
+
+### Director clip activation and reversible merge
+
+- MAIN generated clips can be enabled or disabled for ordinary RUN from the timeline, clip settings, and context menu. Disabled clips replay their current cached TAKE; partial RUN requires a valid MultiClip cache and compatible clip geometry and never silently widens its render scope.
+- Multi-select adjacent generated MAIN clips and merge them into one reversible timeline group. Existing per-clip TAKEs remain intact; Undo or Restore original clip boundaries returns the prior clips without diffusion.
+- Clip activation is serialized in `director_json`; older Director documents default to all clips enabled.
+
+## 0.6.61
+
+### RefMod reliability
+
+- Interval-gated RefMod attention now uses Comfy Kitchen's streamed-Q INT8 path on long sequences, preserving shared globally quantized K/V and exact per-query visibility/strength/character masks without a dense Q×K allocation or splitting the MAIN shot.
+- RefMod ENCODE now reuses the original media saved by CREATE FROM SOURCES. Imported `.safetensors` artifacts without raw source media remain ready to use and no longer offer an invalid VAE re-encode against the artifact path.
+
 ## 0.6.60
 
 ### Director, RefMod, MultiClip and documentation
@@ -8,6 +31,8 @@
 - Motion Repair now survives workflow reloads: the Setup UI can reorder widgets for presentation, but workflow serialization writes their values in the original Python `INPUT_TYPES` order. Build label: `director-motion-repair-toggle-persist`.
 - MultiClip Latent Hi-Res + Refine now seeds each generated clip's hidden overlap from the preceding clip's refined high-resolution tail and freezes that prefix during Stage 2. This gives the Refiner consistent geometry/color context across clip boundaries while keeping Stage 1 continuation, clip prompts, final single VAE decode, and exact audio passthrough unchanged. Build label: `director-upscale-refine-multiclip-seam-fix`.
 - Character RefMods now keep identity authority across MultiClip boundaries: on target-video queries only, their visual attention share is balanced against longer competing visual-reference streams, while audio and other RefMod concepts keep their existing routing. Character guidance distinguishes identity from motion and scene inherited from video context. Build label: `director-refmod-character-multiclip-balance`.
+- Director clip regeneration now prepares per-clip conditioning across cache-dependent fallback ranges, so a one-clip request that safely expands to a stale prefix or dependent suffix does not lose RefMods on newly sampled clips. The sampler validates active RefMod IDs before starting each generated clip and reports a contract error instead of silently sampling without one.
+- MultiClip Hi-Res Refine now keeps per-MAIN RefMod conditioning instead of collapsing those routes into pass 0's global conditioning. Refined clips receive their own native RefMod blocks and local frame windows.
 - RefMod Inspector now uses the upstream extraction controls and meanings: downscale-only short-edge resolution before VAE encode, visual token cap, aspect-fitted grid long edge, mode-aware clip-frame limit, audio-only voice seconds, and Compressed-only refinement steps. ENCODE applies these before/after the corresponding VAE steps; legacy `spatial_grid` and `temporal_frames` documents migrate into the clearer controls. Build label: `refmod-upstream-controls`.
 - Director shows BASE VIDEO SCALE only when the BASE clip owns a Video reference; an old explicitly saved non-default scale remains visible as EXTERNAL VIDEO 1 SCALE. VIDEO LAYER SCALE appears only on a layer clip with an assigned Video. Empty BASE clips at the default 100% no longer force a shared video slot back to full resolution when another clip asks for a smaller scale. Build label: `director-scale-ownership`.
 - Director now releases detached timeline video-strip decoders on every full UI refresh, unloads old TAKE gallery thumbnails when switching views, limits decoded preview-image retention to eight LRU entries, and reuses the Program Monitor video element instead of replacing it. TAKE gallery thumbnails load lazily. The global layer-height slider now sits beside timeline zoom and Fit. Build label: `director-preview-memory`.

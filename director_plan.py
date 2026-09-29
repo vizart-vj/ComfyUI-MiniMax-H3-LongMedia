@@ -25,6 +25,7 @@ MIN_SHOTS = 1
 MAX_SHOTS = 32
 MAX_SUBJECTS = 16
 MAX_CAMERA_BLOCKS = 64
+MAX_CAMERA_PRESETS = 128
 MAX_AUDIO_BLOCKS = 64
 MAX_EXTRA_TRACKS = 24
 MAX_EXTRA_CLIPS = 256
@@ -141,6 +142,7 @@ def default_camera_block(start: float = 0.0, duration: float = 5.0) -> dict[str,
         "start": float(start),
         "duration": float(duration),
         "camera": dict(DEFAULT_CAMERA),
+        "camera_preset_id": None,
         "note": "",
     }
 
@@ -169,6 +171,7 @@ def default_document() -> dict[str, Any]:
             default_camera_block(5.0, 5.0),
             default_camera_block(10.0, 5.0),
         ],
+        "camera_preset_library": [],
         "audio_blocks": [],
         "refmods": [],
         "extra_tracks": [],
@@ -248,8 +251,50 @@ def _normalize_shot(item: Any, index: int, subject_ids: set[str]) -> dict[str, A
         "source_in": max(0.0, _finite_float(item.get("source_in"), 0.0)),
         "video_reference_scale": max(0.25, min(1.0, _finite_float(item.get("video_reference_scale"), 1.0))),
         "base_kind": ("media" if str(item.get("base_kind") or "generated").strip().lower() == "media" else "generated"),
+        # False is an explicit editorial instruction to replay the approved TAKE
+        # during ordinary RUN. Older Director documents default to enabled.
+        "run_enabled": item.get("run_enabled") is not False,
         "audio_continuation": (str(item.get("audio_continuation") or "AUTO").strip().upper() if str(item.get("audio_continuation") or "AUTO").strip().upper() in {"AUTO", "CONTINUE", "FRESH"} else "AUTO"),
     }
+
+
+def director_enabled_render_indices(
+    clip_enabled: Sequence[Any],
+    base_kinds: Sequence[Any],
+) -> tuple[int, ...]:
+    """Return enabled GENERATED Director indices without promoting MEDIA to work."""
+    if len(clip_enabled) != len(base_kinds):
+        raise ValueError("Director enabled-state and BASE-kind lists must have equal length.")
+    return tuple(
+        index
+        for index, (enabled, base_kind) in enumerate(zip(clip_enabled, base_kinds))
+        if enabled is not False and str(base_kind or "generated").strip().lower() != "media"
+    )
+
+
+def director_validate_enabled_run_scope(
+    clip_enabled: Sequence[Any],
+    base_kinds: Sequence[Any],
+    cached_geometry_matches: Sequence[Any],
+) -> tuple[int, ...]:
+    """Validate that a partial RUN can replay every non-rendered generated TAKE."""
+    if len(clip_enabled) != len(base_kinds) or len(base_kinds) != len(cached_geometry_matches):
+        raise ValueError("Director run state, BASE-kind, and cached-geometry lists must have equal length.")
+    generated = tuple(
+        index for index, kind in enumerate(base_kinds)
+        if str(kind or "generated").strip().lower() != "media"
+    )
+    stale = tuple(index for index in generated if cached_geometry_matches[index] is not True)
+    if stale:
+        labels = ", ".join(str(index + 1) for index in stale)
+        raise RuntimeError(
+            "Partial Director RUN requires geometry-compatible active TAKEs for every GENERATED clip; "
+            f"missing or outdated clip indices: {labels}. Restore/render the complete timeline first."
+        )
+    enabled = director_enabled_render_indices(clip_enabled, base_kinds)
+    if not enabled:
+        raise RuntimeError("Enable at least one GENERATED MAIN clip before running the timeline.")
+    return enabled
 
 
 def _normalize_camera(item: Any) -> dict[str, Any]:
@@ -263,6 +308,26 @@ def _normalize_camera(item: Any) -> dict[str, Any]:
     return out
 
 
+def _normalize_camera_preset_library(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    presets: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    seen_names: set[str] = set()
+    for item in raw[:MAX_CAMERA_PRESETS]:
+        if not isinstance(item, dict):
+            continue
+        preset_id = str(item.get("id") or item.get("preset_id") or "").strip() or _id("camera-preset")
+        name = str(item.get("name") or "").strip()[:100]
+        normalized_name = name.casefold()
+        if not name or preset_id in seen_ids or normalized_name in seen_names:
+            continue
+        seen_ids.add(preset_id)
+        seen_names.add(normalized_name)
+        presets.append({"id": preset_id[:160], "name": name, "camera": _normalize_camera(item.get("camera"))})
+    return presets
+
+
 def _normalize_camera_block(item: Any, index: int) -> dict[str, Any]:
     item = item if isinstance(item, dict) else {}
     return {
@@ -270,6 +335,7 @@ def _normalize_camera_block(item: Any, index: int) -> dict[str, Any]:
         "start": max(0.0, _finite_float(item.get("start"), 0.0)),
         "duration": max(0.25, min(600.0, _finite_float(item.get("duration"), 5.0))),
         "camera": _normalize_camera(item.get("camera")),
+        "camera_preset_id": str(item.get("camera_preset_id") or "").strip()[:160] or None,
         "note": str(item.get("note") or "").strip(),
     }
 
@@ -596,6 +662,7 @@ def normalize_document(raw: Any) -> dict[str, Any]:
 
     camera_track_enabled = data.get("camera_track_enabled") is not False
     audio_track_enabled = data.get("audio_track_enabled") is not False
+    camera_preset_library = _normalize_camera_preset_library(data.get("camera_preset_library"))
     camera_raw = data.get("camera_blocks") if isinstance(data.get("camera_blocks"), list) else []
     camera_blocks = [_normalize_camera_block(item, i) for i, item in enumerate(camera_raw[:MAX_CAMERA_BLOCKS])]
     if not isinstance(data.get("camera_blocks"), list):
@@ -708,6 +775,7 @@ def normalize_document(raw: Any) -> dict[str, Any]:
         "subjects": subjects,
         "shots": shots,
         "camera_blocks": camera_blocks,
+        "camera_preset_library": camera_preset_library,
         "audio_blocks": audio_blocks,
         "refmods": refmods,
         "extra_tracks": extra_tracks,
@@ -1440,6 +1508,7 @@ def compile_director_plan(
             "director_first_frame_anchor": bool(shot.get("first_frame_anchor")),
             "director_last_frame_anchor": bool(shot.get("last_frame_anchor")),
             "director_base_kind": str(shot.get("base_kind") or "generated"),
+            "director_run_enabled": bool(shot.get("run_enabled", True)),
             "director_media_subject_id": (str(shot.get("media_subject_id") or "").strip() or None),
             "director_audio_continuation": str(shot.get("audio_continuation") or "AUTO"),
         })

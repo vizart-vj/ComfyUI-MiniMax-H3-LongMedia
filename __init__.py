@@ -1,4 +1,4 @@
-__version__ = "0.6.60"
+__version__ = "0.6.63"
 
 from . import windows_safetensors_compat as _windows_safetensors_compat  # noqa: F401
 from . import lora_compat as _lora_compat  # noqa: F401
@@ -352,16 +352,54 @@ def _install_director_take_routes():
             )
 
         def _encode_blocking():
-            from .nodes import _lm_refmod_encode_one
+            from .nodes import (
+                _lm_load_h3_vae, _lm_refmod_encode_one,
+                _lm_refmod_encode_uploaded_sources,
+            )
             _, project = _refmod_root(project_id)
             refmod_id = str(record.get('refmod_id') or '').strip() or uuid.uuid4().hex
             label = str(record.get('name') or refmod_id)
-            result = _lm_refmod_encode_one(
-                {**record, 'refmod_id': refmod_id}, director_json, project_id,
-                video_vae_name=body.get('video_vae_name'),
-                audio_vae_name=body.get('audio_vae_name'),
-                target_stem=os.path.join(project, f'{_refmod_safe(label)}__{_refmod_safe(refmod_id)}'),
+            raw_sources = record.get('sources')
+            if raw_sources is not None and not isinstance(raw_sources, list):
+                raise ValueError('RefMod sources must be a list of uploaded media records.')
+            if isinstance(raw_sources, list) and len(raw_sources) > 128:
+                raise ValueError('A RefMod can contain at most 128 uploaded sources.')
+            if isinstance(raw_sources, list) and any(not isinstance(item, dict) for item in raw_sources):
+                raise ValueError('Every RefMod source must be an uploaded media record.')
+            selected_sources = [
+                {**item, 'selected': item.get('selected', True)}
+                for item in (raw_sources or [])
+                if isinstance(item, dict) and item.get('selected', True)
+            ]
+            target_stem = os.path.join(
+                project, f'{_refmod_safe(label)}__{_refmod_safe(refmod_id)}',
             )
+            if raw_sources:
+                if not selected_sources:
+                    raise ValueError('Select at least one saved image/video/audio source to re-encode this RefMod.')
+                if any(str(item.get('kind') or '').lower() not in {'image', 'video', 'audio'}
+                       for item in selected_sources):
+                    raise ValueError('Saved RefMod sources must be image, video or audio media.')
+                required_kinds = {
+                    'audio' if str(item.get('kind') or '').lower() == 'audio' else 'video'
+                    for item in selected_sources
+                }
+                video_vae, audio_vae, used = _lm_load_h3_vae(
+                    body.get('video_vae_name'), body.get('audio_vae_name'),
+                    required_kinds=required_kinds,
+                )
+                result = _lm_refmod_encode_uploaded_sources(
+                    {**record, 'refmod_id': refmod_id}, selected_sources,
+                    video_vae, audio_vae, target_stem=target_stem,
+                )
+                result['vaes'] = used
+            else:
+                result = _lm_refmod_encode_one(
+                    {**record, 'refmod_id': refmod_id}, director_json, project_id,
+                    video_vae_name=body.get('video_vae_name'),
+                    audio_vae_name=body.get('audio_vae_name'),
+                    target_stem=target_stem,
+                )
             stored = _refmod_record(result['path'], refmod_id=refmod_id, project_root=project)
             result['refmod'] = _refmod_authored_record(record, stored, refmod_id)
             result['refmod']['state'] = 'ready'

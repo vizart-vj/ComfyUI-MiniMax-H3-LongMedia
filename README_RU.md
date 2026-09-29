@@ -4,7 +4,7 @@ Production-oriented ComfyUI nodes для **MiniMax H3**: long-form video/audio g
 
 ![screenshot](ex.png)
 
-**Текущий релиз: 0.6.60.**
+**Текущий релиз: 0.6.63.**
 
 ## Что изменилось после публичного v0.6.50
 
@@ -21,8 +21,11 @@ Production-oriented ComfyUI nodes для **MiniMax H3**: long-form video/audio g
 - **Меньше удерживаемых preview-ресурсов:** Director освобождает старые video strips и TAKE thumbnails и ограничивает кэш decoded previews.
 - **Пресеты Sampler:** можно создавать, перезаписывать и удалять профили, сохранённые в workflow; строка состояния показывает изменения после выбора. Seed остаётся независимым.
 - **Надёжнее рендеры:** Character RefMod сохраняет приоритет идентичности через MultiClip, а motion_repair сохраняется в workflow.
+- **Выбор клипов для RUN:** отключайте отдельные клипы и объединяйте соседние готовые клипы в обратимый блок таймлайна, сохраняя исходные TAKE.
+- **Общие пресеты Camera:** создавайте и редактируйте их прямо в настройках Camera-клипа. Библиотека сохраняется в Director workflow и доступна во всех Camera-клипах, включая созданные позже.
+- **Исправлено копирование conditioning:** пустая опциональная ветка больше не обрушает перегенерацию клипа после смены роли AUDIO.
 
-См. [Release Notes 0.6.60](docs/RELEASE_NOTES_0.6.60_RU.md).
+См. [Release Notes 0.6.63](docs/RELEASE_NOTES_0.6.63_RU.md).
 
 ## Документация
 
@@ -109,7 +112,7 @@ longest_input
 
 См. [Режимы LongMedia](docs/MODES_GUIDE_RU.md).
 
-## LongMedia Director 0.6.60
+## LongMedia Director 0.6.63
 
 Director — unified authoring surface для MAIN timing, prompts, WHO & WHAT media, ролей REF/FIRST/LAST, cameras, temporal embeddings, audio policy, resolution policy, Program Monitor и TAKE management.
 

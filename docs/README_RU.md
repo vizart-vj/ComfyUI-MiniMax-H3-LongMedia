@@ -27,6 +27,9 @@
 
 ## Релиз
 
+- [Release Notes 0.6.63](RELEASE_NOTES_0.6.63_RU.md)
+- [Release Notes 0.6.62](RELEASE_NOTES_0.6.62_RU.md)
+- [Release Notes 0.6.61](RELEASE_NOTES_0.6.61_RU.md)
 - [Release Notes 0.6.60](RELEASE_NOTES_0.6.60_RU.md)
 - [Release Notes 0.6.54](RELEASE_NOTES_0.6.54_RU.md)
 - [Release Notes 0.6.40](RELEASE_NOTES_0.6.40_RU.md)

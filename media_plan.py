@@ -122,6 +122,9 @@ class LongMediaPlan:
     director_node_id: str = ""
     director_clip_ids: Any = None
     director_clip_metadata: Any = None
+    # Per-MAIN editorial execution switch. Disabled GENERATED clips replay their
+    # approved TAKE while enabled clips are sampled in a selective Director RUN.
+    director_clip_enabled: Any = None
     # Full authored Director timeline captured for every rendered take. This is
     # deliberately separate from per-clip metadata: Restore Take must be able to
     # reconstruct CAMERA / embedding / prompt / reference tracks exactly as authored.

@@ -27,6 +27,9 @@ This release ships only current user-facing documentation. Every topic has an En
 
 ## Release
 
+- [0.6.63 Release Notes](RELEASE_NOTES_0.6.63_EN.md)
+- [0.6.62 Release Notes](RELEASE_NOTES_0.6.62_EN.md)
+- [0.6.61 Release Notes](RELEASE_NOTES_0.6.61_EN.md)
 - [0.6.60 Release Notes](RELEASE_NOTES_0.6.60_EN.md)
 - [0.6.54 Release Notes](RELEASE_NOTES_0.6.54_EN.md)
 - [0.6.40 Release Notes](RELEASE_NOTES_0.6.40_EN.md)

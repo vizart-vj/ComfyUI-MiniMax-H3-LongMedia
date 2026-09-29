@@ -1,6 +1,6 @@
-# LongMedia 0.6.60 Parameter Reference
+# LongMedia 0.6.63 Parameter Reference
 
-This reference is checked against Python INPUT_TYPES and the frontend shipped in the 0.6.60 ZIP build. “Internal” means a serialized workflow field that users should not edit manually. Controls are conditional on mode; a hidden value may remain in an older workflow for compatibility.
+This reference is checked against Python INPUT_TYPES and the frontend shipped in the 0.6.63 ZIP build. “Internal” means a serialized workflow field that users should not edit manually. Controls are conditional on mode; a hidden value may remain in an older workflow for compatibility.
 
 ## Setup
 
@@ -206,4 +206,4 @@ VRAM guard controls are in Debug. They do not usually need tuning for standard r
 
 ## Source build and scope
 
-This edition describes VERSION 0.6.60 from the ZIP build, not a neighboring working copy or installed custom_nodes folder. Dynamic ranges and visibility rules were checked against INPUT_TYPES, node_facade.js and longmedia_director.js in that build.
+This edition describes VERSION 0.6.63 from the ZIP build, not a neighboring working copy or installed custom_nodes folder. Dynamic ranges and visibility rules were checked against INPUT_TYPES, node_facade.js and longmedia_director.js in that build.

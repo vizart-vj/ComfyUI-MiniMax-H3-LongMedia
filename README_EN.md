@@ -4,7 +4,7 @@ Production-oriented ComfyUI nodes for **MiniMax H3** long-form video/audio gener
 
 ![screenshot](ex.png)
 
-**Current release: 0.6.60.**
+**Current release: 0.6.63.**
 
 ## What changed since public v0.6.50
 
@@ -21,8 +21,11 @@ Production-oriented ComfyUI nodes for **MiniMax H3** long-form video/audio gener
 - **Lower retained preview memory:** Director releases old video strips and TAKE thumbnails and bounds decoded previews with an LRU.
 - **Sampler presets:** create, overwrite and delete workflow-persisted profiles; the status line marks settings changed since selection. Seed stays independent.
 - **More reliable renders:** Character RefMods retain identity authority across MultiClip, and motion_repair persists in saved workflows.
+- **Per-clip RUN control:** disable individual clips and merge adjacent approved clips into a reversible timeline block while keeping their original TAKEs.
+- **Shared Camera presets:** create and edit them from any Camera clip. The library is saved in the Director workflow and is available to every Camera clip, including clips created later.
+- **Safe conditioning copies:** an absent optional branch no longer crashes clip regeneration after an AUDIO role change.
 
-See [0.6.60 Release Notes](docs/RELEASE_NOTES_0.6.60_EN.md).
+See [0.6.63 Release Notes](docs/RELEASE_NOTES_0.6.63_EN.md).
 
 ## Documentation
 
@@ -109,7 +112,7 @@ longest_input
 
 See [Operating Modes](docs/MODES_GUIDE_EN.md).
 
-## LongMedia Director 0.6.60
+## LongMedia Director 0.6.63
 
 Director is the unified authoring surface for MAIN timing, prompts, WHO & WHAT media, REF/FIRST/LAST roles, cameras, temporal embeddings, audio policy, resolution policy, Program Monitor review and TAKE management.
 

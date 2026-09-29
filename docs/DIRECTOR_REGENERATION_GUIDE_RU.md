@@ -1,6 +1,6 @@
 # LongMedia Director — Selective Regeneration и TAKE Workflow
 
-Руководство описывает текущую модель regeneration в Director 0.6.60.
+Руководство описывает текущую модель regeneration в Director 0.6.63.
 
 ## TAKE — сохранённая ревизия
 
