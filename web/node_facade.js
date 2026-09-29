@@ -615,6 +615,9 @@ function lmEnsureMulticlipEditor(node) {
         getValue: () => null,
         setValue: () => {},
     });
+    domWidget.__lmPresentationOnly = true;
+    domWidget.serialize = false;
+    domWidget.serializeValue = () => undefined;
     domWidget.__lmMulticlipEditorV387 = true;
     domWidget.computeSize = function (width) {
         // Respect the current/user-requested node width. Entering MultiClip must
@@ -678,7 +681,14 @@ function lmRestoreNamedWidgetState(node) {
 }
 
 function lmInstallNamedWidgetPersistence(node) {
-    if (!node || node.__lmNamedPersistenceV040 || typeof node.serialize !== "function") return;
+    if (!node) return;
+    // `lmRefreshSetup()` changes the visible order for presentation. Keep a
+    // snapshot of the Python INPUT_TYPES widget order before that happens so
+    // LiteGraph's positional `widgets_values` remains compatible on reload.
+    if (!Array.isArray(node.__lmWidgetSchemaOrderV060)) {
+        node.__lmWidgetSchemaOrderV060 = lmNamedSerializableWidgets(node).map((widget) => widget.name);
+    }
+    if (node.__lmNamedPersistenceV040 || typeof node.serialize !== "function") return;
     node.__lmNamedPersistenceV040 = true;
     const originalSerialize = node.serialize;
 
@@ -686,12 +696,29 @@ function lmInstallNamedWidgetPersistence(node) {
         lmCaptureNamedWidgetState(this);
 
         const allWidgets = this.widgets;
-        const hasDecorative = Array.isArray(allWidgets) &&
-            allWidgets.some((w) => w?.__lmGroupHeader || w?.__lmMulticlipEditorV387);
-
-        if (hasDecorative) {
-            this.widgets = allWidgets.filter((w) => !w?.__lmGroupHeader && !w?.__lmMulticlipEditorV387);
+        const serializableWidgets = Array.isArray(allWidgets)
+            ? allWidgets.filter((w) => !w?.__lmGroupHeader && !w?.__lmMulticlipEditorV387)
+            : (allWidgets ?? []);
+        const byName = new Map(
+            (serializableWidgets ?? [])
+                .filter((widget) => typeof widget?.name === "string")
+                .map((widget) => [widget.name, widget]),
+        );
+        const orderedWidgets = [];
+        const orderedSet = new Set();
+        for (const name of this.__lmWidgetSchemaOrderV060 ?? []) {
+            const widget = byName.get(name);
+            if (!widget || orderedSet.has(widget)) continue;
+            orderedWidgets.push(widget);
+            orderedSet.add(widget);
         }
+        for (const widget of serializableWidgets ?? []) {
+            if (!orderedSet.has(widget)) {
+                orderedWidgets.push(widget);
+                orderedSet.add(widget);
+            }
+        }
+        this.widgets = orderedWidgets;
         try {
             const data = originalSerialize.apply(this, args);
             data.properties ??= {};
@@ -1023,6 +1050,315 @@ const LM_SAMPLER_ADVANCED = new Set([
     'latent_hires_precision','latent_hires_align'
 ]);
 
+const LM_SAMPLER_PRESETS_KEY = 'lmSamplerPresetsV060';
+const LM_SAMPLER_PRESET_SELECTED_KEY = 'lmSamplerPresetSelectedV060';
+const LM_SAMPLER_PRESET_FIELDS = Object.freeze([
+    'sampler_mode', 'memory_mode', 'offload_completed_segments',
+    'video_context_denoise', 'audio_context_denoise', 'mlp_chunk_tokens', 'attention_mode',
+    'sol_tau_start', 'sol_tau_end', 'sol_curve', 'sol_min_tokens', 'sol_dense_percent',
+    'sol_sink_conditioning', 'sol_qkv_chunk_tokens', 'sol_out_proj_chunk_tokens',
+    'vram_activation_reserve_mb', 'inter_block_vram_guard_mb',
+    'inter_block_guard_cooldown_blocks', 'inter_block_guard_emergency_mb',
+    'inter_block_guard_emergency_cooldown_blocks', 'late_block_guard_start',
+    'late_block_guard_target_mb', 'late_block_guard_min_cached_mb', 'step_boundary_cleanup_mb',
+    'latent_hires_enabled', 'latent_hires_model', 'latent_hires_scale',
+    'latent_hires_precision', 'latent_hires_align', 'refine_enabled', 'windowed_refine',
+]);
+
+function lmSamplerPresetCopyValue(value) {
+    if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
+    if (['string', 'boolean'].includes(typeof value)) return value;
+    return undefined;
+}
+
+function lmSamplerPresetSnapshot(node) {
+    const values = {};
+    for (const name of LM_SAMPLER_PRESET_FIELDS) {
+        const widget = lmWidget(node, name);
+        if (!widget) continue;
+        const value = lmSamplerPresetCopyValue(widget.value);
+        if (value !== undefined) values[name] = value;
+    }
+    return values;
+}
+
+function lmSamplerPresetLibrary(node) {
+    const raw = node?.properties?.[LM_SAMPLER_PRESETS_KEY];
+    if (!Array.isArray(raw)) return [];
+    return raw.filter((preset) =>
+        preset && typeof preset.id === 'string' && preset.id &&
+        typeof preset.name === 'string' && preset.name.trim() &&
+        preset.values && typeof preset.values === 'object' && !Array.isArray(preset.values)
+    ).map((preset) => {
+        const values = {};
+        for (const name of LM_SAMPLER_PRESET_FIELDS) {
+            if (!Object.prototype.hasOwnProperty.call(preset.values, name)) continue;
+            const value = lmSamplerPresetCopyValue(preset.values[name]);
+            if (value !== undefined) values[name] = value;
+        }
+        return { id: preset.id, name: preset.name.trim(), values };
+    });
+}
+
+function lmSamplerPresetStore(node, presets) {
+    if (!node) return;
+    node.properties ??= {};
+    node.properties[LM_SAMPLER_PRESETS_KEY] = presets;
+}
+
+function lmSamplerPresetNewId() {
+    try {
+        if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+    } catch (_) {}
+    return `lm-preset-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function lmCreateSamplerPreset(node, name) {
+    const cleanName = String(name ?? '').trim();
+    if (!node || !cleanName) return null;
+    const presets = lmSamplerPresetLibrary(node);
+    if (presets.some((preset) => preset.name.toLocaleLowerCase() === cleanName.toLocaleLowerCase())) return null;
+    const preset = { id: lmSamplerPresetNewId(), name: cleanName, values: lmSamplerPresetSnapshot(node) };
+    presets.push(preset);
+    lmSamplerPresetStore(node, presets);
+    node.properties[LM_SAMPLER_PRESET_SELECTED_KEY] = preset.id;
+    return preset;
+}
+
+function lmOverwriteSamplerPreset(node, id) {
+    if (!node || !id) return null;
+    const presets = lmSamplerPresetLibrary(node);
+    const index = presets.findIndex((preset) => preset.id === id);
+    if (index < 0) return null;
+    presets[index] = { ...presets[index], values: lmSamplerPresetSnapshot(node) };
+    lmSamplerPresetStore(node, presets);
+    node.properties[LM_SAMPLER_PRESET_SELECTED_KEY] = id;
+    return presets[index];
+}
+
+function lmDeleteSamplerPreset(node, id) {
+    if (!node || !id) return false;
+    const presets = lmSamplerPresetLibrary(node);
+    const remaining = presets.filter((preset) => preset.id !== id);
+    if (remaining.length === presets.length) return false;
+    lmSamplerPresetStore(node, remaining);
+    if (node.properties?.[LM_SAMPLER_PRESET_SELECTED_KEY] === id) {
+        node.properties[LM_SAMPLER_PRESET_SELECTED_KEY] = '';
+    }
+    return true;
+}
+
+function lmSamplerPresetModifiedCount(node, preset) {
+    if (!preset?.values || typeof preset.values !== 'object') return 0;
+    let changed = 0;
+    for (const [name, expected] of Object.entries(preset.values)) {
+        const widget = lmWidget(node, name);
+        if (!widget || JSON.stringify(widget.value) !== JSON.stringify(expected)) changed += 1;
+    }
+    return changed;
+}
+
+function lmSamplerPresetById(node, id) {
+    return lmSamplerPresetLibrary(node).find((preset) => preset.id === id) ?? null;
+}
+
+function lmUpdateSamplerPresetStatus(node) {
+    const ui = node?.__lmSamplerPresetUiV060;
+    if (!ui) return;
+    const id = String(node.properties?.[LM_SAMPLER_PRESET_SELECTED_KEY] ?? '');
+    const preset = lmSamplerPresetById(node, id);
+    if (!preset) {
+        if (node.properties?.[LM_SAMPLER_PRESET_SELECTED_KEY]) node.properties[LM_SAMPLER_PRESET_SELECTED_KEY] = '';
+        ui.select.value = '';
+        ui.status.textContent = 'No preset selected';
+        ui.status.style.color = '#9ca6b2';
+        ui.overwrite.disabled = true;
+        ui.remove.disabled = true;
+        ui.overwrite.style.opacity = '0.5';
+        ui.remove.style.opacity = '0.5';
+        return;
+    }
+    ui.select.value = preset.id;
+    const changed = lmSamplerPresetModifiedCount(node, preset);
+    ui.status.textContent = changed
+        ? `${preset.name} · Modified (${changed} ${changed === 1 ? 'setting' : 'settings'})`
+        : `${preset.name} · Saved`;
+    ui.status.style.color = changed ? '#e9aa59' : '#8ecca5';
+    ui.overwrite.disabled = false;
+    ui.remove.disabled = false;
+    ui.overwrite.style.opacity = '1';
+    ui.remove.style.opacity = '1';
+}
+
+function lmRenderSamplerPresetOptions(node) {
+    const ui = node?.__lmSamplerPresetUiV060;
+    if (!ui) return;
+    const selected = String(node.properties?.[LM_SAMPLER_PRESET_SELECTED_KEY] ?? '');
+    ui.select.replaceChildren();
+    const empty = document.createElement('option');
+    empty.value = '';
+    empty.textContent = 'Select preset…';
+    ui.select.append(empty);
+    for (const preset of lmSamplerPresetLibrary(node)) {
+        const option = document.createElement('option');
+        option.value = preset.id;
+        option.textContent = preset.name;
+        ui.select.append(option);
+    }
+    ui.select.value = selected;
+    if (ui.select.value !== selected && selected) node.properties[LM_SAMPLER_PRESET_SELECTED_KEY] = '';
+    lmUpdateSamplerPresetStatus(node);
+}
+
+function lmApplySamplerPreset(node, preset) {
+    if (!node || !preset?.values) return false;
+    const oldValues = new Map();
+    for (const name of LM_SAMPLER_PRESET_FIELDS) {
+        if (!Object.prototype.hasOwnProperty.call(preset.values, name)) continue;
+        const widget = lmWidget(node, name);
+        if (!widget) continue;
+        oldValues.set(name, widget.value);
+        widget.value = preset.values[name];
+        for (const control of [widget.inputEl, widget.element]) {
+            if (!control) continue;
+            if ('checked' in control && typeof widget.value === 'boolean') control.checked = widget.value;
+            if ('value' in control) control.value = String(widget.value ?? '');
+        }
+    }
+    node.properties ??= {};
+    node.properties[LM_SAMPLER_PRESET_SELECTED_KEY] = preset.id;
+    // These controls change which Sampler widgets are visible; the rest are plain values.
+    for (const name of ['sampler_mode', 'refine_enabled', 'latent_hires_enabled']) {
+        if (oldValues.get(name) === lmWidget(node, name)?.value) continue;
+        const widget = lmWidget(node, name);
+        try { widget?.callback?.call(widget, widget.value, app.canvas, node); } catch (error) {
+            console.warn(`[LongMedia Sampler] preset callback failed for ${name}`, error);
+        }
+    }
+    lmRefreshSampler(node);
+    return true;
+}
+
+function lmInstallSamplerPresetChangeWatcher(node) {
+    if (!node || node.__lmSamplerPresetChangeWatcherV060) return;
+    node.__lmSamplerPresetChangeWatcherV060 = true;
+    for (const name of LM_SAMPLER_PRESET_FIELDS) {
+        const widget = lmWidget(node, name);
+        if (!widget || widget.__lmSamplerPresetCallbackV060) continue;
+        widget.__lmSamplerPresetCallbackV060 = true;
+        const previous = widget.callback;
+        widget.callback = function (...args) {
+            const result = previous?.apply(this, args);
+            lmUpdateSamplerPresetStatus(node);
+            return result;
+        };
+    }
+    if (typeof node.onWidgetChanged === 'function' && !node.__lmSamplerPresetOnWidgetChangedV060) {
+        node.__lmSamplerPresetOnWidgetChangedV060 = true;
+        const previous = node.onWidgetChanged;
+        node.onWidgetChanged = function (...args) {
+            const result = previous.apply(this, args);
+            lmUpdateSamplerPresetStatus(this);
+            return result;
+        };
+    }
+}
+
+function lmInstallSamplerPresets(node) {
+    if (!node) return;
+    node.properties ??= {};
+    if (!Array.isArray(node.properties[LM_SAMPLER_PRESETS_KEY])) node.properties[LM_SAMPLER_PRESETS_KEY] = [];
+    if (typeof node.properties[LM_SAMPLER_PRESET_SELECTED_KEY] !== 'string') node.properties[LM_SAMPLER_PRESET_SELECTED_KEY] = '';
+    lmInstallSamplerPresetChangeWatcher(node);
+    if (node.__lmSamplerPresetUiV060 || typeof node.addDOMWidget !== 'function' || typeof document === 'undefined') {
+        lmUpdateSamplerPresetStatus(node);
+        return;
+    }
+
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'display:flex;flex-direction:column;gap:4px;width:100%;box-sizing:border-box;padding:3px 5px 8px;font:11px system-ui;color:#dce2e9;border-bottom:1px solid #343a44;margin-bottom:2px';
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;align-items:center;gap:4px;width:100%';
+    const select = document.createElement('select');
+    select.setAttribute('aria-label', 'LongMedia Sampler preset');
+    select.title = 'Preset values are saved with this workflow node.';
+    select.style.cssText = 'min-width:70px;flex:1;background:#171a20;color:#e7ebf0;border:1px solid #343a44;border-radius:4px;padding:4px';
+    const makeButton = (label, title) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = label;
+        button.title = title;
+        button.style.cssText = 'flex:none;background:#252a32;color:#e7ebf0;border:1px solid #3b424d;border-radius:4px;padding:4px 7px;cursor:pointer;font:600 10px system-ui';
+        button.onpointerdown = (event) => event.stopPropagation();
+        return button;
+    };
+    const create = makeButton('New', 'Create a preset from the current Sampler settings');
+    const overwrite = makeButton('Overwrite', 'Replace the selected preset with the current settings');
+    const remove = makeButton('Delete', 'Delete the selected preset');
+    const status = document.createElement('div');
+    status.setAttribute('role', 'status');
+    status.setAttribute('aria-live', 'polite');
+    status.style.cssText = 'min-height:13px;line-height:13px;padding-left:2px;font:10px system-ui;color:#9ca6b2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
+    row.append(select, create, overwrite, remove);
+    wrap.append(row, status);
+
+    const widget = node.addDOMWidget('__lm_sampler_presets_v060', 'longmedia_sampler_presets', wrap, {
+        serialize: false,
+        hideOnZoom: false,
+        getMinHeight: () => 58,
+        getMaxHeight: () => 58,
+        getValue: () => undefined,
+        setValue: () => {},
+    });
+    if (widget) {
+        widget.__lmPresentationOnly = true;
+        widget.serialize = false;
+        widget.serializeValue = () => undefined;
+        node.__lmSamplerPresetUiV060 = { select, status, create, overwrite, remove };
+        lmMoveWidgetBefore(node, widget.name, 'seed');
+    }
+
+    select.onpointerdown = (event) => event.stopPropagation();
+    select.onchange = () => {
+        const id = String(select.value || '');
+        node.properties[LM_SAMPLER_PRESET_SELECTED_KEY] = id;
+        const preset = lmSamplerPresetById(node, id);
+        if (preset) lmApplySamplerPreset(node, preset);
+        else lmUpdateSamplerPresetStatus(node);
+    };
+    create.onclick = (event) => {
+        event?.stopPropagation?.();
+        const name = globalThis.prompt?.('Name for the new Sampler preset:', 'New preset');
+        if (name == null) return;
+        const preset = lmCreateSamplerPreset(node, name);
+        if (!preset) {
+            status.textContent = 'Preset name is empty or already used';
+            status.style.color = '#e9aa59';
+            return;
+        }
+        lmRenderSamplerPresetOptions(node);
+        node.graph?.setDirtyCanvas?.(true, true);
+    };
+    overwrite.onclick = (event) => {
+        event?.stopPropagation?.();
+        const preset = lmOverwriteSamplerPreset(node, String(select.value || ''));
+        if (!preset) return;
+        lmRenderSamplerPresetOptions(node);
+        node.graph?.setDirtyCanvas?.(true, true);
+    };
+    remove.onclick = (event) => {
+        event?.stopPropagation?.();
+        const id = String(select.value || '');
+        const preset = lmSamplerPresetById(node, id);
+        if (!preset) return;
+        if (typeof globalThis.confirm === 'function' && !globalThis.confirm(`Delete Sampler preset “${preset.name}”?`)) return;
+        lmDeleteSamplerPreset(node, id);
+        lmRenderSamplerPresetOptions(node);
+        node.graph?.setDirtyCanvas?.(true, true);
+    };
+    lmRenderSamplerPresetOptions(node);
+}
+
 function lmSamplerUiAllowed(node, widget) {
     if (!widget || widget.__lmPresentationOnly || widget.__lmGroupHeader) return true;
     const level = String(node?.properties?.lmSamplerUiLevel || 'basic');
@@ -1035,6 +1371,7 @@ function lmInstallSamplerGroups(node) {
     lmInstallNamedWidgetPersistence(node);
     lmInstallPresentationSafeSerialize(node);
     lmInstallSamplerUiLevel(node);
+    lmInstallSamplerPresets(node);
     if (!node || node.__lmSamplerGroupsV526 || typeof node.addCustomWidget !== "function") return;
     node.__lmSamplerGroupsV526 = true;
     const groups = [
@@ -1081,6 +1418,7 @@ function lmRefreshSampler(node) {
          Math.abs((Number(node.size?.[1]) || 0) - targetHeight) > 0.5)) {
         node.setSize?.([targetWidth, targetHeight]);
     }
+    lmUpdateSamplerPresetStatus(node);
     node.setDirtyCanvas?.(true, false);
 }
 

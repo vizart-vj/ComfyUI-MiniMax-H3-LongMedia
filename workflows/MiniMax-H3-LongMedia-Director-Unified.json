@@ -1,8 +1,8 @@
 {
   "id": "7ffee890-e965-41b8-a8bd-05f3cc8e0568",
   "revision": 0,
-  "last_node_id": 147,
-  "last_link_id": 227,
+  "last_node_id": 150,
+  "last_link_id": 228,
   "nodes": [
     {
       "id": 9,
@@ -16,7 +16,7 @@
         50
       ],
       "flags": {},
-      "order": 13,
+      "order": 16,
       "mode": 0,
       "inputs": [
         {
@@ -106,7 +106,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 8,
+      "order": 11,
       "mode": 0,
       "inputs": [
         {
@@ -151,7 +151,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 7,
+      "order": 10,
       "mode": 0,
       "inputs": [
         {
@@ -282,7 +282,7 @@
         240
       ],
       "flags": {},
-      "order": 16,
+      "order": 19,
       "mode": 0,
       "inputs": [
         {
@@ -358,7 +358,7 @@
         110
       ],
       "flags": {},
-      "order": 14,
+      "order": 17,
       "mode": 0,
       "inputs": [
         {
@@ -482,10 +482,10 @@
       ],
       "size": [
         450,
-        480
+        504
       ],
       "flags": {},
-      "order": 15,
+      "order": 18,
       "mode": 0,
       "inputs": [
         {
@@ -518,7 +518,7 @@
           "name": "refine_sigmas",
           "shape": 7,
           "type": "SIGMAS",
-          "link": null
+          "link": 228
         }
       ],
       "outputs": [
@@ -613,15 +613,15 @@
         "exact_kv",
         8192,
         24576,
-        2048,
+        4096,
         2048,
         4,
         512,
         3,
         40,
-        4096,
+        6144,
         512,
-        1024,
+        2048,
         false,
         "(disabled)",
         1,
@@ -632,7 +632,8 @@
         0,
         2,
         "auto",
-        "auto"
+        "auto",
+        true
       ],
       "widgets_values_named": {
         "seed": 42,
@@ -669,7 +670,8 @@
         "refine_seed": 0,
         "refine_steps": 2,
         "memory_mode": "auto",
-        "sampler_mode": "auto"
+        "sampler_mode": "auto",
+        "windowed_refine": true
       }
     },
     {
@@ -684,7 +686,7 @@
         340
       ],
       "flags": {},
-      "order": 17,
+      "order": 20,
       "mode": 0,
       "inputs": [
         {
@@ -766,7 +768,7 @@
       ],
       "size": [
         1440,
-        940
+        1070
       ],
       "flags": {},
       "order": 5,
@@ -793,16 +795,17 @@
           "director_json": "{\"version\":1,\"kind\":\"h3_longmedia_director\",\"fps\":24.0,\"subjects\":[{\"subject_id\":\"subject-picture-1\",\"name\":\"Primary character\",\"kind\":\"Picture\",\"slot\":1,\"description\":\"The primary character identity and appearance reference used consistently across the complete sequence.\",\"retention\":\"fully_preserved\"}],\"shots\":[{\"clip_id\":\"director-shot-1\",\"name\":\"Arrival\",\"prompt\":\"The primary character enters the scene and walks forward with a calm, deliberate pace. The environment remains visually coherent and establishes the location for the continuous sequence.\",\"duration\":5.0,\"seed\":null,\"subjects\":[\"subject-picture-1\"],\"audio\":{\"diegetic\":\"\",\"music\":\"\",\"reactive\":\"\"},\"camera\":{\"shot_size\":\"Wide Shot\",\"rig\":\"3-Axis Gimbal\",\"camera_body\":\"Cinematic Neutral\",\"lens\":\"Auto / Native Lens\",\"stabilization\":\"Gimbal Smooth\",\"movement\":\"Track Forward\",\"speed\":\"Slow\",\"transition_type\":\"Continuous / Same Shot\",\"space_relation\":\"Same Space\",\"entity_continuity\":\"Lock Population / Layout\",\"transition_to_next\":true}},{\"clip_id\":\"director-shot-2\",\"name\":\"Approach\",\"prompt\":\"The same character continues forward through the same space and gradually turns attention toward the camera while the surrounding scene develops naturally.\",\"duration\":5.0,\"seed\":null,\"subjects\":[\"subject-picture-1\"],\"audio\":{\"diegetic\":\"\",\"music\":\"\",\"reactive\":\"\"},\"camera\":{\"shot_size\":\"Medium Shot\",\"rig\":\"3-Axis Gimbal\",\"camera_body\":\"Cinematic Neutral\",\"lens\":\"Auto / Native Lens\",\"stabilization\":\"Gimbal Smooth\",\"movement\":\"Track Forward\",\"speed\":\"Controlled\",\"transition_type\":\"Continuous / Same Shot\",\"space_relation\":\"Same Space\",\"entity_continuity\":\"Lock Population / Layout\",\"transition_to_next\":true}},{\"clip_id\":\"director-shot-3\",\"name\":\"Reveal\",\"prompt\":\"The character reaches the visual focal point and pauses as finer environmental details become prominent, completing the continuous movement with a composed final moment.\",\"duration\":5.0,\"seed\":null,\"subjects\":[\"subject-picture-1\"],\"audio\":{\"diegetic\":\"\",\"music\":\"\",\"reactive\":\"\"},\"camera\":{\"shot_size\":\"Medium Close-Up\",\"rig\":\"3-Axis Gimbal\",\"camera_body\":\"Cinematic Neutral\",\"lens\":\"Auto / Native Lens\",\"stabilization\":\"Gimbal Smooth\",\"movement\":\"Push-In\",\"speed\":\"Ultra Slow\",\"transition_type\":\"Continuous / Same Shot\",\"space_relation\":\"Same Space\",\"entity_continuity\":\"Lock Population / Layout\",\"transition_to_next\":false}}]}"
         },
         "__lmd_ui_state_v1": {
-          "takes_width": 288
+          "takes_width": 288,
+          "timeline_zoom": 43.86666666666667
         }
       },
       "widgets_values": [
         "Cinematic continuity, stable primary character identity, coherent lighting and environment across the complete sequence.",
-        "{\"version\":4,\"kind\":\"h3_longmedia_director\",\"project_id\":\"project-director-shot-1\",\"fps\":24.0,\"audio_mode\":\"auto\",\"regeneration\":{\"mode\":\"none\",\"clip_id\":null,\"request_id\":null},\"subjects\":[],\"shots\":[{\"clip_id\":\"director-shot-1\",\"name\":\"Arrival\",\"prompt\":\"The primary subject enters the environment and establishes the continuous action.\",\"duration\":5.0,\"seed\":null,\"subjects\":[],\"media_subject_id\":null,\"source_in\":0.0},{\"clip_id\":\"director-shot-2\",\"name\":\"Approach\",\"prompt\":\"The action continues through the same space as attention turns toward the camera.\",\"duration\":5.0,\"seed\":null,\"subjects\":[],\"media_subject_id\":null,\"source_in\":0.0},{\"clip_id\":\"director-shot-3\",\"name\":\"Reveal\",\"prompt\":\"The subject reaches the focal point and the environment resolves into a composed final moment.\",\"duration\":5.0,\"seed\":null,\"subjects\":[],\"media_subject_id\":null,\"source_in\":0.0}],\"camera_blocks\":[{\"block_id\":\"camera-0\",\"start\":0.0,\"duration\":5.0,\"camera\":{\"shot_size\":\"Wide Shot\",\"rig\":\"3-Axis Gimbal\",\"camera_body\":\"Cinematic Neutral\",\"lens\":\"Auto / Native Lens\",\"stabilization\":\"Gimbal Smooth\",\"movement\":\"Track Forward\",\"speed\":\"Slow\",\"transition_type\":\"Continuous / Same Shot\",\"space_relation\":\"Same Space\",\"entity_continuity\":\"Lock Population / Layout\",\"transition_to_next\":true},\"note\":\"\"},{\"block_id\":\"camera-5\",\"start\":5.0,\"duration\":5.0,\"camera\":{\"shot_size\":\"Medium Shot\",\"rig\":\"3-Axis Gimbal\",\"camera_body\":\"Cinematic Neutral\",\"lens\":\"Auto / Native Lens\",\"stabilization\":\"Gimbal Smooth\",\"movement\":\"Track Forward\",\"speed\":\"Controlled\",\"transition_type\":\"Continuous / Same Shot\",\"space_relation\":\"Same Space\",\"entity_continuity\":\"Lock Population / Layout\",\"transition_to_next\":true},\"note\":\"\"},{\"block_id\":\"camera-10\",\"start\":10.0,\"duration\":5.0,\"camera\":{\"shot_size\":\"Medium Close-Up\",\"rig\":\"3-Axis Gimbal\",\"camera_body\":\"Cinematic Neutral\",\"lens\":\"Auto / Native Lens\",\"stabilization\":\"Gimbal Smooth\",\"movement\":\"Push-In\",\"speed\":\"Ultra Slow\",\"transition_type\":\"Continuous / Same Shot\",\"space_relation\":\"Same Space\",\"entity_continuity\":\"Lock Population / Layout\",\"transition_to_next\":true},\"note\":\"\"}],\"audio_blocks\":[]}"
+        "{\"version\":10,\"kind\":\"h3_longmedia_director\",\"project_id\":\"project-director-shot-1\",\"fps\":24,\"audio_mode\":\"auto\",\"setup_h3_mode\":\"auto\",\"setup_timeline_mode\":\"auto\",\"render_mode\":\"final\",\"segmented_count\":3,\"segmented_duration\":5,\"resolution_source\":\"base_layer\",\"resolution\":\"1920x1080\",\"megapixel\":0.8,\"ripple_tracks\":true,\"snapping\":true,\"base_audio_muted\":false,\"audio_track_muted\":false,\"camera_track_enabled\":false,\"audio_track_enabled\":false,\"regeneration\":{\"mode\":\"none\",\"clip_id\":null,\"request_id\":null,\"source_revision\":null,\"recast_subject_id\":null,\"preserve_audio\":false,\"recast_video_denoise\":1,\"recast_reference_scale\":\"auto\",\"recast_clip_ids\":[],\"source_revisions\":{}},\"subjects\":[],\"shots\":[{\"clip_id\":\"director-shot-1\",\"name\":\"Arrival\",\"prompt\":\"The primary subject enters the environment and establishes the continuous action.\",\"prompt_guidance_mode\":\"inherit\",\"motion_prompt_source\":null,\"start\":0,\"duration\":5,\"cut_marks\":[],\"seed\":null,\"subjects\":[],\"media_subject_id\":null,\"cast_subject_id\":null,\"first_frame_anchor\":false,\"last_frame_anchor\":false,\"source_in\":0,\"video_reference_scale\":1,\"base_kind\":\"generated\",\"audio_continuation\":\"AUTO\"},{\"clip_id\":\"director-shot-2\",\"name\":\"Approach\",\"prompt\":\"The action continues through the same space as attention turns toward the camera.\",\"prompt_guidance_mode\":\"inherit\",\"motion_prompt_source\":null,\"start\":5,\"duration\":5,\"cut_marks\":[],\"seed\":null,\"subjects\":[],\"media_subject_id\":null,\"cast_subject_id\":null,\"first_frame_anchor\":false,\"last_frame_anchor\":false,\"source_in\":0,\"video_reference_scale\":1,\"base_kind\":\"generated\",\"audio_continuation\":\"AUTO\"},{\"clip_id\":\"director-shot-3\",\"name\":\"Reveal\",\"prompt\":\"The subject reaches the focal point and the environment resolves into a composed final moment.\",\"prompt_guidance_mode\":\"inherit\",\"motion_prompt_source\":null,\"start\":10,\"duration\":5,\"cut_marks\":[],\"seed\":null,\"subjects\":[],\"media_subject_id\":null,\"cast_subject_id\":null,\"first_frame_anchor\":false,\"last_frame_anchor\":false,\"source_in\":0,\"video_reference_scale\":1,\"base_kind\":\"generated\",\"audio_continuation\":\"AUTO\"}],\"camera_blocks\":[],\"audio_blocks\":[],\"extra_tracks\":[],\"refmods\":[],\"scene_guidance\":[],\"scene_guidance_library\":[]}"
       ],
       "widgets_values_named": {
         "global_prompt": "Cinematic continuity, stable primary character identity, coherent lighting and environment across the complete sequence.",
-        "director_json": "{\"version\":4,\"kind\":\"h3_longmedia_director\",\"project_id\":\"project-director-shot-1\",\"fps\":24.0,\"audio_mode\":\"auto\",\"regeneration\":{\"mode\":\"none\",\"clip_id\":null,\"request_id\":null},\"subjects\":[],\"shots\":[{\"clip_id\":\"director-shot-1\",\"name\":\"Arrival\",\"prompt\":\"The primary subject enters the environment and establishes the continuous action.\",\"duration\":5.0,\"seed\":null,\"subjects\":[],\"media_subject_id\":null,\"source_in\":0.0},{\"clip_id\":\"director-shot-2\",\"name\":\"Approach\",\"prompt\":\"The action continues through the same space as attention turns toward the camera.\",\"duration\":5.0,\"seed\":null,\"subjects\":[],\"media_subject_id\":null,\"source_in\":0.0},{\"clip_id\":\"director-shot-3\",\"name\":\"Reveal\",\"prompt\":\"The subject reaches the focal point and the environment resolves into a composed final moment.\",\"duration\":5.0,\"seed\":null,\"subjects\":[],\"media_subject_id\":null,\"source_in\":0.0}],\"camera_blocks\":[{\"block_id\":\"camera-0\",\"start\":0.0,\"duration\":5.0,\"camera\":{\"shot_size\":\"Wide Shot\",\"rig\":\"3-Axis Gimbal\",\"camera_body\":\"Cinematic Neutral\",\"lens\":\"Auto / Native Lens\",\"stabilization\":\"Gimbal Smooth\",\"movement\":\"Track Forward\",\"speed\":\"Slow\",\"transition_type\":\"Continuous / Same Shot\",\"space_relation\":\"Same Space\",\"entity_continuity\":\"Lock Population / Layout\",\"transition_to_next\":true},\"note\":\"\"},{\"block_id\":\"camera-5\",\"start\":5.0,\"duration\":5.0,\"camera\":{\"shot_size\":\"Medium Shot\",\"rig\":\"3-Axis Gimbal\",\"camera_body\":\"Cinematic Neutral\",\"lens\":\"Auto / Native Lens\",\"stabilization\":\"Gimbal Smooth\",\"movement\":\"Track Forward\",\"speed\":\"Controlled\",\"transition_type\":\"Continuous / Same Shot\",\"space_relation\":\"Same Space\",\"entity_continuity\":\"Lock Population / Layout\",\"transition_to_next\":true},\"note\":\"\"},{\"block_id\":\"camera-10\",\"start\":10.0,\"duration\":5.0,\"camera\":{\"shot_size\":\"Medium Close-Up\",\"rig\":\"3-Axis Gimbal\",\"camera_body\":\"Cinematic Neutral\",\"lens\":\"Auto / Native Lens\",\"stabilization\":\"Gimbal Smooth\",\"movement\":\"Push-In\",\"speed\":\"Ultra Slow\",\"transition_type\":\"Continuous / Same Shot\",\"space_relation\":\"Same Space\",\"entity_continuity\":\"Lock Population / Layout\",\"transition_to_next\":true},\"note\":\"\"}],\"audio_blocks\":[]}"
+        "director_json": "{\"version\":10,\"kind\":\"h3_longmedia_director\",\"project_id\":\"project-director-shot-1\",\"fps\":24,\"audio_mode\":\"auto\",\"setup_h3_mode\":\"auto\",\"setup_timeline_mode\":\"auto\",\"render_mode\":\"final\",\"segmented_count\":3,\"segmented_duration\":5,\"resolution_source\":\"base_layer\",\"resolution\":\"1920x1080\",\"megapixel\":0.8,\"ripple_tracks\":true,\"snapping\":true,\"base_audio_muted\":false,\"audio_track_muted\":false,\"camera_track_enabled\":false,\"audio_track_enabled\":false,\"regeneration\":{\"mode\":\"none\",\"clip_id\":null,\"request_id\":null,\"source_revision\":null,\"recast_subject_id\":null,\"preserve_audio\":false,\"recast_video_denoise\":1,\"recast_reference_scale\":\"auto\",\"recast_clip_ids\":[],\"source_revisions\":{}},\"subjects\":[],\"shots\":[{\"clip_id\":\"director-shot-1\",\"name\":\"Arrival\",\"prompt\":\"The primary subject enters the environment and establishes the continuous action.\",\"prompt_guidance_mode\":\"inherit\",\"motion_prompt_source\":null,\"start\":0,\"duration\":5,\"cut_marks\":[],\"seed\":null,\"subjects\":[],\"media_subject_id\":null,\"cast_subject_id\":null,\"first_frame_anchor\":false,\"last_frame_anchor\":false,\"source_in\":0,\"video_reference_scale\":1,\"base_kind\":\"generated\",\"audio_continuation\":\"AUTO\"},{\"clip_id\":\"director-shot-2\",\"name\":\"Approach\",\"prompt\":\"The action continues through the same space as attention turns toward the camera.\",\"prompt_guidance_mode\":\"inherit\",\"motion_prompt_source\":null,\"start\":5,\"duration\":5,\"cut_marks\":[],\"seed\":null,\"subjects\":[],\"media_subject_id\":null,\"cast_subject_id\":null,\"first_frame_anchor\":false,\"last_frame_anchor\":false,\"source_in\":0,\"video_reference_scale\":1,\"base_kind\":\"generated\",\"audio_continuation\":\"AUTO\"},{\"clip_id\":\"director-shot-3\",\"name\":\"Reveal\",\"prompt\":\"The subject reaches the focal point and the environment resolves into a composed final moment.\",\"prompt_guidance_mode\":\"inherit\",\"motion_prompt_source\":null,\"start\":10,\"duration\":5,\"cut_marks\":[],\"seed\":null,\"subjects\":[],\"media_subject_id\":null,\"cast_subject_id\":null,\"first_frame_anchor\":false,\"last_frame_anchor\":false,\"source_in\":0,\"video_reference_scale\":1,\"base_kind\":\"generated\",\"audio_continuation\":\"AUTO\"}],\"camera_blocks\":[],\"audio_blocks\":[],\"extra_tracks\":[],\"refmods\":[],\"scene_guidance\":[],\"scene_guidance_library\":[]}"
       }
     },
     {
@@ -836,7 +839,7 @@
       "id": 47,
       "type": "MiniMaxH3SigmaShift",
       "pos": [
-        490,
+        510,
         270
       ],
       "size": [
@@ -846,7 +849,7 @@
       "flags": {
         "collapsed": false
       },
-      "order": 12,
+      "order": 15,
       "mode": 0,
       "inputs": [
         {
@@ -887,7 +890,7 @@
       "id": 61,
       "type": "MiniMaxH3MemoryEfficientSageAttentionPatch",
       "pos": [
-        430,
+        450,
         430
       ],
       "size": [
@@ -897,7 +900,7 @@
       "flags": {
         "collapsed": false
       },
-      "order": 11,
+      "order": 14,
       "mode": 0,
       "inputs": [
         {
@@ -930,7 +933,7 @@
       "id": 18,
       "type": "PathchSageAttentionKJ",
       "pos": [
-        430,
+        450,
         580
       ],
       "size": [
@@ -940,7 +943,7 @@
       "flags": {
         "collapsed": false
       },
-      "order": 9,
+      "order": 12,
       "mode": 0,
       "inputs": [
         {
@@ -991,7 +994,7 @@
       "flags": {
         "collapsed": false
       },
-      "order": 10,
+      "order": 13,
       "mode": 0,
       "inputs": [
         {
@@ -1186,6 +1189,194 @@
         "first_frame_denoise": 0.25,
         "first_frame_blend_frames": 3
       }
+    },
+    {
+      "id": 148,
+      "type": "ManualSigmas",
+      "pos": [
+        790,
+        410
+      ],
+      "size": [
+        210,
+        60
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "sigmas",
+          "name": "sigmas",
+          "type": "STRING",
+          "widget": {
+            "name": "sigmas"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "SIGMAS",
+          "name": "SIGMAS",
+          "type": "SIGMAS",
+          "links": [
+            228
+          ]
+        }
+      ],
+      "title": "3 step Sigmas",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.5.1",
+        "Node name for S&R": "ManualSigmas",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "version": "7.5.2",
+          "input_ue_unconnectable": {}
+        },
+        "enableTabs": false,
+        "tabWidth": 65,
+        "tabXOffset": 10,
+        "hasSecondTab": false,
+        "secondTabText": "Send Back",
+        "secondTabOffset": 80,
+        "secondTabWidth": 65
+      },
+      "widgets_values": [
+        "0.8500, 0.6316, 0.3158, 0.0000"
+      ],
+      "widgets_values_named": {
+        "sigmas": "0.8500, 0.6316, 0.3158, 0.0000"
+      },
+      "color": "#101523",
+      "bgcolor": "#191e2e"
+    },
+    {
+      "id": 149,
+      "type": "ManualSigmas",
+      "pos": [
+        960,
+        410
+      ],
+      "size": [
+        210,
+        60
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 8,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "sigmas",
+          "name": "sigmas",
+          "type": "STRING",
+          "widget": {
+            "name": "sigmas"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "SIGMAS",
+          "name": "SIGMAS",
+          "type": "SIGMAS",
+          "links": []
+        }
+      ],
+      "title": "4 step Sigmas",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.5.1",
+        "Node name for S&R": "ManualSigmas",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "version": "7.5.2",
+          "input_ue_unconnectable": {}
+        },
+        "enableTabs": false,
+        "tabWidth": 65,
+        "tabXOffset": 10,
+        "hasSecondTab": false,
+        "secondTabText": "Send Back",
+        "secondTabOffset": 80,
+        "secondTabWidth": 65
+      },
+      "widgets_values": [
+        "0.9035, 0.8000, 0.6316, 0.3158, 0.0000"
+      ],
+      "widgets_values_named": {
+        "sigmas": "0.9035, 0.8000, 0.6316, 0.3158, 0.0000"
+      },
+      "color": "#101523",
+      "bgcolor": "#191e2e"
+    },
+    {
+      "id": 150,
+      "type": "ManualSigmas",
+      "pos": [
+        1130,
+        410
+      ],
+      "size": [
+        270,
+        60
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "sigmas",
+          "name": "sigmas",
+          "type": "STRING",
+          "widget": {
+            "name": "sigmas"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "SIGMAS",
+          "name": "SIGMAS",
+          "type": "SIGMAS",
+          "links": []
+        }
+      ],
+      "title": "5 step Sigmas",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.5.1",
+        "Node name for S&R": "ManualSigmas",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "version": "7.5.2",
+          "input_ue_unconnectable": {}
+        },
+        "enableTabs": false,
+        "tabWidth": 65,
+        "tabXOffset": 10,
+        "hasSecondTab": false,
+        "secondTabText": "Send Back",
+        "secondTabOffset": 80,
+        "secondTabWidth": 65
+      },
+      "widgets_values": [
+        "0.9231, 0.8780, 0.8000, 0.6316, 0.3158, 0.0000"
+      ],
+      "widgets_values_named": {
+        "sigmas": "0.9231, 0.8780, 0.8000, 0.6316, 0.3158, 0.0000"
+      },
+      "color": "#101523",
+      "bgcolor": "#191e2e"
     }
   ],
   "links": [
@@ -1236,30 +1427,6 @@
       16,
       0,
       "IMAGE"
-    ],
-    [
-      27,
-      5,
-      0,
-      1,
-      0,
-      "CLIP"
-    ],
-    [
-      28,
-      6,
-      0,
-      1,
-      1,
-      "VAE"
-    ],
-    [
-      39,
-      7,
-      0,
-      1,
-      2,
-      "VAE"
     ],
     [
       60,
@@ -1350,12 +1517,44 @@
       "MODEL"
     ],
     [
+      27,
+      5,
+      0,
+      1,
+      0,
+      "CLIP"
+    ],
+    [
+      28,
+      6,
+      0,
+      1,
+      1,
+      "VAE"
+    ],
+    [
+      39,
+      7,
+      0,
+      1,
+      2,
+      "VAE"
+    ],
+    [
       227,
       145,
       0,
       1,
       4,
       "H3_LONGMEDIA_DIRECTOR"
+    ],
+    [
+      228,
+      148,
+      0,
+      2,
+      5,
+      "SIGMAS"
     ]
   ],
   "groups": [
@@ -1436,13 +1635,13 @@
   "extra": {
     "workflow_name": "MiniMax-H3-LongMedia-SAFE-1080p-15s",
     "ds": {
-      "scale": 0.6934334949442053,
+      "scale": 0.7627768444386258,
       "offset": [
-        2448.336293000699,
-        530.3528534031443
+        2587.308817700126,
+        430.32142999370257
       ]
     },
-    "frontendVersion": "1.51.9",
+    "frontendVersion": "1.53.6",
     "VHS_latentpreview": true,
     "VHS_latentpreviewrate": 0,
     "VHS_MetadataImage": true,
@@ -1458,7 +1657,7 @@
       }
     },
     "longmedia_director_p1": {
-      "version": "0.6.54",
+      "version": "0.6.57",
       "semantic_timeline": true,
       "setup_timeline_mode": "multiclip",
       "note": "WHO & WHAT names Setup numbered media slots; Director timeline, camera transitions and media are passed to Setup through one director connection."

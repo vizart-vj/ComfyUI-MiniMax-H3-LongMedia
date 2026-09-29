@@ -748,6 +748,9 @@ function ensureEditor(node) {
     const editor = node.addDOMWidget("camera_editor", "camera_editor", root, {
         serialize: false, hideOnZoom: true, getValue: () => null, setValue: () => {},
     });
+    editor.__lmPresentationOnly = true;
+    editor.serialize = false;
+    editor.serializeValue = () => undefined;
     node.__lmCameraViewportHeight = Number(node.__lmCameraViewportHeight) || 300;
     editor.computeSize = function(width) {
         const w = Math.max(180, Number(width) || Number(node.size?.[0]) || 700);

@@ -1,5 +1,89 @@
 # Changelog
 
+## 0.6.60
+
+### Director, RefMod, MultiClip and documentation
+
+- Added Sampler presets to the top of the node. Users can create, overwrite and delete workflow-persisted presets; the status line reports changed settings. Seed stays independent and is neither applied nor compared.
+- Motion Repair now survives workflow reloads: the Setup UI can reorder widgets for presentation, but workflow serialization writes their values in the original Python `INPUT_TYPES` order. Build label: `director-motion-repair-toggle-persist`.
+- MultiClip Latent Hi-Res + Refine now seeds each generated clip's hidden overlap from the preceding clip's refined high-resolution tail and freezes that prefix during Stage 2. This gives the Refiner consistent geometry/color context across clip boundaries while keeping Stage 1 continuation, clip prompts, final single VAE decode, and exact audio passthrough unchanged. Build label: `director-upscale-refine-multiclip-seam-fix`.
+- Character RefMods now keep identity authority across MultiClip boundaries: on target-video queries only, their visual attention share is balanced against longer competing visual-reference streams, while audio and other RefMod concepts keep their existing routing. Character guidance distinguishes identity from motion and scene inherited from video context. Build label: `director-refmod-character-multiclip-balance`.
+- RefMod Inspector now uses the upstream extraction controls and meanings: downscale-only short-edge resolution before VAE encode, visual token cap, aspect-fitted grid long edge, mode-aware clip-frame limit, audio-only voice seconds, and Compressed-only refinement steps. ENCODE applies these before/after the corresponding VAE steps; legacy `spatial_grid` and `temporal_frames` documents migrate into the clearer controls. Build label: `refmod-upstream-controls`.
+- Director shows BASE VIDEO SCALE only when the BASE clip owns a Video reference; an old explicitly saved non-default scale remains visible as EXTERNAL VIDEO 1 SCALE. VIDEO LAYER SCALE appears only on a layer clip with an assigned Video. Empty BASE clips at the default 100% no longer force a shared video slot back to full resolution when another clip asks for a smaller scale. Build label: `director-scale-ownership`.
+- Director now releases detached timeline video-strip decoders on every full UI refresh, unloads old TAKE gallery thumbnails when switching views, limits decoded preview-image retention to eight LRU entries, and reuses the Program Monitor video element instead of replacing it. TAKE gallery thumbnails load lazily. The global layer-height slider now sits beside timeline zoom and Fit. Build label: `director-preview-memory`.
+- Director timeline gap controls now render only inside real gaps, show the gap duration, fill the gap with a new clip, or close it while ripple-shifting later clips. Timeline zoom controls are grouped beside playback, and Fit resets horizontal scroll before fitting the entire timeline. The context menu now has distinct left/right cut-to-cursor actions; Knife remains a split. Trimmed media edges show directional markers with source-time details on hover.
+- Fixed Director timelines made entirely of immutable MEDIA clips. They now bypass H3 sampler/model preparation and go directly to the existing media assembly path; previously the sampler skipped every clip but left `stitched` unset, then raised `Unified LongMedia runtime produced no segment output`.
+- Fixed Director file drops by removing root capture-phase interception that could preempt native WHO & WHAT and subject-card handlers. Media drops on Character, Reference, Video and Audio layers now route to that layer directly and create a clip when the target time has no clip.
+- Director `Concept Type` now adds type-specific positive-prompt guidance to each active RefMod interval (Description remains metadata). Global Prompt adds scene-wide selectors for style, atmosphere, palette, lighting, texture and era, with 15 built-in choices per category and custom presets saved inside the workflow. Build label: `concept-guidance-presets`.
+- Added a dedicated CREATE FROM SOURCES RefMod editor for up to 128 image/video/audio sources, per-source selection/crop, clipboard image paste and token estimates before ENCODE & CREATE.
+- TAKE gallery now offers explicit sort choices and preserves its scroll position while switching the selected take.
+
+### Attention backend routing
+
+- RefMod and temporal routes now check the final merged attention mask for identity before running the dense masked path. When every hidden key is restored at unit weight, the mask changes no logits, so the sampler keeps the selected attention backend, including zero-copy SLA. This uses the actual H3 route instead of comparing authored duration with H3's frame-cell count.
+
+## 0.6.59
+
+- Fixed the main LongMedia sampler dropping H3 SLA's `optimized_attention_override` when cloning `guider.model_options`. It now inherits the ModelPatcher-owned override unless the guider already has its own; this lets the existing SLA fast path receive the actual hook and avoids silently selecting dense/SOL attention because the sampler clone lost it.
+
+## 0.6.58
+
+- Full-span RefMods at exact native strength now keep the selected native H3 attention backend, including zero-copy SLA. Their visibility mask is an identity operation when every target frame sees every RefMod key; only partial windows, reduced strengths or combined temporal text controls use the masked exact path. This avoids the dense masked-attention slowdown for whole-clip references.
+- RefMod Inspector now explains that Concept Type adds broad positive-prompt guidance while Description remains library metadata. It recommends entering specific effects in the Global Prompt or shot prompt, and ENCODE after changing artifact settings.
+
+## 0.6.57
+
+- Director **SYNC** now reconciles the RefMod panel with the shared library instead of unioning into it: records whose `.safetensors` no longer exists are dropped from the document, so emptying `output/longmedia_refmods` and pressing SYNC actually empties the panel. Unsaved drafts (no `path`) are kept, survivors are refreshed, and the button reports `+added ~updated −removed` plus any timeline clips left pointing at a removed RefMod. `Ctrl+Z` restores the previous list.
+- RefMod library listing failures are no longer silently converted into an empty library (`refmodList` swallowed every error and returned `[]`, which made SYNC a no-op on installs where the backend request failed). SYNC now aborts with "Nothing was changed" and the panel never loses state on a transport/server error.
+- A Director RefMod layer clip pointing at a RefMod that is no longer in the document is now a hard Setup error naming the id and time window, instead of being silently skipped. The silent skip is what made a render look exactly as if the RefMod were never applied (SYNC already reported `N timeline clip(s) reference a removed RefMod`, and Setup said nothing). Setup also prints what it packed: `[DIRECTOR REFMOD] packed N block(s): name#member kind HxW a.bs..b.bs str 1.00`, so "is the RefMod actually conditioning this render?" has a console answer instead of a guess.
+- Removed the dead `Resolution` and `Max tokens` fields from the RefMod record and inspector. Neither ever reached the encoder (`_lm_refmod_encode_record` consumes only `spatial_grid`, `temporal_frames` and `refinement_steps`), the router, or any VAE/descriptor path — `resolution` does not appear in `nodes.py` / `refmod_backend.py` / `refmod_routing.py` / `__init__.py` at all, and `max_tokens` there only in unrelated sampler memory budgeting. They were normalised in three places (`defaultRefmod`, `normalizeRefmod`, `director_plan._normalize_refmod`) and consumed nowhere, which is exactly what made them look meaningful in the inspector. The inspector now states which four inputs actually shape the artifact. Old documents carrying the keys are unaffected: normalisation simply drops them. A regression guard keeps them out.
+- Fixed Director RefMod render aborting with `shape '[1, 24, 1, 1, 30, 2, 20, 2]' is invalid for input of size 59040`. Host `comfy/ldm/minimax/model.py:42 patchify_video` rewrites the latent as `(b, c, t, pt, h, ph, w, pw)` with `h = H // 2` / `w = W // 2` and then reshapes to exactly `h*ph` by `w*pw` columns, so an odd latent H or W loses a row/column to floor-division and the reshape dies inside the H3 forward (`_cond_video_rows`). The failing latent was exactly `(1, 24, 1, 60, 41)`. RefMod sources are arbitrary user media and `encode_full` stored their VAE latents as-is (`RefMod.__post_init__` only checks `[1, 24, T, H, W]`, and `pool_latent` enforces evenness only for `COMPRESSED` pool targets — FULL mode enforced nothing), so an odd latent width sailed through to the host and blew up far from anything RefMod-shaped. `convert_to_native_block` now trims the visual latent onto the 2x2 DiT patch grid and reports `latent_h`/`latent_w` from the tensor actually handed to the host. Existing artifacts work without re-encoding.
+- Fixed Director RefMod render aborting with `Director RefMod descriptor mapping failed: RefMod descriptor identity not found in native minimax_refs`. `convert_to_native_block` emits only the native descriptor schema (`kind`/`latent_h`/`latent_w`/`latent`/`latent_t`/`ref_audio_t`/`audio_latent`) and host `PackedLayout(refs=...)` contracts to that schema alone, so the `longmedia_refmod_*` identity annotations were outside every host guarantee and got dropped on the `minimax_refs` → CONDITIONING → `payload['refs']` path. Both recovery layers above the authored specs read that same runtime container, so the one identity-complete source (`spec['native_block']`) was checked last and never reached. Descriptors are now re-stamped from the authored specs before `resolve_refmod_spec_index` matches on them, using the same `native_ref_count + appended_block_index` layout contract `_lm_localize_refmod_specs` already uses for `ref_index` (host native refs precede RefMod refs in `minimax_refs`).
+- RefMod cards with no library artifact are labelled `DRAFT`.
+- Director: a library RefMod can now be **placed on the REFMOD layer** (`PLACE ON LAYER` puts it at the playhead) and the clip inspector gained `↔` to stretch it across the whole timeline. Previously the only way to make an encoded RefMod affect the render was to drop its `.safetensors` onto the timeline, which re-imported it and duplicated the library entry.
+- Director **ENCODE** now reports itself on the ComfyUI console: `start` (with the parameters it will use), `stage · VAEs loaded`, `stage · latents encoded`, then `done · <artifact> · N member(s) · X.XXs`, or `FAILED · <reason> · X.XXs`. ENCODE produces no sampler progress bar, so without these lines a finished run was indistinguishable from a stalled one.
+- Fixed the RefMod inspector resetting its settings after **ENCODE** / **SAVE**: the response was a disk projection (`_refmod_record` rebuilds a record from the artifact's saved metadata and carries no `resolution`/`spatial_grid`/`temporal_frames`/`refinement_steps`/`max_tokens`/`description`), and the client fed it through `normalizeRefmod`, which re-defaulted every missing key to `1920x1080` / `32x32` / `24` / `20` / `512` / `1.00`. `spatial_grid`, `temporal_frames` and `refinement_steps` are real encoder inputs (`_lm_refmod_encode_record`), so this silently changed the encoded artifact too. Save/ENCODE now answer with the authored record and overlay only the artifact-owned fields (`path`, `folder`, `state`, `kind`, `format_version`, `members`), matching what the pending-encode branch already did; the client merges through `applyRefmodServerState`, so no merge site can re-default an authored setting.
+
+- Director **ENCODE** is now a separate VAE-only RefMod preparation operation (button in the REFMODS inspector, `POST /longmedia/refmods/encode`): it loads only the MiniMax H3 VideoVAE/AudioVAE and writes the latent artifact. Text encoder, DiT, sampler and Long Media Setup are never touched.
+- Long Media Setup no longer lazy-encodes RefMods on the render path. An unprepared RefMod aborts with a clear "is not encoded yet … press ENCODE" message instead of pulling the VAE into the execution log.
+- Fixed `Director RefMod routing has authored specs but no native minimax_refs descriptors.`: native `minimax_refs` descriptors are now recovered through a layered fallback (side channel → `PackedLayout.ref_blocks` → descriptors embedded in the authored specs), and when the host CONDITIONING hop drops them entirely the exact ordered descriptors are re-injected into `minimax_payload` with matching `cond_video_latents`/`cond_audio_latents` before `PackedLayout` packs the forward.
+- RefMod-only `inactive` WHO & WHAT pictures can be used as a RefMod source. They are loaded as Director RefMod media (`loaded_as='refmod_source'`) without becoming normal H3 image inputs and without exposing unrelated inactive pictures.
+
+- RefMod-only Picture sources are now loaded separately from ordinary H3 image references, so an inactive WHO & WHAT image can be encoded into a RefMod without becoming an unintended prompt reference.
+- RefMod routed attention now dispatches through ComfyUI's selected mask-aware attention backend rather than forcing the PyTorch SDPA path.
+
+- Fixed a duplicate block-scoped `files` declaration in the Director drop handler that prevented the Director frontend module from loading.
+- RefMod storage is now a shared catalog at `output/longmedia_refmods`, with folder grouping independent of Director project IDs; existing UUID-based project folders migrate on library sync.
+- Reworked the RefMod Strength slider so its value readout tracks the thumb and model updates commit only after the drag ends; slider constraints are now applied before the initial value to prevent integer-step snapping.
+
+## 0.6.56
+
+### RefMod library workflow
+
+- Added folder creation and folder-filtered RefMod library browsing.
+- RefMod `.safetensors` files can be imported by dropping onto the timeline (creates a RefMod layer) or an existing RefMod layer; imports use a dedicated upload route and are validated before entering the library.
+- RefMod inspector is single-selection/collapsible, with a tidied two-column layout and full-width horizontal Strength slider.
+- Track labels and timeline rows now share vertical scroll position.
+
+## 0.6.55
+
+### Director-integrated RefMods
+
+- Added a collapsible `REFMODS` library inside Director with Character, Reference, Image, Video, Audio, selected timeline clip and TAKE sources.
+- Added MiniMaxH3Mod-compatible v4 standalone and v5 bundle persistence, including `refmod_meta`, `ref_0...`, legacy `latent`, FULL and COMPRESSED modes.
+- RefMods use the already-loaded H3 VideoVAE/AudioVAE and attach as native unlabelled `minimax_refs`; no extra model or manual VAE connection is required.
+- TAKE-derived RefMods consume cached native visual/audio latents without decode/re-encode when available.
+- Authored RefMod intervals gate native reference keys on the target H3 frame lattice. Native reference RoPE cursors are never interpreted as Director time.
+- Temporal text embeddings and RefMods share one query-axis attention partition while remaining independent controls.
+- Selective regeneration skips RefMod loading/VAE work for cached clips; GENERATED/MEDIA continuation and TAKE state remain separate and unchanged.
+- Windowed Stage-2 refine and motion-repair passes now rebase every RefMod descriptor, preserving inactive zero-width gates so native refs cannot fall back to accidental full-span visibility.
+- Added stable identity-based native block routing and an authored/native target-clock assertion to fail loudly on packed-layout drift.
+
+### Preserved contracts
+
+- GENERATED → GENERATED cached/native TAKE continuation, MEDIA → GENERATED tail-only VAE/native keyframe continuation, trim-aware tails, mixed mono/stereo assembly, exact Stage-1 audio through Refine, and PDD multi-head output remain intact.
+- Director document schema is version 10; TAKE snapshots include RefMod catalog, bindings, intervals and strengths.
+
 ## 0.6.54
 
 Public release delta from the GitHub `v0.6.50` baseline.

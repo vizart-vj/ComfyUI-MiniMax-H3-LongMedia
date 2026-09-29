@@ -1,4 +1,4 @@
-# LongMedia Director 0.6.54 — Complete Guide
+# LongMedia Director 0.6.60 — Complete Guide
 
 LongMedia Director is the timeline-oriented authoring surface for **MiniMax H3 • LongMedia**. It combines shot timing, semantic references, FIRST/LAST frame anchors, cameras, temporal embeddings, audio policy, preview/review and TAKE management in one Director document.
 
@@ -168,6 +168,22 @@ See [Long Media Cameras](CAMERAS_GUIDE_EN.md).
 Use `✦` to add an EMBEDDING track and select an installed H3 embedding. Move/trim the block to select its active time range; `↔` expands it across the full timeline.
 
 Overlapping embedding layers combine. Disabled/muted layers are inactive. Camera and embedding boundaries are independent: an embedding transition does not restart camera presentation and a camera boundary does not clone the complete scene prompt.
+
+## RefMods
+
+Open the collapsible `REFMODS` panel to create and reuse native H3 visual/audio references. Sources can be a Character/Reference subject, imported Image/Video/Audio, the selected timeline clip, or a selected TAKE. TAKE conversion prefers its cached native latent and avoids decode/re-encode.
+
+Add a RefMod timeline layer with `⬡`, select a library record, then move/trim the block to author its active interval. `strength = 1.0` is the exact native H3 reference path; lower values apply an attention bias. FULL stores the native VAE latent. COMPRESSED pools that latent and can optionally refine it with Adam/MSE; no extra model is loaded.
+
+`Concept Type` adds a standard positive-prompt direction while the RefMod is active; `Description` remains library metadata. The type guides broad use (for example, `style` asks H3 to carry the reference's rendering, palette, texture and defining effects through the scene), while distinctive details still belong in the Global Prompt or shot prompt. The Global Prompt panel also has scene-wide selectors for visual style, atmosphere, color palette, lighting, texture and era. Save custom directions there to keep them in the workflow and reuse them across shots. For a stronger visual reference, use FULL or a larger spatial grid and ENCODE again after changing artifact settings. Native reference latents may still carry other visible traits from the source.
+
+RefMods are deliberately separate from EMBEDDING and TAKE continuity:
+
+- EMBEDDING is learned semantic/motion/camera control;
+- RefMod is reusable native `minimax_refs` visual/audio conditioning;
+- TAKE/continuation is physical temporal continuity.
+
+The authored interval controls target-query access to reference keys. It is never inferred from native reference RoPE positions. Audio RefMods are Audio References and do not promise voice cloning. RefMod catalog/bindings are stored in `director_json` and restored with TAKE snapshots.
 
 ## Audio selector
 

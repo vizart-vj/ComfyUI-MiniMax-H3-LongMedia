@@ -9,6 +9,7 @@
 - [Режимы аудио и `video_ref_edit`](AUDIO_MODES_GUIDE_RU.md)
 - [Integrated Refine и Latent Hi-Res](TWO_PASS_LATENT_HIRES_REFINER_GUIDE_RU.md)
 - [Sampler, VRAM и производительность](SAMPLER_OPTIMIZATION_RU.md)
+- [Полный справочник параметров узлов и Director](PARAMETER_REFERENCE_RU.md)
 - [Архитектура](ARCHITECTURE_RU.md)
 
 ## Director
@@ -26,6 +27,7 @@
 
 ## Релиз
 
+- [Release Notes 0.6.60](RELEASE_NOTES_0.6.60_RU.md)
 - [Release Notes 0.6.54](RELEASE_NOTES_0.6.54_RU.md)
 - [Release Notes 0.6.40](RELEASE_NOTES_0.6.40_RU.md)
 

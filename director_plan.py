@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import uuid
 from typing import Any, Callable
 
@@ -27,7 +28,34 @@ MAX_CAMERA_BLOCKS = 64
 MAX_AUDIO_BLOCKS = 64
 MAX_EXTRA_TRACKS = 24
 MAX_EXTRA_CLIPS = 256
-EXTRA_TRACK_TYPES = {"prompt", "embedding", "character", "reference", "video", "audio"}
+MAX_REFMODS = 256
+SCENE_GUIDANCE_CATEGORIES = {"style", "atmosphere", "palette", "lighting", "texture", "era"}
+EXTRA_TRACK_TYPES = {"prompt", "embedding", "character", "reference", "video", "audio", "refmod"}
+PROMPT_GUIDANCE_MODES = {
+    "none": "",
+    "motion_first": (
+        "Motion first: preserve the source video's action sequence, choreography, body mechanics, "
+        "performer paths, timing, and camera movement and framing. Apply requested changes to "
+        "identity, wardrobe, atmosphere, and setting while keeping the source performance intact."
+    ),
+    "balanced": (
+        "Balanced reference guidance: preserve the source video's main action sequence, timing, "
+        "composition, and camera language while applying the written changes; allow only small, "
+        "natural variations."
+    ),
+    "free": (
+        "Free adaptation: use the source video as a loose guide; the written direction may "
+        "substantially reshape actions, timing, and camera language."
+    ),
+}
+
+
+def _normalize_prompt_guidance_mode(value: Any, *, allow_inherit: bool) -> str:
+    mode = str(value or "").strip().lower()
+    allowed = set(PROMPT_GUIDANCE_MODES)
+    if allow_inherit:
+        allowed.add("inherit")
+    return mode if mode in allowed else ("inherit" if allow_inherit else "none")
 
 DEFAULT_CAMERA = {
     "shot_size": "Medium Shot",
@@ -91,7 +119,9 @@ def default_shot(index: int = 0, duration: float = 5.0) -> dict[str, Any]:
         "clip_id": _id("shot"),
         "name": f"Shot {index + 1}",
         "prompt": "",
+        "prompt_guidance_mode": "inherit",
         "duration": float(duration),
+        "cut_marks": [],
         "seed": None,
         "subjects": [],
         "media_subject_id": None,
@@ -99,6 +129,7 @@ def default_shot(index: int = 0, duration: float = 5.0) -> dict[str, Any]:
         "first_frame_anchor": False,
         "last_frame_anchor": False,
         "source_in": 0.0,
+        "video_reference_scale": 1.0,
         "base_kind": "generated",
         "audio_continuation": "AUTO",
     }
@@ -117,7 +148,7 @@ def default_camera_block(start: float = 0.0, duration: float = 5.0) -> dict[str,
 def default_document() -> dict[str, Any]:
     shots = [default_shot(0, 5.0), default_shot(1, 5.0), default_shot(2, 5.0)]
     return {
-        "version": 9,
+        "version": 10,
         "kind": "h3_longmedia_director",
         "project_id": _id("project"),
         "fps": 24.0,
@@ -129,6 +160,7 @@ def default_document() -> dict[str, Any]:
         "resolution_source": "base_layer",
         "resolution": "1920x1080",
         "megapixel": 0.8,
+        "render_mode": "final",
         "regeneration": {"mode": "none", "clip_id": None, "request_id": None},
         "subjects": [],
         "shots": shots,
@@ -138,6 +170,7 @@ def default_document() -> dict[str, Any]:
             default_camera_block(10.0, 5.0),
         ],
         "audio_blocks": [],
+        "refmods": [],
         "extra_tracks": [],
     }
 
@@ -189,12 +222,23 @@ def _normalize_shot(item: Any, index: int, subject_ids: set[str]) -> dict[str, A
     cast_subject_id = str(item.get("cast_subject_id") or "").strip() or None
     if cast_subject_id not in subject_ids:
         cast_subject_id = None
+    raw_cut_marks = item.get("cut_marks") if isinstance(item.get("cut_marks"), list) else []
+    cut_marks = sorted({
+        round(mark, 6)
+        for value in raw_cut_marks[:128]
+        if math.isfinite(mark := _finite_float(value, -1.0)) and 0.0 <= mark <= duration
+    })
     return {
         "clip_id": str(item.get("clip_id") or item.get("id") or "").strip() or _id("shot"),
         "name": str(item.get("name") or item.get("clip_name") or f"Shot {index + 1}").strip()[:120],
         "prompt": str(item.get("prompt") or "").strip(),
+        "prompt_guidance_mode": _normalize_prompt_guidance_mode(
+            item.get("prompt_guidance_mode"), allow_inherit=True,
+        ),
+        "motion_prompt_source": str(item.get("motion_prompt_source") or "").strip() or None,
         "start": (None if item.get("start") in (None, "") else max(0.0, _finite_float(item.get("start"), 0.0))),
         "duration": duration,
+        "cut_marks": cut_marks,
         "seed": seed,
         "subjects": selected,
         "media_subject_id": media_subject_id,
@@ -202,6 +246,7 @@ def _normalize_shot(item: Any, index: int, subject_ids: set[str]) -> dict[str, A
         "first_frame_anchor": bool(item.get("first_frame_anchor", False)),
         "last_frame_anchor": bool(item.get("last_frame_anchor", False)),
         "source_in": max(0.0, _finite_float(item.get("source_in"), 0.0)),
+        "video_reference_scale": max(0.25, min(1.0, _finite_float(item.get("video_reference_scale"), 1.0))),
         "base_kind": ("media" if str(item.get("base_kind") or "generated").strip().lower() == "media" else "generated"),
         "audio_continuation": (str(item.get("audio_continuation") or "AUTO").strip().upper() if str(item.get("audio_continuation") or "AUTO").strip().upper() in {"AUTO", "CONTINUE", "FRESH"} else "AUTO"),
     }
@@ -252,7 +297,85 @@ def _normalize_audio_block(item: Any, index: int, subject_ids: set[str]) -> dict
     }
 
 
-def _normalize_extra_clip(item: Any, index: int, subject_ids: set[str]) -> dict[str, Any]:
+def _normalize_refmod(item: Any, index: int) -> dict[str, Any] | None:
+    """Normalize a Director RefMod record; draft/source state remains serializable."""
+    item = item if isinstance(item, dict) else {}
+    refmod_id = str(item.get("refmod_id") or item.get("id") or "").strip() or _id("refmod")
+    path = str(item.get("path") or item.get("filename") or "").strip().replace("\\", "/")
+    kind = str(item.get("kind") or "image").strip().lower()
+    if kind not in {"image", "video", "audio", "bundle"}:
+        kind = "image"
+    mode = str(item.get("mode") or "FULL").strip().upper()
+    if mode not in {"FULL", "COMPRESSED"}:
+        mode = "FULL"
+    legacy_grid = [int(value) for value in re.findall(r"\d+", str(item.get("spatial_grid") or "16x16"))]
+    grid_default = max(legacy_grid) if legacy_grid else 16
+    grid_long_edge = max(2, min(64, int(round(_finite_float(item.get("grid_long_edge"), grid_default) / 2) * 2)))
+    clip_frames = max(1, min(2147483647, int(_finite_float(item.get("clip_frames", item.get("temporal_frames")), 16))))
+    return {
+        "refmod_id": refmod_id[:160],
+        "name": str(item.get("name") or f"RefMod {index + 1}").strip()[:160],
+        "source": str(item.get("source") or "").strip()[:500],
+        "source_subject_id": str(item.get("source_subject_id") or "").strip()[:160] or None,
+        "source_clip_id": str(item.get("source_clip_id") or "").strip()[:160] or None,
+        "source_take_revision": str(item.get("source_take_revision") or "").strip()[:160] or None,
+        "path": path[:1024],
+        "state": str(item.get("state") or ("ready" if path else "draft")).strip()[:80],
+        "kind": kind,
+        "mode": mode,
+        "concept_type": str(item.get("concept_type") or "generic").strip()[:120],
+        "description": str(item.get("description") or "").strip()[:2000],
+        # Canonical RefMod extraction controls follow the upstream meaning.
+        # Legacy spatial_grid/temporal_frames remain accepted when loading old
+        # Director documents, then project into grid_long_edge/clip_frames.
+        "resolution_short_edge": max(256, min(2048, int(round(_finite_float(item.get("resolution_short_edge", item.get("resolution")), 1024) / 64) * 64))),
+        "max_tokens": max(0, min(2147483647, int(_finite_float(item.get("max_tokens"), 5120)))),
+        "grid_long_edge": grid_long_edge,
+        "clip_frames": clip_frames,
+        "voice_seconds": max(0.025, min(600.0, _finite_float(item.get("voice_seconds"), 30.0))),
+        "spatial_grid": f"{grid_long_edge}x{grid_long_edge}",
+        "temporal_frames": min(240, clip_frames),
+        "refinement_steps": max(0, min(2000, int(_finite_float(item.get("refinement_steps"), 0)))),
+        "strength": max(0.0, min(1.0, _finite_float(item.get("strength"), 1.0))),
+        "token_count": max(0, int(_finite_float(item.get("token_count"), 0))),
+        "format_version": max(0, min(5, int(_finite_float(item.get("format_version"), 0)))),
+        "members": list(item.get("members") or [])[:64],
+    }
+
+
+def _normalize_scene_guidance(value: Any, *, library: bool = False) -> list[dict[str, str]]:
+    """Normalize authored global scene directions and saved user presets."""
+    if not isinstance(value, list):
+        return []
+    limit = 128 if library else len(SCENE_GUIDANCE_CATEGORIES)
+    result: list[dict[str, str]] = []
+    seen_categories: set[str] = set()
+    seen_ids: set[str] = set()
+    for index, raw in enumerate(value[:limit]):
+        if not isinstance(raw, dict):
+            continue
+        category = str(raw.get("category") or "").strip().lower()
+        name = str(raw.get("name") or "").strip()[:100]
+        prompt = str(raw.get("prompt") or "").strip()[:2000]
+        preset_id = str(raw.get("id") or "").strip()[:160]
+        if category not in SCENE_GUIDANCE_CATEGORIES or not name or not prompt:
+            continue
+        if library:
+            if not preset_id:
+                preset_id = f"custom-{index + 1}"
+            if preset_id in seen_ids:
+                continue
+            seen_ids.add(preset_id)
+            result.append({"id": preset_id, "category": category, "name": name, "prompt": prompt})
+        else:
+            if category in seen_categories:
+                continue
+            seen_categories.add(category)
+            result.append({"id": preset_id, "category": category, "name": name, "prompt": prompt})
+    return result
+
+
+def _normalize_extra_clip(item: Any, index: int, subject_ids: set[str], refmod_ids: set[str]) -> dict[str, Any]:
     item = item if isinstance(item, dict) else {}
     subject_id = str(item.get("subject_id") or "").strip() or None
     if subject_id not in subject_ids:
@@ -263,6 +386,9 @@ def _normalize_extra_clip(item: Any, index: int, subject_ids: set[str]) -> dict[
     if embedding_name.lower().endswith(".safetensors"):
         embedding_name = embedding_name[:-12]
     embedding_name = embedding_name.replace("\r", " ").replace("\n", " ").strip()[:260]
+    refmod_id = str(item.get("refmod_id") or "").strip() or None
+    if refmod_id not in refmod_ids:
+        refmod_id = None
     return {
         "clip_id": str(item.get("clip_id") or item.get("id") or "").strip() or _id("layer"),
         "name": str(item.get("name") or f"Layer {index + 1}").strip()[:120],
@@ -271,17 +397,32 @@ def _normalize_extra_clip(item: Any, index: int, subject_ids: set[str]) -> dict[
         "prompt": str(item.get("prompt") or "").strip(),
         "embedding_name": embedding_name,
         "subject_id": subject_id,
+        "refmod_id": refmod_id,
+        "strength": max(0.0, min(1.0, _finite_float(item.get("strength"), 1.0))),
         "source_in": max(0.0, _finite_float(item.get("source_in"), 0.0)),
+        "video_reference_scale": max(0.25, min(1.0, _finite_float(item.get("video_reference_scale"), 1.0))),
     }
 
 
-def _normalize_extra_track(item: Any, index: int, subject_ids: set[str]) -> dict[str, Any]:
+def _normalize_extra_track(item: Any, index: int, subject_ids: set[str], refmod_ids: set[str]) -> dict[str, Any]:
     item = item if isinstance(item, dict) else {}
     track_type = str(item.get("type") or "prompt").strip().lower()
     if track_type not in EXTRA_TRACK_TYPES:
         track_type = "prompt"
     clips_raw = item.get("clips") if isinstance(item.get("clips"), list) else []
-    clips = [_normalize_extra_clip(c, i, subject_ids) for i, c in enumerate(clips_raw[:MAX_EXTRA_CLIPS])]
+    raw_prompt_mode = str(item.get("prompt_guidance_mode") or "").strip().lower()
+    legacy_prompt_mode = next((
+        str(clip.get("prompt_guidance_mode") or "").strip().lower()
+        for clip in clips_raw[:MAX_EXTRA_CLIPS]
+        if isinstance(clip, dict)
+        and str(clip.get("prompt_guidance_mode") or "").strip().lower() in PROMPT_GUIDANCE_MODES
+        and str(clip.get("prompt_guidance_mode") or "").strip().lower() != "none"
+    ), "none")
+    if raw_prompt_mode not in PROMPT_GUIDANCE_MODES or (
+        raw_prompt_mode == "none" and legacy_prompt_mode != "none"
+    ):
+        raw_prompt_mode = legacy_prompt_mode
+    clips = [_normalize_extra_clip(c, i, subject_ids, refmod_ids) for i, c in enumerate(clips_raw[:MAX_EXTRA_CLIPS])]
     return {
         "track_id": str(item.get("track_id") or item.get("id") or "").strip() or _id("track"),
         "type": track_type,
@@ -289,6 +430,9 @@ def _normalize_extra_track(item: Any, index: int, subject_ids: set[str]) -> dict
         "enabled": item.get("enabled") is not False,
         "locked": item.get("locked") is True,
         "muted": item.get("muted") is True,
+        "prompt_guidance_mode": _normalize_prompt_guidance_mode(
+            raw_prompt_mode, allow_inherit=False,
+        ),
         "clips": clips,
     }
 
@@ -338,7 +482,7 @@ def _migrate_v1(data: dict[str, Any]) -> dict[str, Any]:
                 })
         cursor += duration
     return {
-        "version": 9,
+        "version": 10,
         "kind": "h3_longmedia_director",
         "project_id": str(data.get("project_id") or "").strip(),
         "fps": data.get("fps", 24),
@@ -352,6 +496,7 @@ def _migrate_v1(data: dict[str, Any]) -> dict[str, Any]:
         "shots": migrated_shots,
         "camera_blocks": camera_blocks,
         "audio_blocks": audio_blocks,
+        "refmods": data.get("refmods") if isinstance(data.get("refmods"), list) else [],
         "extra_tracks": extra_tracks,
     }
 
@@ -449,6 +594,8 @@ def normalize_document(raw: Any) -> dict[str, Any]:
         cursor = max(cursor, float(shot["start"]) + float(shot["duration"]))
     shots.sort(key=lambda shot: float(shot.get("start") or 0.0))
 
+    camera_track_enabled = data.get("camera_track_enabled") is not False
+    audio_track_enabled = data.get("audio_track_enabled") is not False
     camera_raw = data.get("camera_blocks") if isinstance(data.get("camera_blocks"), list) else []
     camera_blocks = [_normalize_camera_block(item, i) for i, item in enumerate(camera_raw[:MAX_CAMERA_BLOCKS])]
     if not isinstance(data.get("camera_blocks"), list):
@@ -460,6 +607,10 @@ def normalize_document(raw: Any) -> dict[str, Any]:
         _normalize_audio_block(item, i, subject_ids)
         for i, item in enumerate(audio_raw[:MAX_AUDIO_BLOCKS])
     ]
+    if not camera_track_enabled:
+        camera_blocks = []
+    if not audio_track_enabled:
+        audio_blocks = []
 
     # v3 Director trim contract: timeline duration is playback duration at 1x.
     # Video/audio blocks carry a source_in cursor; expanding a media-backed block is
@@ -504,8 +655,15 @@ def normalize_document(raw: Any) -> dict[str, Any]:
 
     project_id = _stable_project_id(data, shots)
     regeneration = _normalize_regeneration(data.get("regeneration"), shots)
+    refmods_raw = data.get("refmods") if isinstance(data.get("refmods"), list) else []
+    refmods = [value for i, item in enumerate(refmods_raw[:MAX_REFMODS]) if (value := _normalize_refmod(item, i)) is not None]
+    # Duplicate ids are ambiguous for interval routing; first catalog occurrence wins.
+    refmods = list({item["refmod_id"]: item for item in reversed(refmods)}.values())[::-1]
+    refmod_ids = {item["refmod_id"] for item in refmods}
+    scene_guidance = _normalize_scene_guidance(data.get("scene_guidance"))
+    scene_guidance_library = _normalize_scene_guidance(data.get("scene_guidance_library"), library=True)
     extra_raw = data.get("extra_tracks") if isinstance(data.get("extra_tracks"), list) else []
-    extra_tracks = [_normalize_extra_track(item, i, subject_ids) for i, item in enumerate(extra_raw[:MAX_EXTRA_TRACKS])]
+    extra_tracks = [_normalize_extra_track(item, i, subject_ids, refmod_ids) for i, item in enumerate(extra_raw[:MAX_EXTRA_TRACKS])]
 
     setup_h3_mode = str(data.get("setup_h3_mode") or "auto").strip().lower()
     if setup_h3_mode not in {"auto", "t2va", "fl2va", "ref2va", "hybrid", "video_ref_edit"}:
@@ -526,9 +684,12 @@ def normalize_document(raw: Any) -> dict[str, Any]:
     if not resolution:
         resolution = "1920x1080"
     megapixel = max(0.1, min(8.0, _finite_float(data.get("megapixel"), 0.8)))
+    render_mode = str(data.get("render_mode") or "final").strip().lower()
+    if render_mode not in {"preview", "final"}:
+        render_mode = "final"
 
     return {
-        "version": 9,
+        "version": 10,
         "kind": "h3_longmedia_director",
         "project_id": project_id,
         "fps": max(1.0, min(120.0, _finite_float(data.get("fps"), 24.0))),
@@ -537,15 +698,21 @@ def normalize_document(raw: Any) -> dict[str, Any]:
         "setup_timeline_mode": setup_timeline_mode,
         "segmented_count": segmented_count,
         "segmented_duration": segmented_duration,
+        "camera_track_enabled": camera_track_enabled,
+        "audio_track_enabled": audio_track_enabled,
         "resolution_source": resolution_source,
         "resolution": resolution,
         "megapixel": megapixel,
+        "render_mode": render_mode,
         "regeneration": regeneration,
         "subjects": subjects,
         "shots": shots,
         "camera_blocks": camera_blocks,
         "audio_blocks": audio_blocks,
+        "refmods": refmods,
         "extra_tracks": extra_tracks,
+        "scene_guidance": scene_guidance,
+        "scene_guidance_library": scene_guidance_library,
     }
 
 
@@ -667,21 +834,15 @@ def _subject_sentence(subject: dict[str, Any], anchor_roles: tuple[str, ...] = (
         else:
             lead = "The supplied ending frame image"
         name = str(subject.get("name") or "subject").strip()
-        description = str(subject.get("description") or "").strip()
         retention = str(subject.get("retention") or "").strip()
         parts = [f"{lead} represents {name}."]
-        if description:
-            parts.append(description.rstrip(".") + ".")
         if retention:
             parts.append(f"Anchor relationship: {retention.replace('_', ' ')}.")
         return " ".join(parts)
     token = subject_token(subject)
     name = str(subject.get("name") or "subject").strip()
-    description = str(subject.get("description") or "").strip()
     retention = str(subject.get("retention") or "").strip()
     parts = [f"{token} represents {name}."]
-    if description:
-        parts.append(description.rstrip(".") + ".")
     if retention:
         parts.append(f"Reference relationship: {retention.replace('_', ' ')}.")
     return " ".join(parts)
@@ -755,7 +916,8 @@ def _extra_layers_for_shot(
     start: float,
     duration: float,
     subjects_by_id: dict[str, dict[str, Any]],
-) -> tuple[list[str], list[str], list[str], list[dict[str, Any]]]:
+    shot_prompt_guidance_mode: str = "inherit",
+) -> tuple[list[str], list[str], list[str], list[dict[str, Any]], str]:
     """Compile semantic timeline layers active for one MAIN shot.
 
     MiniMax-H3 text embeddings are kept out of prose and returned separately.
@@ -767,6 +929,10 @@ def _extra_layers_for_shot(
     ids: list[str] = []
     embeddings: list[str] = []
     embedding_spans: list[dict[str, Any]] = []
+    shot_mode = _normalize_prompt_guidance_mode(
+        shot_prompt_guidance_mode, allow_inherit=True,
+    )
+    shot_guidance = PROMPT_GUIDANCE_MODES.get(shot_mode, "")
     prefixes = {
         "prompt": "Timeline prompt layer",
         "character": "Character layer",
@@ -778,6 +944,13 @@ def _extra_layers_for_shot(
         if track.get("enabled") is False or track.get("muted") is True:
             continue
         track_type = str(track.get("type") or "prompt")
+        track_guidance = ""
+        if shot_mode == "inherit" and track_type in {"prompt", "character", "reference", "video"}:
+            track_mode = _normalize_prompt_guidance_mode(
+                track.get("prompt_guidance_mode"), allow_inherit=False,
+            )
+            track_guidance = PROMPT_GUIDANCE_MODES.get(track_mode, "")
+        track_guidance_added = False
         for clip in track.get("clips") or []:
             if _overlap(start, duration, float(clip.get("start") or 0.0), float(clip.get("duration") or 0.0)) <= 0:
                 continue
@@ -806,6 +979,9 @@ def _extra_layers_for_shot(
             sid = str(clip.get("subject_id") or "").strip()
             subject = subjects_by_id.get(sid) if sid else None
             pieces: list[str] = []
+            if track_guidance and not track_guidance_added:
+                pieces.append(track_guidance)
+                track_guidance_added = True
             if prompt:
                 pieces.append(prompt.rstrip(".") + ".")
             if subject is not None:
@@ -814,7 +990,97 @@ def _extra_layers_for_shot(
             if pieces:
                 label = str(track.get("name") or prefixes.get(track_type, "Timeline layer"))
                 lines.append(f"{prefixes.get(track_type, 'Timeline layer')} [{label}]: {' '.join(pieces)}")
-    return lines, ids, embeddings, embedding_spans
+    return lines, ids, embeddings, embedding_spans, shot_guidance
+
+
+def _video_reference_scales_for_shot(
+    document: dict[str, Any],
+    start: float,
+    duration: float,
+    subjects_by_id: dict[str, dict[str, Any]],
+    default_scale: float,
+    *,
+    has_base_video_reference: bool,
+) -> dict[str, float]:
+    """Resolve scales only for video sources owned by this shot or active layers."""
+    default = max(0.25, min(1.0, _finite_float(default_scale, 1.0)))
+    # Preserve a deliberately authored legacy BASE scale for an external Video 1.
+    # An empty BASE at its default 100% must not override a VIDEO layer elsewhere.
+    scales = {1: default} if has_base_video_reference or default < 0.999 else {}
+    layer_scales: dict[int, float] = {}
+    for track in document.get("extra_tracks") or []:
+        if (
+            not isinstance(track, dict)
+            or track.get("enabled") is False
+            or track.get("muted") is True
+            or str(track.get("type") or "") != "video"
+        ):
+            continue
+        for clip in track.get("clips") or []:
+            if not isinstance(clip, dict):
+                continue
+            if _overlap(start, duration, float(clip.get("start") or 0.0), float(clip.get("duration") or 0.0)) <= 0:
+                continue
+            subject = subjects_by_id.get(str(clip.get("subject_id") or ""))
+            if not isinstance(subject, dict) or str(subject.get("kind") or "") != "Video":
+                continue
+            try:
+                slot = int(subject.get("slot") or 1)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if slot < 1 or slot > 3:
+                continue
+            scale = max(0.25, min(1.0, _finite_float(clip.get("video_reference_scale"), 1.0)))
+            layer_scales[slot] = min(layer_scales.get(slot, 1.0), scale)
+    scales.update(layer_scales)
+    return {str(slot): value for slot, value in scales.items()}
+
+
+def _refmod_spans_for_shot(
+    document: dict[str, Any], start: float, duration: float,
+) -> list[dict[str, Any]]:
+    """Localize enabled REFMOD clips onto one MAIN clip's half-open clock."""
+    catalog = {
+        str(item.get("refmod_id") or ""): item
+        for item in (document.get("refmods") or []) if isinstance(item, dict)
+    }
+    end = float(start) + float(duration)
+    spans: list[dict[str, Any]] = []
+    order = 0
+    for track in document.get("extra_tracks") or []:
+        if (
+            not isinstance(track, dict)
+            or track.get("enabled") is False
+            or track.get("muted") is True
+            or str(track.get("type") or "") != "refmod"
+        ):
+            continue
+        for layer in track.get("clips") or []:
+            if not isinstance(layer, dict):
+                continue
+            refmod_id = str(layer.get("refmod_id") or "").strip()
+            record = catalog.get(refmod_id)
+            if record is None:
+                continue
+            layer_start = float(layer.get("start") or 0.0)
+            layer_end = layer_start + max(0.0, float(layer.get("duration") or 0.0))
+            local_start = max(float(start), layer_start) - float(start)
+            local_end = min(end, layer_end) - float(start)
+            strength = max(0.0, min(1.0, float(layer.get("strength", 1.0) or 0.0)))
+            if local_end <= local_start + 1e-9 or strength <= 0.0:
+                continue
+            spans.append({
+                "refmod_id": refmod_id,
+                "name": str(record.get("name") or refmod_id),
+                "path": str(record.get("path") or ""),
+                "kind": str(record.get("kind") or "image"),
+                "strength": strength,
+                "start_seconds": max(0.0, local_start),
+                "end_seconds": min(float(duration), local_end),
+                "order": order,
+            })
+            order += 1
+    return spans
 
 
 def _native_character_replace_contract(document: dict[str, Any]) -> dict[str, Any] | None:
@@ -893,6 +1159,16 @@ def compile_director_plan(
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], str]:
     """Compile Director v1/v2 JSON into LongMedia's existing clip-plan contract."""
     document = normalize_document(raw)
+    base_global_prompt = str(global_prompt or "").strip()
+    scene_guidance = document.get("scene_guidance") or []
+    scene_guidance_text = "\n".join(
+        f"{str(item.get('category') or '').title()} direction: {str(item.get('prompt') or '').strip()}"
+        for item in scene_guidance
+        if isinstance(item, dict) and str(item.get("prompt") or "").strip()
+    )
+    compiled_global_prompt = "\n\n".join(
+        part for part in (base_global_prompt, scene_guidance_text) if part
+    )
     frame_anchors = director_frame_anchor_contract(document)
     picture_runtime = director_picture_runtime_map(document)
     runtime_picture_slots = dict(picture_runtime.get("runtime_slots") or {})
@@ -960,9 +1236,33 @@ def compile_director_plan(
         audio_lines, audio_subject_ids = _audio_for_shot(
             document, start, float(shot["duration"]), subjects_by_id
         )
-        extra_lines, extra_subject_ids, shot_embeddings, shot_embedding_spans = _extra_layers_for_shot(
-            document, start, float(shot["duration"]), subjects_by_id
+        extra_lines, extra_subject_ids, shot_embeddings, shot_embedding_spans, shot_guidance = _extra_layers_for_shot(
+            document, start, float(shot["duration"]), subjects_by_id,
+            str(shot.get("prompt_guidance_mode") or "inherit"),
         )
+        base_video_subject = subjects_by_id.get(str(shot.get("media_subject_id") or ""))
+        has_base_video_reference = bool(
+            isinstance(base_video_subject, dict)
+            and base_video_subject.get("kind") == "Video"
+            and isinstance(base_video_subject.get("media"), dict)
+        )
+        if not has_base_video_reference:
+            for subject_id in shot.get("subjects") or []:
+                subject = subjects_by_id.get(str(subject_id))
+                if (
+                    isinstance(subject, dict)
+                    and subject.get("kind") == "Video"
+                    and isinstance(subject.get("media"), dict)
+                    and int(_finite_float(subject.get("slot"), 0)) == 1
+                ):
+                    has_base_video_reference = True
+                    break
+        video_reference_scales = _video_reference_scales_for_shot(
+            document, start, float(shot["duration"]), subjects_by_id,
+            float(shot.get("video_reference_scale") or 1.0),
+            has_base_video_reference=has_base_video_reference,
+        )
+        shot_refmod_spans = _refmod_spans_for_shot(document, start, float(shot["duration"]))
         for sid in [*audio_subject_ids, *extra_subject_ids]:
             if sid not in selected_ids:
                 selected_ids.append(sid)
@@ -1090,7 +1390,7 @@ def compile_director_plan(
         # A single full-shot camera remains native/global.  Full-shot embeddings
         # retain stock H3 semantics too.  Only genuinely time-varying controls
         # are appended as independent presentations in Setup.
-        if full_camera is not None:
+        if full_camera is not None and document.get("camera_track_enabled", True):
             card = dict(full_camera.get("camera") or DEFAULT_CAMERA)
             card["director_interval_seconds"] = duration
             card["director_camera_block_duration_seconds"] = duration
@@ -1102,7 +1402,7 @@ def compile_director_plan(
         else:
             camera_instruction = ""
         global_embedding_text = "\n".join("embedding:" + name for name in full_embedding_names)
-        parts = [shot["prompt"], subject_text, " ".join(extra_lines), " ".join(audio_lines),
+        parts = [shot_guidance, shot["prompt"], subject_text, " ".join(extra_lines), " ".join(audio_lines),
                  native_replace_direction, cast_direction,
                  camera_instruction, global_embedding_text]
         local_prompt = "\n\n".join(part.strip() for part in parts if str(part or "").strip())
@@ -1112,6 +1412,7 @@ def compile_director_plan(
             "name": shot["name"],
             "base_prompt": shot["prompt"],
             "prompt": local_prompt,
+            "director_prompt_guidance_mode": str(shot.get("prompt_guidance_mode") or "inherit"),
             "duration": float(shot["duration"]),
             "seed": shot["seed"],
             "camera": camera,
@@ -1123,6 +1424,7 @@ def compile_director_plan(
             "director_native_source_video_subject_id": (str(native_character_replace.get("source_video_subject_id") or "") if native_replace_here else None),
             "director_embeddings": list(shot_embeddings),
             "director_embedding_spans": [dict(item) for item in shot_embedding_spans],
+            "director_refmod_spans": [dict(item) for item in shot_refmod_spans],
             # Retained for project/backward metadata only; v0.6.20 execution uses
             # factorized controls below and never consumes combined regions.
             "director_conditioning_regions": [],
@@ -1133,6 +1435,8 @@ def compile_director_plan(
             "director_end_seconds": end,
             "director_source_in_seconds": float(shot.get("source_in") or 0.0),
             "director_source_out_seconds": float(shot.get("source_in") or 0.0) + float(shot["duration"]),
+            "video_reference_scale": float(video_reference_scales.get("1", 1.0)),
+            "video_reference_scales": video_reference_scales,
             "director_first_frame_anchor": bool(shot.get("first_frame_anchor")),
             "director_last_frame_anchor": bool(shot.get("last_frame_anchor")),
             "director_base_kind": str(shot.get("base_kind") or "generated"),
@@ -1145,7 +1449,7 @@ def compile_director_plan(
         "version": 1,
         "kind": "h3_longmedia_clip_plan",
         "source": "MiniMax H3 LongMedia Director",
-        "global_prompt": str(global_prompt or "").strip(),
+        "global_prompt": compiled_global_prompt,
         "clips": output_clips,
         "camera_plan": camera_clips,
         "director": {
@@ -1162,9 +1466,11 @@ def compile_director_plan(
             "resolution_source": document.get("resolution_source", "base_layer"),
             "resolution": document.get("resolution", "1920x1080"),
             "megapixel": document.get("megapixel", 0.8),
+            "render_mode": document.get("render_mode", "final"),
             "subjects": document["subjects"],
             "camera_blocks": document["camera_blocks"],
             "audio_blocks": document["audio_blocks"],
+            "refmods": document.get("refmods") or [],
             "extra_tracks": document.get("extra_tracks") or [],
             "used_reference_tokens": sorted(used_tokens),
             "native_character_replace": dict(native_character_replace) if native_character_replace else None,
@@ -1185,7 +1491,7 @@ def compile_director_plan(
         "source": "MiniMax H3 LongMedia Director",
         "project_id": document["project_id"],
         "regeneration": dict(document["regeneration"]),
-        "global_prompt": str(global_prompt or "").strip(),
+        "global_prompt": compiled_global_prompt,
         "total_duration": cursor,
         "document": document,
         "clip_plan": clip_plan,
@@ -1226,6 +1532,7 @@ def compile_director_plan(
         "resolution_source": document.get("resolution_source", "base_layer"),
         "resolution": document.get("resolution", "1920x1080"),
         "megapixel": document.get("megapixel", 0.8),
+        "render_mode": document.get("render_mode", "final"),
         "project_id": document["project_id"],
         "regeneration": dict(document["regeneration"]),
         "native_character_replace": dict(native_character_replace) if native_character_replace else None,

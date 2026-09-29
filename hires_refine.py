@@ -18,6 +18,67 @@ FPS = 24
 AUDIO_LATENT_FPS = 40
 
 
+def inherit_refined_video_prefix(
+    current_video: torch.Tensor,
+    previous_video: torch.Tensor,
+    overlap_tokens: int,
+) -> int:
+    """Seed a MultiClip refine input with its parent's refined hidden overlap.
+
+    Video tensors use native H3 ``[B, C, T, H, W]`` layout. Only the temporal
+    overlap is copied; spatial geometry must match, while device and dtype may
+    differ because completed clips can be offloaded between segments.
+    """
+    if not isinstance(current_video, torch.Tensor) or not isinstance(previous_video, torch.Tensor):
+        raise TypeError("refined overlap inputs must be torch.Tensor values")
+    if current_video.ndim != 5 or previous_video.ndim != 5:
+        raise ValueError(
+            "refined overlap inputs must use [B, C, T, H, W] video geometry"
+        )
+    overlap = int(overlap_tokens)
+    if overlap < 0:
+        raise ValueError("overlap_tokens must be non-negative")
+    if overlap == 0:
+        return 0
+    if overlap >= int(current_video.shape[2]):
+        raise ValueError("overlap must be shorter than the current video segment")
+    if overlap > int(previous_video.shape[2]):
+        raise ValueError("overlap is longer than the previous refined video segment")
+    current_geometry = tuple(current_video.shape[:2]) + tuple(current_video.shape[3:])
+    previous_geometry = tuple(previous_video.shape[:2]) + tuple(previous_video.shape[3:])
+    if current_geometry != previous_geometry:
+        raise ValueError(
+            "refined overlap video geometry does not match: "
+            f"current={tuple(current_video.shape)}, previous={tuple(previous_video.shape)}"
+        )
+
+    previous_tail = previous_video[:, :, -overlap:]
+    if previous_tail.device != current_video.device or previous_tail.dtype != current_video.dtype:
+        previous_tail = previous_tail.to(device=current_video.device, dtype=current_video.dtype)
+    with torch.no_grad():
+        current_video[:, :, :overlap].copy_(previous_tail)
+    return overlap
+
+
+def freeze_video_prefix_mask(
+    mask: torch.Tensor,
+    *,
+    frozen_tokens: int,
+    global_start_token: int = 0,
+) -> int:
+    """Zero the local denoise mask where a window covers a frozen global prefix."""
+    if not isinstance(mask, torch.Tensor) or mask.ndim != 5:
+        raise ValueError("video denoise mask must use [B, C, T, H, W] geometry")
+    frozen = int(frozen_tokens)
+    start = int(global_start_token)
+    if frozen < 0 or start < 0:
+        raise ValueError("frozen_tokens and global_start_token must be non-negative")
+    local_count = max(0, min(int(mask.shape[2]), frozen - start))
+    if local_count:
+        mask[:, :, :local_count] = 0.0
+    return local_count
+
+
 @dataclass(frozen=True, slots=True)
 class HiresRefineWindow:
     index: int

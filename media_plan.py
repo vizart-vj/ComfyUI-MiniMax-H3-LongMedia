@@ -70,6 +70,9 @@ class LongMediaPlan:
     # v0.6.20 uses factorized camera_control / embedding_control rows with exact
     # text_start/stop and local frame windows. Pure metadata: no model/device buffers.
     segment_temporal_embeddings: Any = None
+    # Per-pass native RefMod key routes. Latent tensors remain in minimax_refs;
+    # this field carries only block indices, authored frame windows and strengths.
+    segment_refmods: Any = None
     # v0.3.85 MultiClip: optional per-pass seeds; None = sampler base seed + clip index.
     segment_seeds: Any = None
     # V63 storyboard bridge: ready per-pass AV latents and decoded boundary index.

@@ -12,6 +12,7 @@ import sys
 import time
 import uuid as _uuid_mod
 import importlib.metadata as _importlib_metadata
+from collections.abc import Mapping
 from typing import Any
 
 
@@ -114,8 +115,10 @@ try:
         audio_window_bounds as _hires_audio_window_bounds,
         default_chunk_tokens as _hires_default_chunk_tokens,
         denoise_profile as _hires_denoise_profile,
+        freeze_video_prefix_mask as _hires_freeze_video_prefix_mask,
         fallback_chunk_tokens as _hires_fallback_chunk_tokens,
         frames_for_tokens as _hires_frames_for_tokens,
+        inherit_refined_video_prefix as _hires_inherit_refined_video_prefix,
         merge_profile as _hires_merge_profile,
         plan_refine_windows as _hires_plan_refine_windows,
         tokens_covering_frames as _hires_tokens_covering_frames,
@@ -125,8 +128,10 @@ except ImportError:
         audio_window_bounds as _hires_audio_window_bounds,
         default_chunk_tokens as _hires_default_chunk_tokens,
         denoise_profile as _hires_denoise_profile,
+        freeze_video_prefix_mask as _hires_freeze_video_prefix_mask,
         fallback_chunk_tokens as _hires_fallback_chunk_tokens,
         frames_for_tokens as _hires_frames_for_tokens,
+        inherit_refined_video_prefix as _hires_inherit_refined_video_prefix,
         merge_profile as _hires_merge_profile,
         plan_refine_windows as _hires_plan_refine_windows,
         tokens_covering_frames as _hires_tokens_covering_frames,
@@ -269,7 +274,7 @@ def _lm_director_usage_ranges(document: dict) -> dict[str, list[dict]]:
             'duration': max(0.0, float(block.get('duration') or 0.0)),
         })
     for track in document.get('extra_tracks') or []:
-        if track.get('enabled') is False:
+        if track.get('enabled') is False or track.get('muted') is True:
             continue
         for clip in track.get('clips') or []:
             sid = str(clip.get('subject_id') or '').strip()
@@ -341,7 +346,241 @@ def _lm_trim_video_frames_seconds(frames, record: dict, start_seconds: float, du
     return frames[start:end].contiguous()
 
 
-def _lm_build_director_media_bundle(director_json) -> dict:
+def _lm_director_video_reference_trim(ranges: list[dict]) -> tuple[float, float] | None:
+    """Resolve a source trim only when one video slot has one unambiguous window.
+
+    Video reference tensors are shared across all MAIN passes. Prefer the explicit
+    VIDEO-layer source window; otherwise only trim when all MAIN uses agree. Multiple
+    distinct windows need per-clip source selection, which the shared slot contract
+    does not currently expose.
+    """
+    video_layer_ranges = [item for item in ranges if str(item.get('track') or '') == 'extra:video']
+    candidates = video_layer_ranges or [
+        item for item in ranges if str(item.get('track') or '') == 'main'
+    ]
+    return _lm_director_unique_trim(candidates)
+
+
+def _lm_director_video_reference_scales(clip_plan: Any) -> list[float]:
+    """Match Setup's per-slot max scale for one shared Director reference tensor."""
+    scales: list[float | None] = [None, None, None]
+    clips = clip_plan.get('clips') if isinstance(clip_plan, dict) else None
+    for clip in clips if isinstance(clips, (list, tuple)) else ():
+        if not isinstance(clip, dict):
+            continue
+        slot_scales = clip.get('video_reference_scales')
+        if isinstance(slot_scales, dict):
+            values = ((index, slot_scales.get(str(index + 1))) for index in range(3))
+        else:
+            values = ((0, clip.get('video_reference_scale', 1.0)),)
+        for index, value in values:
+            if value is None:
+                continue
+            scale = _lm_video_reference_scale(value)
+            scales[index] = scale if scales[index] is None else max(float(scales[index]), scale)
+    return [1.0 if value is None else float(value) for value in scales]
+
+
+def _lm_load_director_video_reference(
+    path: str,
+    *,
+    target_width: int,
+    target_height: int,
+    spatial_scale: float,
+    trim: tuple[float, float] | None,
+    record: dict,
+    slot: int,
+    run_id: str,
+) -> tuple[torch.Tensor, Any, float, dict[str, Any]]:
+    """Trim and spatially scale a Director video before stacking decoded frames.
+
+    VideoHelperSuite's FFmpeg path streams frames through FFmpeg's scale filter and
+    applies start_time/frame_load_cap and the H3 24 fps clock before ComfyUI creates
+    the CPU IMAGE tensor.
+    If VHS is absent, ComfyUI's lazy VideoInput is trimmed before component decoding;
+    spatial scaling then uses LongMedia's existing clamped resize path.
+    """
+    started = time.perf_counter()
+    video_obj = _lm_call_core_node('LoadVideo', file=path)[0]
+    get_dimensions = getattr(video_obj, 'get_dimensions', None)
+    get_frame_rate = getattr(video_obj, 'get_frame_rate', None)
+    get_duration = getattr(video_obj, 'get_duration', None)
+    if not callable(get_dimensions) or not callable(get_frame_rate):
+        raise RuntimeError('ComfyUI LoadVideo did not return a lazy video input with dimensions and frame rate.')
+
+    source_width, source_height = (int(value) for value in get_dimensions())
+    source_fps = max(1e-6, float(get_frame_rate()))
+    source_fps_original = source_fps
+    target_fps = float(FPS)
+    source_duration = 0.0
+    if callable(get_duration):
+        try:
+            source_duration = max(0.0, float(get_duration()))
+        except Exception:
+            source_duration = 0.0
+    if source_duration <= 0.0:
+        try:
+            source_duration = max(0.0, float(record.get('seconds') or 0.0))
+        except (TypeError, ValueError, OverflowError):
+            source_duration = 0.0
+
+    source_start = 0.0
+    source_length = source_duration
+    trim_requested = trim is not None and float(trim[1]) > 0.0
+    if trim_requested:
+        source_start = max(0.0, float(trim[0]))
+        if source_duration > 0.0:
+            source_start = min(source_start, max(0.0, source_duration - (1.0 / source_fps)))
+        source_length = max(0.0, float(trim[1]))
+        if source_duration > 0.0:
+            source_length = min(source_length, max(0.0, source_duration - source_start))
+    should_trim = trim_requested and source_length > 0.0 and (
+        source_start > 0.0
+        or source_duration <= 0.0
+        or source_length < source_duration - (0.5 / source_fps)
+    )
+    frame_cap = max(1, int(round(source_length * target_fps))) if should_trim else 0
+
+    geometry = _lm_media_target_geometry(
+        source_width, source_height, target_width, target_height,
+        kind='video', spatial_scale=spatial_scale,
+    )
+    load_width = int(geometry['safe_width'])
+    load_height = int(geometry['safe_height'])
+    _lm_print(
+        '[MiniMaxH3 LongMedia] ' + json.dumps({
+            'event': 'director_video_preprocess_started',
+            'director_node_id': str(run_id or ''),
+            'slot': int(slot),
+            'source_width': source_width,
+            'source_height': source_height,
+            'source_fps': round(source_fps, 6),
+            'target_fps': round(target_fps, 6),
+            'trim_start_seconds': round(source_start, 6),
+            'trim_duration_seconds': round(source_length, 6),
+            'trim_applied': bool(should_trim),
+            'frame_cap': frame_cap,
+            'reference_scale': _lm_video_reference_scale(spatial_scale),
+            'predecode_width': load_width,
+            'predecode_height': load_height,
+        }, sort_keys=True),
+        flush=True,
+    )
+
+    try:
+        import folder_paths
+        resolved_path = folder_paths.get_annotated_filepath(path)
+    except Exception:
+        resolved_path = path
+
+    try:
+        import nodes
+        vhs_loader_available = 'VHS_LoadVideoFFmpegPath' in getattr(nodes, 'NODE_CLASS_MAPPINGS', {})
+    except Exception:
+        vhs_loader_available = False
+
+    if vhs_loader_available:
+        loaded = _lm_call_core_node(
+            'VHS_LoadVideoFFmpegPath',
+            video=resolved_path,
+            force_rate=target_fps,
+            custom_width=load_width,
+            custom_height=load_height,
+            frame_load_cap=frame_cap,
+            start_time=source_start if should_trim else 0.0,
+            format='None',
+        )
+        frames = loaded[0]
+        sound = loaded[2] if len(loaded) > 2 else None
+        video_info = loaded[3] if len(loaded) > 3 and isinstance(loaded[3], dict) else {}
+        source_fps = max(1e-6, float(video_info.get('source_fps') or source_fps))
+        source_fps_original = source_fps
+        loaded_fps = max(1e-6, float(video_info.get('loaded_fps') or target_fps))
+        backend = 'VHS_FFmpeg_predecode'
+    else:
+        as_trimmed = getattr(video_obj, 'as_trimmed', None)
+        if should_trim and callable(as_trimmed):
+            try:
+                video_obj = as_trimmed(
+                    start_time=source_start, duration=source_length, strict_duration=False,
+                )
+            except TypeError:
+                video_obj = as_trimmed(start_time=source_start, duration=source_length)
+            if video_obj is None:
+                raise RuntimeError('ComfyUI could not create the requested lazy source-video trim.')
+        components = _lm_call_core_node('GetVideoComponents', video=video_obj)
+        frames = components[0]
+        sound = components[1] if len(components) > 1 else None
+        if len(components) > 2 and components[2] is not None:
+            source_fps = max(1e-6, float(components[2]))
+        source_fps_original = source_fps
+        if should_trim and not callable(as_trimmed):
+            frames = _lm_trim_video_frames_seconds(frames, record, source_start, source_length, source_fps)
+            sound = _lm_trim_audio_seconds(sound, source_start, source_length) if sound is not None else None
+        frames, _ = _lm_clamp_media_to_target_geometry(
+            frames, target_width, target_height, kind='video', spatial_scale=spatial_scale,
+        )
+        video_info = {}
+        frames, loaded_frame_count = _lm_resample_video_frames_to_rate(
+            frames, source_fps, target_fps,
+        )
+        loaded_fps = target_fps
+        video_info.update({
+            'source_fps': source_fps,
+            'loaded_fps': loaded_fps,
+            'loaded_frame_count': loaded_frame_count,
+        })
+        backend = 'Comfy_lazy_trim_then_resize'
+
+    if not torch.is_tensor(frames) or frames.ndim != 4 or int(frames.shape[0]) <= 0:
+        raise RuntimeError('The video decoder returned no frames for the Director reference window.')
+    if int(frames.shape[-1]) > 3:
+        frames = frames[..., :3]
+    result = {
+        'geometry': geometry,
+        'source_width': source_width,
+        'source_height': source_height,
+        'source_fps': source_fps_original,
+        'loaded_fps': loaded_fps,
+        'source_duration': source_duration,
+        'source_start': source_start,
+        'source_duration_loaded': source_length if should_trim else source_duration,
+        'trim_applied': bool(should_trim),
+        'paired_audio': sound is not None,
+        'backend': backend,
+        'elapsed_seconds': time.perf_counter() - started,
+        'video_info': video_info,
+    }
+    _lm_print(
+        '[MiniMaxH3 LongMedia] ' + json.dumps({
+            'event': 'director_video_preprocess_completed',
+            'director_node_id': str(run_id or ''),
+            'slot': int(slot),
+            'backend': backend,
+            'frames': int(frames.shape[0]),
+            'source_fps': round(source_fps_original, 6),
+            'loaded_fps': round(loaded_fps, 6),
+            'fps_resampled': bool(abs(source_fps_original - loaded_fps) > 1e-6),
+            'width': int(frames.shape[2]),
+            'height': int(frames.shape[1]),
+            'rgb_gib': round(float(frames.numel() * frames.element_size()) / (1024.0 ** 3), 3),
+            'elapsed_seconds': round(float(result['elapsed_seconds']), 3),
+            'trim_applied': bool(should_trim),
+        }, sort_keys=True),
+        flush=True,
+    )
+    return frames, sound, source_fps, result
+
+
+def _lm_build_director_media_bundle(
+    director_json,
+    *,
+    clip_plan: Any = None,
+    target_width: int | None = None,
+    target_height: int | None = None,
+    scale_video_references: bool = False,
+    run_id: str = '',
+) -> dict:
     """Load Director-managed input-folder media into fixed LongMedia reference slots.
 
     This is runtime-only. The workflow stores only lightweight filename/subfolder
@@ -354,13 +593,50 @@ def _lm_build_director_media_bundle(director_json) -> dict:
         str(shot.get('media_subject_id') or '') for shot in (document.get('shots') or [])
         if str(shot.get('base_kind') or 'generated') == 'media' and str(shot.get('media_subject_id') or '')
     }
+    video_reference_subject_ids = set()
+    for shot in document.get('shots') or []:
+        if not isinstance(shot, dict):
+            continue
+        if str(shot.get('base_kind') or 'generated') != 'media':
+            sid = str(shot.get('media_subject_id') or '').strip()
+            if sid:
+                video_reference_subject_ids.add(sid)
+        for raw_sid in [shot.get('cast_subject_id'), *(shot.get('subjects') or [])]:
+            sid = str(raw_sid or '').strip()
+            if sid:
+                video_reference_subject_ids.add(sid)
+    for track in document.get('extra_tracks') or []:
+        if (
+            not isinstance(track, dict)
+            or track.get('enabled') is False
+            or track.get('muted') is True
+            or str(track.get('type') or '') != 'video'
+        ):
+            continue
+        for clip in track.get('clips') or []:
+            if isinstance(clip, dict):
+                sid = str(clip.get('subject_id') or '').strip()
+                if sid:
+                    video_reference_subject_ids.add(sid)
     base_media_by_subject = {}
     usage_ranges = _lm_director_usage_ranges(document)
+    video_reference_scales = _lm_director_video_reference_scales(clip_plan)
     picture_runtime = _director_picture_runtime_map(document)
     picture_runtime_slots = dict(picture_runtime.get('runtime_slots') or {})
     frame_anchor_contract = dict(picture_runtime.get('anchors') or _director_frame_anchor_contract(document))
     anchor_subject_ids = set(str(v) for v in (frame_anchor_contract.get('anchor_subject_ids') or []) if str(v))
+    refmod_source_subject_ids = set()
+    for refmod in document.get('refmods') or []:
+        if not isinstance(refmod, dict):
+            continue
+        source = str(refmod.get('source') or '').strip()
+        subject_id = str(refmod.get('source_subject_id') or '').strip()
+        if source.startswith('subject:'):
+            subject_id = source.split(':', 1)[1].strip()
+        if subject_id:
+            refmod_source_subject_ids.add(subject_id)
     anchor_images_by_subject = {}
+    refmod_source_images = {}
     images = [None] * 9
     videos = [None] * 3
     audios = [None] * 3
@@ -393,12 +669,15 @@ def _lm_build_director_media_bundle(director_json) -> dict:
                 sid = str(subject.get('subject_id') or '')
                 runtime_slot = picture_runtime_slots.get(sid)
                 is_anchor = sid in anchor_subject_ids
+                is_refmod_source = sid in refmod_source_subject_ids
                 # WHO & WHAT is an asset library, not an implicit reference fan-out.
-                # Pictures that are neither used on the timeline nor assigned FIRST/LAST
-                # stay unloaded and cannot silently compete with the active shot.
-                if runtime_slot is None and not is_anchor:
+                # RefMod sources are loaded separately so they can be VAE-encoded
+                # without silently occupying an ordinary H3 Picture slot.
+                if runtime_slot is None and not is_anchor and not is_refmod_source:
                     continue
                 image = _lm_call_core_node('LoadImage', image=path)[0]
+                if is_refmod_source:
+                    refmod_source_images[sid] = image
                 if is_anchor:
                     anchor_images_by_subject[sid] = image
                     roles = []
@@ -408,11 +687,13 @@ def _lm_build_director_media_bundle(director_json) -> dict:
                         roles.append('last')
                     entry['frame_anchor_roles'] = roles
                     entry['loaded_as'] = 'frame_anchor:' + '+'.join(roles)
-                else:
+                elif runtime_slot is not None:
                     runtime_slot = max(1, min(9, int(runtime_slot)))
                     images[runtime_slot - 1] = image
                     entry['runtime_slot'] = runtime_slot
                     entry['loaded_as'] = f'image_{runtime_slot}'
+                else:
+                    entry['loaded_as'] = 'refmod_source'
             elif kind == 'Audio':
                 record_kind = str(record.get('kind') or 'audio').strip().lower()
                 if record_kind == 'video':
@@ -434,22 +715,34 @@ def _lm_build_director_media_bundle(director_json) -> dict:
                 audios[min(2, slot - 1)] = audio
                 entry['loaded_as'] = f'audio_{slot}'
             elif kind == 'Video':
-                video_obj = _lm_call_core_node('LoadVideo', file=path)[0]
-                components = _lm_call_core_node('GetVideoComponents', video=video_obj)
-                frames = components[0]
-                sound = components[1] if len(components) > 1 else None
-                source_fps = components[2] if len(components) > 2 else None
-                if trim is not None:
-                    frames = _lm_trim_video_frames_seconds(frames, record, float(trim[0]), float(trim[1]), source_fps)
-                    sound = _lm_trim_audio_seconds(sound, float(trim[0]), float(trim[1])) if sound is not None else None
-                    entry['trim_applied'] = True
-                elif ranges:
-                    entry['trim_applied'] = False
-                    entry['trim_reason'] = 'subject reused with different block ranges'
                 _sid = str(subject.get('subject_id') or '')
-                if _sid in base_media_subject_ids:
+                # WHO & WHAT is a media library, not an implicit video-reference
+                # fan-out. Decode only timeline-used references and BASE sources.
+                is_base_media = _sid in base_media_subject_ids
+                is_video_reference = _sid in video_reference_subject_ids
+                if not ranges and not is_base_media and not is_video_reference:
+                    continue
+                base_source_fps = None
+                base_sound = None
+                source_fps = None
+                sound = None
+                if is_base_media:
+                    # BASE media is also the delivered source, so preserve native
+                    # resolution and keep its established per-block trim contract.
+                    video_obj = _lm_call_core_node('LoadVideo', file=path)[0]
+                    components = _lm_call_core_node('GetVideoComponents', video=video_obj)
+                    frames = components[0]
+                    base_sound = components[1] if len(components) > 1 else None
+                    base_source_fps = components[2] if len(components) > 2 else None
+                    if trim is not None:
+                        frames = _lm_trim_video_frames_seconds(frames, record, float(trim[0]), float(trim[1]), base_source_fps)
+                        base_sound = _lm_trim_audio_seconds(base_sound, float(trim[0]), float(trim[1])) if base_sound is not None else None
+                        entry['trim_applied'] = True
+                    elif ranges:
+                        entry['trim_applied'] = False
+                        entry['trim_reason'] = 'subject reused with different block ranges'
                     base_media_by_subject[_sid] = {
-                        'frames': frames, 'audio': sound, 'slot': int(slot), 'path': path,
+                        'frames': frames, 'audio': base_sound, 'slot': int(slot), 'path': path,
                         'source_in': float(trim[0]) if trim is not None else 0.0,
                         'duration': float(trim[1]) if trim is not None else float(record.get('seconds') or 0.0),
                         # When one Video subject is used by several BASE blocks with
@@ -460,18 +753,68 @@ def _lm_build_director_media_bundle(director_json) -> dict:
                         'trim_applied': bool(trim is not None),
                         'source_seconds': float(record.get('seconds') or 0.0),
                     }
-                    entry['loaded_as'] = 'base_media'
-                else:
+                if is_video_reference:
+                    video_trim = _lm_director_video_reference_trim(ranges)
+                    reference_entry = {}
+                    spatial_scale = (
+                        video_reference_scales[min(2, slot - 1)]
+                        if scale_video_references else 1.0
+                    )
+                    if target_width is None or target_height is None:
+                        video_obj = _lm_call_core_node('LoadVideo', file=path)[0]
+                        components = _lm_call_core_node('GetVideoComponents', video=video_obj)
+                        frames = components[0]
+                        sound = components[1] if len(components) > 1 else None
+                        source_fps = components[2] if len(components) > 2 else None
+                        if video_trim is not None:
+                            frames = _lm_trim_video_frames_seconds(
+                                frames, record, float(video_trim[0]), float(video_trim[1]), source_fps,
+                            )
+                            sound = _lm_trim_audio_seconds(sound, float(video_trim[0]), float(video_trim[1])) if sound is not None else None
+                        reference_entry['trim_applied'] = bool(video_trim is not None)
+                        reference_entry['preprocess_backend'] = 'legacy_full_decode'
+                    else:
+                        frames, sound, source_fps, preprocess = _lm_load_director_video_reference(
+                            path,
+                            target_width=int(target_width),
+                            target_height=int(target_height),
+                            spatial_scale=spatial_scale,
+                            trim=video_trim,
+                            record=record,
+                            slot=slot,
+                            run_id=run_id,
+                        )
+                        reference_entry.update({
+                            'trim_applied': bool(preprocess['trim_applied']),
+                            'preprocess_backend': str(preprocess['backend']),
+                            'preprocessed_width': int(frames.shape[2]),
+                            'preprocessed_height': int(frames.shape[1]),
+                            'preprocess_scale': float(spatial_scale),
+                            'preprocess_elapsed_seconds': round(float(preprocess['elapsed_seconds']), 3),
+                            'source_width': int(preprocess['source_width']),
+                            'source_height': int(preprocess['source_height']),
+                        })
+                        if preprocess['trim_applied']:
+                            reference_entry['source_in_seconds'] = float(preprocess['source_start'])
+                            reference_entry['source_duration_seconds'] = float(preprocess['source_duration_loaded'])
+                    if video_trim is None and ranges:
+                        reference_entry['trim_reason'] = 'shared Video slot has no single source window'
                     videos[min(2, slot - 1)] = frames
                     # A reference video's own soundtrack follows the same numbered slot.
                     if sound is not None and audios[min(2, slot - 1)] is None:
                         audios[min(2, slot - 1)] = sound
-                    entry['loaded_as'] = f'video_{slot}'
+                    entry['video_reference'] = reference_entry
+                    entry['loaded_as'] = (
+                        f'base_media+video_{slot}' if is_base_media else f'video_{slot}'
+                    )
+                elif is_base_media:
+                    entry['loaded_as'] = 'base_media'
+                source_fps = base_source_fps if is_base_media else source_fps
                 try:
                     entry['source_fps'] = float(source_fps) if source_fps is not None else None
                 except Exception:
                     entry['source_fps'] = None
-                entry['paired_audio'] = sound is not None
+                entry['paired_audio'] = sound is not None if is_video_reference else base_sound is not None
                 if _sid in base_media_by_subject:
                     base_media_by_subject[_sid]['fps'] = float(entry.get('source_fps') or 24.0)
             else:
@@ -495,11 +838,714 @@ def _lm_build_director_media_bundle(director_json) -> dict:
             'first': first_anchor_image,
             'last': last_anchor_image,
         },
+        'refmod_source_images': refmod_source_images,
         'picture_runtime_slots': picture_runtime_slots,
         'base_media': base_media_by_subject,
         'manifest': manifest,
         'loaded': loaded,
     }
+
+
+def _lm_refmod_managed_path(record: dict) -> str | None:
+    """Resolve a Director RefMod artifact without changing workflow state."""
+    raw = str((record or {}).get('path') or '').strip()
+    if not raw:
+        return None
+    import folder_paths
+    candidate = os.path.expanduser(raw)
+    if not os.path.isabs(candidate):
+        candidate = os.path.join(folder_paths.get_output_directory(), candidate)
+    candidate = os.path.realpath(candidate)
+    if not candidate.lower().endswith('.safetensors'):
+        candidate += '.safetensors'
+    if not os.path.isfile(candidate) and 'longmedia_refmods' in raw.lower():
+        import folder_paths
+        root = os.path.realpath(os.path.join(folder_paths.get_output_directory(), 'longmedia_refmods'))
+        ident = re.sub(r'[^A-Za-z0-9._-]+', '_', str((record or {}).get('refmod_id') or '')).strip('._-')
+        if ident and os.path.isdir(root):
+            for current, _, names in os.walk(root):
+                match = next((name for name in names if name.lower().endswith('.safetensors') and (name == f'{ident}.safetensors' or name.endswith(f'__{ident}.safetensors') or f'__{ident}__migrated_' in name)), None)
+                if match:
+                    candidate = os.path.realpath(os.path.join(current, match))
+                    break
+        if not os.path.isfile(candidate):
+            return None
+    return candidate
+
+
+def _lm_refmod_source_payload(record: dict, document: dict, media: dict, project_id: str):
+    """Resolve Director assets/TAKEs to already-loaded pixels/audio or native AV."""
+    source = str(record.get('source') or '').strip()
+    subject_id = str(record.get('source_subject_id') or '').strip()
+    clip_id = str(record.get('source_clip_id') or '').strip()
+    revision = str(record.get('source_take_revision') or '').strip()
+    if source.startswith('subject:'):
+        subject_id = source.split(':', 1)[1].strip()
+    elif source.startswith('clip:'):
+        clip_id = source.split(':', 1)[1].strip()
+    elif source.startswith('take:'):
+        parts = source.split(':')
+        if len(parts) >= 3:
+            clip_id, revision = parts[-2], parts[-1]
+
+    # TAKE and selected GENERATED clip: native cached latent wins; no decode/VAE.
+    if clip_id:
+        try:
+            import folder_paths
+            cache = _DirectorClipCache(folder_paths.get_output_directory(), project_id)
+            take = cache.load_revision(clip_id, revision) if revision else cache.load_active(clip_id)
+        except Exception:
+            take = None
+        if isinstance(take, dict) and torch.is_tensor(take.get('display_video')):
+            return {
+                'native_video': take.get('display_video'),
+                'native_audio': take.get('display_audio'),
+                'source': f'take:{project_id}:{clip_id}:{str((take.get("metadata") or {}).get("revision") or revision)}',
+            }
+        shot = next((s for s in (document.get('shots') or []) if str(s.get('clip_id') or '') == clip_id), None)
+        if isinstance(shot, dict):
+            subject_id = str(shot.get('media_subject_id') or subject_id)
+
+    manifest = {
+        str(item.get('subject_id') or ''): item
+        for item in (media.get('manifest') or []) if isinstance(item, dict)
+    }
+    entry = manifest.get(subject_id)
+    if not isinstance(entry, dict):
+        raise ValueError(f'RefMod source {source or subject_id or clip_id!r} is not available in Director media.')
+    kind = str(entry.get('kind') or '').lower()
+    if kind == 'picture':
+        refmod_images = media.get('refmod_source_images') if isinstance(media.get('refmod_source_images'), dict) else {}
+        image = refmod_images.get(subject_id)
+        runtime_slot = entry.get('runtime_slot')
+        if image is None and runtime_slot is not None:
+            images = list(media.get('images') or [])
+            idx = int(runtime_slot) - 1
+            image = images[idx] if 0 <= idx < len(images) else None
+        if image is None:
+            anchors = media.get('frame_anchors') if isinstance(media.get('frame_anchors'), dict) else {}
+            roles = set(entry.get('frame_anchor_roles') or [])
+            image = anchors.get('first') if 'first' in roles else anchors.get('last')
+        if not torch.is_tensor(image):
+            raise ValueError('RefMod Picture source is not loaded on this Director run.')
+        return {'image': image, 'source': f'subject:{subject_id}'}
+    if kind == 'video':
+        base = (media.get('base_media') or {}).get(subject_id) if isinstance(media.get('base_media'), dict) else None
+        frames = base.get('frames') if isinstance(base, dict) else None
+        audio = base.get('audio') if isinstance(base, dict) else None
+        if not torch.is_tensor(frames):
+            slot = max(1, int(entry.get('slot') or 1)) - 1
+            videos = list(media.get('videos') or [])
+            audios = list(media.get('audios') or [])
+            frames = videos[slot] if slot < len(videos) else None
+            audio = audios[slot] if slot < len(audios) else None
+        if not torch.is_tensor(frames):
+            raise ValueError('RefMod Video source is not loaded on this Director run.')
+        return {'video': frames, 'audio': audio, 'source': f'subject:{subject_id}'}
+    if kind == 'audio':
+        slot = max(1, int(entry.get('slot') or 1)) - 1
+        audios = list(media.get('audios') or [])
+        audio = audios[slot] if slot < len(audios) else None
+        if not isinstance(audio, dict):
+            raise ValueError('RefMod Audio source is not loaded on this Director run.')
+        return {'audio': audio, 'source': f'subject:{subject_id}'}
+    raise ValueError(f'Unsupported RefMod source kind {kind!r}.')
+
+
+def _lm_refmod_limit_frames(frames: torch.Tensor, limit: int, *, sample: bool) -> torch.Tensor:
+    """Trim a video batch to H3's causal 4k+1 grid; optionally sample across it."""
+    if frames.ndim != 4:
+        raise ValueError(f"RefMod video must be [T,H,W,C], got {tuple(frames.shape)}.")
+    count = int(frames.shape[0])
+    if count < 1:
+        raise ValueError("Video RefMod source contains no frames.")
+    wanted = min(count, max(1, int(limit))) if sample else count
+    valid = 1 if wanted <= 1 else ((wanted - 1) // 4) * 4 + 1
+    if sample and valid < count:
+        indices = torch.linspace(0, count - 1, valid, device=frames.device).round().long()
+        return frames.index_select(0, indices)
+    return frames[:valid]
+
+
+def _lm_refmod_resize_visual(frames: torch.Tensor, short_edge: int) -> torch.Tensor:
+    """Apply the upstream downscale-only short-edge cap before VideoVAE encode."""
+    import comfy.utils
+
+    if frames.ndim != 4:
+        raise ValueError(f"RefMod visual source must be [T,H,W,C], got {tuple(frames.shape)}.")
+    h, w = int(frames.shape[1]), int(frames.shape[2])
+    if h <= 0 or w <= 0:
+        raise ValueError(f"RefMod visual source has invalid geometry {h}x{w}.")
+    scale = min(1.0, float(short_edge) / min(h, w))
+    target_w = max(32, round(w * scale / 32) * 32)
+    target_h = max(32, round(h * scale / 32) * 32)
+    if (target_w, target_h) == (w, h):
+        return frames[..., :3]
+    samples = frames[..., :3].movedim(-1, 1)
+    resized = comfy.utils.common_upscale(samples, target_w, target_h, "lanczos", "disabled")
+    if int(resized.shape[2]) <= 0 or int(resized.shape[3]) <= 0:
+        raise ValueError(f"RefMod resize produced empty geometry from {h}x{w} to {target_h}x{target_w}.")
+    return resized.movedim(1, -1)
+
+
+def _lm_refmod_apply_visual_token_cap(ref: Any, max_tokens: int) -> Any:
+    """Deduplicate then uniformly reduce time, preserving spatial latent geometry."""
+    if max_tokens <= 0 or ref.kind not in {"image", "video"}:
+        return ref
+    per_frame = (int(ref.latent.shape[-2]) // 2) * (int(ref.latent.shape[-1]) // 2)
+    if per_frame > max_tokens:
+        raise ValueError(
+            f"RefMod {ref.name!r}: one frame costs {per_frame} visual tokens, above "
+            f"the {max_tokens} cap. Lower Resolution or Grid."
+        )
+    latent = ref.latent
+    allowed = max(1, max_tokens // max(1, per_frame))
+    total_t = int(latent.shape[2])
+    if per_frame * total_t <= max_tokens:
+        return ref
+
+    flat = latent[0].float()
+    kept = [0]
+    previous = flat[:, 0]
+    for index in range(1, total_t):
+        current = flat[:, index]
+        denominator = (current.abs().mean() + previous.abs().mean()) / 2 + 1e-6
+        difference = (current - previous).abs().mean() / denominator
+        if float(difference) >= 0.02:
+            kept.append(index)
+            previous = current
+    if len(kept) < total_t:
+        latent = latent.index_select(2, torch.tensor(kept, device=latent.device))
+        print(f"[Director RefMod] {ref.name}: visual token cap removed "
+              f"{total_t - len(kept)} near-duplicate frame(s)")
+    if int(latent.shape[2]) > allowed:
+        indices = torch.linspace(0, int(latent.shape[2]) - 1, allowed).round().long()
+        latent = latent.index_select(2, indices.to(latent.device))
+    if int(latent.shape[2]) != total_t:
+        from dataclasses import replace
+        ref = replace(ref, latent=latent)
+        print(f"[Director RefMod] {ref.name}: visual token cap {max_tokens}; "
+              f"kept {int(latent.shape[2])} temporal frame(s), spatial grid unchanged")
+    return ref
+
+
+def _lm_refmod_encode_record(record: dict[str, Any], payload: dict[str, Any],
+                             video_vae: Any, audio_vae: Any) -> list[Any]:
+    """Encode one pending record with upstream-compatible RefMod controls."""
+    from .refmod_backend import RefMod, aspect_grid, compress_refmod, encode_full
+    mode = str(record.get('mode') or 'FULL').upper()
+    name = str(record.get('name') or record.get('refmod_id') or 'RefMod')
+    resolution = max(256, min(2048, int(round(float(record.get('resolution_short_edge', record.get('resolution', 1024)) or 1024) / 64) * 64)))
+    clip_frames = max(1, min(2147483647, int(record.get('clip_frames', record.get('temporal_frames', 16)) or 16)))
+    grid_raw = re.findall(r'\d+', str(record.get('spatial_grid') or '16x16'))
+    grid_default = max((int(value) for value in grid_raw), default=16)
+    grid_edge = max(2, min(64, int(round(float(record.get('grid_long_edge', grid_default) or grid_default) / 2) * 2)))
+    max_tokens = max(0, min(2147483647, int(record.get('max_tokens', 5120) or 0)))
+    voice_seconds = max(0.025, min(600.0, float(record.get('voice_seconds', 30.0) or 30.0)))
+    common = {
+        'source': str(payload.get('source') or record.get('source') or ''),
+        'description': str(record.get('description') or ''),
+        'concept_type': str(record.get('concept_type') or 'generic'),
+    }
+    refs = []
+    native_video = payload.get('native_video')
+    native_audio = payload.get('native_audio')
+    if torch.is_tensor(native_video):
+        # Display TAKE media is pixels [T,H,W,C]; already encoded tensors use
+        # the H3 latent contract [1,24,T,H,W]. Keep both routes explicit.
+        if native_video.ndim == 4 and int(native_video.shape[-1]) in (3, 4):
+            payload = {**payload, 'video': native_video, 'audio': None}
+        elif native_video.ndim == 5 and int(native_video.shape[1]) == 24:
+            native_ref = encode_full(native_video.detach().cpu().contiguous(), name=name,
+                                     kind='video' if int(native_video.shape[2]) > 1 else 'image', **common)
+            refs.append(_lm_refmod_apply_visual_token_cap(native_ref, max_tokens))
+        else:
+            raise ValueError(f"Native TAKE RefMod source has unsupported shape {tuple(native_video.shape)}.")
+    if torch.is_tensor(native_audio) and int(native_audio.shape[-1]) > 0:
+        native_audio = native_audio[..., :max(1, int(round(voice_seconds * 40.0)))]
+        refs.append(encode_full(native_audio.detach().cpu().contiguous(), name=f'{name} Audio Reference',
+                                kind='audio', **{**common, 'concept_type': 'audio_reference'}))
+    if refs and not torch.is_tensor(payload.get('video')):
+        return refs
+
+    visual = None
+    visual_kind = None
+    if torch.is_tensor(payload.get('image')):
+        if video_vae is None:
+            raise ValueError('Creating an image RefMod requires the current H3 VideoVAE.')
+        visual = video_vae.encode(_lm_refmod_resize_visual(payload['image'][:1], resolution))
+        visual_kind = 'image'
+    elif torch.is_tensor(payload.get('video')):
+        if video_vae is None:
+            raise ValueError('Creating a video RefMod requires the current H3 VideoVAE.')
+        frames = payload['video']
+        frames = _lm_refmod_limit_frames(frames, clip_frames, sample=(mode != 'COMPRESSED'))
+        frames = _lm_refmod_resize_visual(frames, resolution)
+        visual = video_vae.encode(frames)
+        visual_kind = 'video'
+    if torch.is_tensor(visual):
+        if mode == 'COMPRESSED':
+            pool_h, pool_w = aspect_grid(grid_edge, grid_edge, float(frames.shape[1]) / max(1, int(frames.shape[2]))) if visual_kind == 'video' else (grid_edge, grid_edge)
+            pool_h = min(pool_h, int(visual.shape[-2]) - (int(visual.shape[-2]) % 2))
+            pool_w = min(pool_w, int(visual.shape[-1]) - (int(visual.shape[-1]) % 2))
+            pool_t = 1 if visual_kind == 'image' else min(int(visual.shape[2]), clip_frames)
+            ref = compress_refmod(
+                visual, name=name, kind=visual_kind, pool_t=pool_t,
+                pool_h=min(pool_h, int(visual.shape[-2])), pool_w=min(pool_w, int(visual.shape[-1])),
+                refine_steps=max(0, int(record.get('refinement_steps') or 0)), **common,
+            )
+        else:
+            ref = encode_full(visual, name=name, kind=visual_kind, **common)
+        refs.append(_lm_refmod_apply_visual_token_cap(ref, max_tokens))
+    audio = payload.get('audio')
+    if isinstance(audio, dict):
+        if audio_vae is None:
+            raise ValueError('Creating an Audio Reference requires the current H3 AudioVAE.')
+        audio_input = dict(audio)
+        waveform = audio_input.get('waveform')
+        sample_rate = int(audio_input.get('sample_rate') or 0)
+        if not torch.is_tensor(waveform) or waveform.ndim != 3 or sample_rate <= 0:
+            raise ValueError('RefMod audio source must provide waveform [B,C,S] and a positive sample_rate.')
+        max_samples = max(1, int(round(voice_seconds * sample_rate)))
+        if int(waveform.shape[-1]) > max_samples:
+            audio_input['waveform'] = waveform[..., :max_samples]
+        audio_latent, _ = _hybrid_encode_ref_audio(audio_vae, audio_input)
+        # Upstream audio RefMods have an independent seconds/token contract;
+        # the visual Compressed mode must not pool audio using a visual frame count.
+        refs.append(encode_full(
+            audio_latent, name=f'{name} Audio Reference', kind='audio',
+            **{**common, 'concept_type': 'audio_reference'},
+        ))
+    if not refs:
+        raise ValueError('RefMod source did not yield a visual or audio latent.')
+    return refs
+
+
+def _lm_refmod_artifact_target(record: dict, refmod_id: str) -> str:
+    """Managed library path for a RefMod artifact. Created only by ``ENCODE``."""
+    import folder_paths
+    artifact = _lm_refmod_managed_path(record)
+    if artifact:
+        return artifact
+    folder = str(record.get('folder') or 'Unsorted').replace('\\', '/')
+    folder_parts = [re.sub(r'[^A-Za-z0-9._-]+', '_', part).strip('._-')
+                    for part in folder.split('/') if part not in ('', '.', '..')]
+    library_folder = os.path.join(*folder_parts) if folder_parts and folder.lower() != 'unsorted' else ''
+    ident = re.sub(r'[^A-Za-z0-9._-]+', '_', refmod_id or 'refmod').strip('._-') or 'refmod'
+    return os.path.join(
+        folder_paths.get_output_directory(), 'longmedia_refmods', library_folder, ident + '.safetensors',
+    )
+
+
+def _lm_refmod_vae_catalog() -> dict:
+    """MiniMax H3 VAE candidates in the ComfyUI ``vae`` folder."""
+    import folder_paths
+    try:
+        names = [str(v) for v in (folder_paths.get_filename_list('vae') or [])]
+    except Exception:
+        names = []
+    video, audio = [], []
+    for name in names:
+        low = name.replace('\\', '/').lower()
+        base = os.path.basename(low)
+        if 'minimax' not in low or 'h3' not in low:
+            continue
+        if 'audio' in base:
+            audio.append(name)
+        elif 'video' in base or 'visual' in base:
+            video.append(name)
+    return {'video': sorted(video), 'audio': sorted(audio), 'all': names}
+
+
+def _lm_load_h3_vae(video_vae_name=None, audio_vae_name=None, *, required_kinds=None):
+    """Load only the MiniMax H3 VideoVAE / AudioVAE.
+
+    This is the complete model surface of Director ``ENCODE``. No text encoder,
+    no DiT, no sampler and no Long Media Setup run ever happens here.
+    """
+    import comfy.sd
+    import comfy.model_management
+    import comfy.utils
+    import folder_paths
+    catalog = _lm_refmod_vae_catalog()
+
+    def _pick(kind, requested):
+        if requested:
+            return folder_paths.get_full_path_or_raise('vae', str(requested))
+        pool = list(catalog.get(kind) or [])
+        if not pool:
+            raise RuntimeError(
+                f'ENCODE needs the MiniMax H3 {kind} VAE inside the ComfyUI vae folder. '
+                f'Detected candidates: {catalog.get("all", [])[:16]!r}'
+            )
+        return folder_paths.get_full_path_or_raise('vae', sorted(pool)[0])
+
+    kinds = set(required_kinds or ('video', 'audio'))
+    unknown = kinds - {'video', 'audio'}
+    if unknown:
+        raise ValueError(f'Unsupported H3 VAE kind(s): {sorted(unknown)!r}.')
+    loaded = {}
+    for kind, requested in (('video', video_vae_name), ('audio', audio_vae_name)):
+        if kind not in kinds:
+            continue
+        path = _pick(kind, requested)
+        sd, metadata = comfy.utils.load_torch_file(path, return_metadata=True)
+        vae = comfy.sd.VAE(sd=sd, metadata=metadata)
+        vae.throw_exception_if_invalid()
+        loaded[kind] = (vae, path)
+    return (
+        loaded.get('video', (None, None))[0],
+        loaded.get('audio', (None, None))[0],
+        {kind: value[1] for kind, value in loaded.items()},
+    )
+
+
+def _lm_refmod_encode_one(record: dict, director_json, project_id: str, *,
+                          video_vae_name=None, audio_vae_name=None, target_stem=None):
+    """Director ``ENCODE``: VAE-only RefMod preparation.
+
+    Runs the H3 VideoVAE/AudioVAE over the Director source and persists the
+    resulting latent artifact. TE, DiT, sampler and Long Media Setup are
+    deliberately never touched. Returns ``path`` / ``members`` / ``vaes``.
+
+    ENCODE emits no sampler progress bar, so the console is told explicitly when
+    each stage starts and when the operation is finished (or failed): silence
+    after "start" is then unambiguously a stall and not a missing report.
+    """
+    import time
+    from .refmod_backend import save_bundle, save_refmod
+    refmod_id = str(record.get('refmod_id') or '').strip() or 'refmod'
+    name = str(record.get('name') or refmod_id)
+    started = time.perf_counter()
+    _lm_print(
+        '[MiniMaxH3 LongMedia][DIRECTOR ENCODE] start · '
+        f'{name!r} · mode={record.get("mode") or "FULL"} '
+        f'resolution={record.get("resolution_short_edge", record.get("resolution", 1024))} '
+        f'max_tokens={record.get("max_tokens", 5120)} '
+        f'grid_long_edge={record.get("grid_long_edge", record.get("spatial_grid", 16))} '
+        f'clip_frames={record.get("clip_frames", record.get("temporal_frames", 16))} '
+        f'voice_seconds={record.get("voice_seconds", 30)} '
+        f'refine={record.get("refinement_steps", 0)} strength={record.get("strength")} · '
+        'VAE-only (H3 VideoVAE/AudioVAE) — no TE, no DiT, no sampler',
+        flush=True,
+    )
+    try:
+        document = _director_normalize_document(director_json)
+        media = _lm_build_director_media_bundle(director_json)
+        video_vae, audio_vae, used = _lm_load_h3_vae(video_vae_name, audio_vae_name)
+        _lm_print(
+            '[MiniMaxH3 LongMedia][DIRECTOR ENCODE] stage · VAEs loaded · '
+            f'{time.perf_counter() - started:.2f}s',
+            flush=True,
+        )
+        payload = _lm_refmod_source_payload(record, document, media, project_id)
+        refs = _lm_refmod_encode_record(record, payload, video_vae, audio_vae)
+        if not refs:
+            raise ValueError('RefMod source did not yield a visual or audio latent.')
+        _lm_print(
+            '[MiniMaxH3 LongMedia][DIRECTOR ENCODE] stage · latents encoded · '
+            f'{len(refs)} member(s) · {time.perf_counter() - started:.2f}s',
+            flush=True,
+        )
+        if target_stem:
+            stem = str(target_stem)
+        else:
+            stem = os.path.splitext(_lm_refmod_artifact_target(record, refmod_id))[0]
+        parent = os.path.dirname(stem)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        artifact = save_bundle(refs, name, stem) if len(refs) > 1 else save_refmod(refs[0], stem)
+    except Exception as exc:
+        _lm_print(
+            '[MiniMaxH3 LongMedia][DIRECTOR ENCODE] FAILED · '
+            f'{name!r} · {time.perf_counter() - started:.2f}s · '
+            f'{type(exc).__name__}: {exc}',
+            flush=True,
+        )
+        raise
+    _lm_print(
+        f'[MiniMaxH3 LongMedia][DIRECTOR ENCODE] done · {artifact} · '
+        f'{len(refs)} member(s) · {time.perf_counter() - started:.2f}s',
+        flush=True,
+    )
+    return {'path': artifact, 'members': int(len(refs)), 'vaes': used, 'name': name}
+
+
+def _lm_refmod_encode_uploaded_sources(record: dict, sources: list[dict], video_vae, audio_vae,
+                                       *, target_stem: str) -> dict:
+    """Encode selected input-folder media into one standalone RefMod/bundle."""
+    import folder_paths
+    from .refmod_backend import RefMod, save_bundle, save_refmod
+
+    input_root = os.path.realpath(folder_paths.get_input_directory())
+    encoded = []
+    member_rows = []
+    for index, source in enumerate(sources):
+        filename = os.path.basename(str(source.get('filename') or '').strip())
+        if not filename:
+            raise ValueError(f'RefMod source {index + 1} has no uploaded filename.')
+        path = os.path.realpath(os.path.join(input_root, filename))
+        if os.path.commonpath([input_root, path]) != input_root or not os.path.isfile(path):
+            raise ValueError(f'RefMod source {index + 1} is missing from ComfyUI input: {filename!r}.')
+        kind = str(source.get('kind') or '').strip().lower()
+        if kind not in {'image', 'video', 'audio'}:
+            raise ValueError(f'RefMod source {filename!r} has unsupported kind {kind!r}.')
+        display_name = str(source.get('name') or filename).strip()[:160] or filename
+        source_uri = f'input:{filename}'
+        if kind == 'image':
+            image = _lm_call_core_node('LoadImage', image=filename)[0]
+            if not torch.is_tensor(image) or image.ndim != 4:
+                raise ValueError(f'ComfyUI LoadImage returned an invalid tensor for {filename!r}.')
+            payload = {'image': image, 'source': source_uri}
+            frames, height, width = 1, int(image.shape[1]), int(image.shape[2])
+        elif kind == 'video':
+            video_obj = _lm_call_core_node('LoadVideo', file=filename)[0]
+            components = _lm_call_core_node('GetVideoComponents', video=video_obj)
+            images = components[0] if components else None
+            if not torch.is_tensor(images) or images.ndim != 4 or int(images.shape[0]) < 1:
+                raise ValueError(f'ComfyUI LoadVideo returned no readable frames for {filename!r}.')
+            payload = {'video': images, 'source': source_uri}
+            frames, height, width = int(images.shape[0]), int(images.shape[1]), int(images.shape[2])
+        else:
+            audio = _lm_call_core_node('LoadAudio', audio=filename)[0]
+            if not isinstance(audio, dict):
+                raise ValueError(f'ComfyUI LoadAudio returned an invalid audio payload for {filename!r}.')
+            payload = {'audio': audio, 'source': source_uri}
+            frames, height, width = 0, 0, 0
+
+        crop = source.get('crop')
+        if isinstance(crop, dict) and kind in {'image', 'video'}:
+            x = max(0.0, min(1.0, float(crop.get('x', 0.0) or 0.0)))
+            y = max(0.0, min(1.0, float(crop.get('y', 0.0) or 0.0)))
+            w = max(0.01, min(1.0 - x, float(crop.get('width', 1.0) or 1.0)))
+            h = max(0.01, min(1.0 - y, float(crop.get('height', 1.0) or 1.0)))
+            visual = payload.get('image') if kind == 'image' else payload.get('video')
+            left, top = int(width * x), int(height * y)
+            right, bottom = min(width, int(width * (x + w))), min(height, int(height * (y + h)))
+            if right <= left or bottom <= top:
+                raise ValueError(f'RefMod crop for {filename!r} is empty.')
+            visual = visual[:, top:bottom, left:right, :].contiguous()
+            payload['image' if kind == 'image' else 'video'] = visual
+            height, width = bottom - top, right - left
+
+        source_record = {
+            **record,
+            'name': f"{str(record.get('name') or 'RefMod').strip()} · {display_name}"[:180],
+            'source': source_uri,
+        }
+        refs = _lm_refmod_encode_record(source_record, payload, video_vae, audio_vae)
+        for ref in refs:
+            encoded.append(ref)
+            if ref.kind in {'image', 'video'}:
+                latent_t = int(ref.latent.shape[2])
+                latent_h = int(ref.latent.shape[-2])
+                latent_w = int(ref.latent.shape[-1])
+                token_count = latent_t * (latent_h // 2) * (latent_w // 2)
+            else:
+                latent_t = int(ref.latent.shape[-1])
+                latent_h = latent_w = 0
+                token_count = 0
+            member_rows.append({
+                'name': ref.name, 'source_id': str(source.get('source_id') or ''),
+                'source_name': display_name, 'kind': ref.kind, 'source': source_uri,
+                'width': width, 'height': height, 'frames': frames,
+                'latent_t': latent_t, 'latent_h': latent_h, 'latent_w': latent_w,
+                'tokens': token_count,
+            })
+
+    if not encoded:
+        raise ValueError('No selected source produced a RefMod latent.')
+    parent = os.path.dirname(str(target_stem))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    artifact = save_bundle(encoded, str(record.get('name') or 'RefMod'), str(target_stem)) if len(encoded) > 1 else save_refmod(encoded[0], str(target_stem))
+    return {
+        'path': artifact, 'members': int(len(encoded)), 'name': str(record.get('name') or 'RefMod'),
+        'source_members': member_rows,
+        'estimated_tokens': sum(int(item['tokens']) for item in member_rows),
+        'total_tokens': sum(int(item['tokens']) for item in member_rows),
+    }
+
+
+def _lm_refmod_blocks_for_segment(record_by_id: dict, spans: list, document: dict,
+                                  media: dict, project_id: str, video_vae, audio_vae):
+    """Load prepared records and return native blocks + authored routes.
+
+    Setup deliberately never encodes here: an unprepared RefMod fails loudly so
+    the user runs Director ``ENCODE`` (VAE-only) first.
+    """
+    from .refmod_backend import (
+        convert_to_native_block, load_bundle, load_refmod, read_refmod_meta,
+    )
+    blocks = []
+    specs = []
+    loaded = {}
+    packed = []
+    for raw in sorted((dict(v) for v in (spans or [])), key=lambda v: (int(v.get('order', 0)), str(v.get('refmod_id', '')))):
+        refmod_id = str(raw.get('refmod_id') or '').strip()
+        record = record_by_id.get(refmod_id)
+        if not isinstance(record, dict):
+            # A clip pointing at a RefMod that is not in the document would be
+            # dropped silently here, and the render then comes out looking
+            # exactly as if the RefMod had never been applied -- no error, no
+            # effect. Setup refuses instead and names the dangling reference.
+            raise RuntimeError(
+                f"Director RefMod layer references {refmod_id or '<no id>'!r} at "
+                f"{float(raw.get('start_seconds') or 0.0):.2f}s.."
+                f"{float(raw.get('end_seconds') or 0.0):.2f}s, but that RefMod is not in the "
+                f"Director document. A removed RefMod leaves its timeline clip dangling. "
+                f"Press SYNC in the REFMODS panel, then either re-import that RefMod or "
+                f"delete the clip on the REFMOD layer."
+            )
+        artifact = _lm_refmod_managed_path(record)
+        if artifact is None or not os.path.isfile(artifact):
+            raise RuntimeError(
+                f"Director RefMod {record.get('name') or refmod_id!r} is not encoded yet. "
+                f"Select it in the Director REFMODS panel and press ENCODE (VAE-only) first. "
+                f"Long Media Setup deliberately never runs the RefMod encoder."
+            )
+        cache_key = os.path.realpath(artifact)
+        members = loaded.get(cache_key)
+        if members is None:
+            meta = read_refmod_meta(os.path.splitext(artifact)[0]) or {}
+            if str(meta.get('kind') or '').lower() == 'bundle' or int(meta.get('_format_version') or 0) >= 5:
+                members = load_bundle(os.path.splitext(artifact)[0])
+            else:
+                members = [(load_refmod(os.path.splitext(artifact)[0]), 1.0)]
+            loaded[cache_key] = members
+        base_strength = max(0.0, min(1.0, float(raw.get('strength', record.get('strength', 1.0)) or 0.0)))
+        for member_index, (member, member_strength) in enumerate(members):
+            strength = base_strength * float(member_strength)
+            block = convert_to_native_block(member, strength=1.0)
+            if block is None:
+                continue
+            block = dict(block)
+            block['longmedia_refmod_id'] = refmod_id
+            block['longmedia_refmod_member_index'] = int(member_index)
+            block['longmedia_refmod_strength'] = float(strength)
+            absolute_index = len(blocks)
+            block['longmedia_refmod_appended_block_index'] = int(absolute_index)
+            blocks.append(block)
+            packed.append(
+                f"{record.get('name') or refmod_id}#{member_index} "
+                f"{str(block.get('kind') or member.kind)} "
+                f"{int(block.get('latent_h') or 0)}x{int(block.get('latent_w') or 0)} "
+                f"{float(raw.get('start_seconds') or 0.0):.2f}s.."
+                f"{float(raw.get('end_seconds') or 0.0):.2f}s str {strength:.2f}"
+            )
+            specs.append({
+                'refmod_id': refmod_id,
+                'concept_type': str(record.get('concept_type') or 'generic').strip().lower(),
+                'member_index': int(member_index),
+                'appended_block_index': int(absolute_index),
+                'kind': str(block.get('kind') or member.kind),
+                # v0.6.57: ride the exact native descriptor with the authored
+                # route so attention can recover it even when a host wrapper
+                # shallow-copies transformer_options and drops the side channel.
+                'native_block': dict(block),
+                'start_seconds': max(0.0, float(raw.get('start_seconds') or 0.0)),
+                'end_seconds': max(0.0, float(raw.get('end_seconds') or 0.0)),
+                'strength': float(strength),
+                'order': int(raw.get('order') or 0),
+            })
+    if packed:
+        _lm_print(
+            '[MiniMaxH3 LongMedia][DIRECTOR REFMOD] packed '
+            f'{len(blocks)} block(s): ' + '; '.join(packed)
+            + ' — native minimax_refs keys the target frames attend to inside their window',
+            flush=True,
+        )
+    return blocks, specs
+
+
+_LM_REFMOD_CONCEPT_HINTS = {
+    'scenery': 'Use this RefMod as the scene and environment reference: carry its setting, spatial layout, background details, and environmental visual character into the generated scene.',
+    'character': 'Use this RefMod as the canonical identity reference for the principal character in every active clip. Keep the recognizable face or concealed-face design, silhouette, body features, clothing, and distinctive details consistent across frames and clip boundaries. When a source video or continuation reference shows a different principal person, take its motion, pose, timing, camera, and scene only; use this RefMod for the principal character identity.',
+    'object': 'Use this RefMod as the object design reference: preserve the object’s recognizable shape, proportions, materials, colors, and distinctive construction details.',
+    'style': 'Use this RefMod as a global visual-style reference: carry its rendering language, palette, lighting, texture, and defining visual effects consistently across the subject and the entire scene. Make those visual traits legible throughout the shot while adapting them to the new scene composition.',
+    'motion': 'Use this RefMod as a motion and performance reference: carry its movement quality, timing, pose transitions, and camera cadence into the generated shot.',
+    'abstract': 'Use this RefMod as an abstract visual reference: carry its shapes, color relationships, rhythm, and material texture into the scene as a coherent visual motif.',
+    'generic': 'Use this RefMod as a general visual reference: carry its most recognizable subject and visual traits into the generated shot while adapting them to the requested scene.',
+    'custom': 'Use this RefMod as an additional visual reference: preserve its most distinctive visible traits and integrate them coherently into the generated shot.',
+}
+
+
+def _lm_refmod_concept_hint(specs, *, log: bool = True) -> str:
+    """Translate selected RefMod Concept Types into positive H3 prompt guidance."""
+    concepts = []
+    for item in specs or ():
+        if not isinstance(item, dict):
+            continue
+        concept = str(item.get('concept_type') or 'generic').strip().lower()
+        if concept in _LM_REFMOD_CONCEPT_HINTS and concept not in concepts:
+            concepts.append(concept)
+    if not concepts:
+        return ''
+    guidance = ' '.join(_LM_REFMOD_CONCEPT_HINTS[concept] for concept in concepts)
+    if log:
+        _lm_print(
+            '[MiniMaxH3 LongMedia][REFMOD CONCEPT GUIDANCE] '
+            f'types={concepts}; positive_conditioning=True; description_used=False; guidance={guidance}',
+            flush=True,
+        )
+    return guidance
+
+
+def _lm_append_positive_prompt_guidance(prompt, guidance) -> str:
+    text = str(prompt or '').strip()
+    suffix = str(guidance or '').strip()
+    return '\n\n'.join(part for part in (text, suffix) if part)
+
+
+def _lm_director_refmod_concept_hint(director_plan, clip_plan, plan, segment_index: int) -> str:
+    """Resolve authored concept types for the opening conditioner before RefMods load."""
+    document = (director_plan or {}).get('document') if isinstance(director_plan, dict) else None
+    clips = (clip_plan or {}).get('clips') if isinstance(clip_plan, dict) else None
+    if not isinstance(document, dict) or not isinstance(clips, list) or not clips:
+        return ''
+    catalog = {
+        str(item.get('refmod_id') or ''): item
+        for item in (document.get('refmods') or ()) if isinstance(item, dict)
+    }
+    start = float(plan.segment_starts[int(segment_index)]) / float(FPS)
+    end = (float(plan.segment_starts[int(segment_index)]) + float(plan.segment_lengths[int(segment_index)])) / float(FPS)
+    active = []
+    for span in (clips[0].get('director_refmod_spans') or ()):
+        if not isinstance(span, dict):
+            continue
+        if float(span.get('start_seconds') or 0.0) >= end or float(span.get('end_seconds') or 0.0) <= start:
+            continue
+        record = catalog.get(str(span.get('refmod_id') or ''))
+        if record:
+            active.append({'concept_type': record.get('concept_type')})
+    return _lm_refmod_concept_hint(active)
+
+
+def _lm_localize_refmod_specs(specs, *, plan, segment_index, authored_duration, native_ref_count):
+    """Project authored seconds onto the exact target cell clock for one pass."""
+    segment_index = int(segment_index)
+    segment_length = int(plan.segment_lengths[segment_index])
+    hidden_prefix = int(plan.overlap_frames) if segment_index > 0 and getattr(plan, 'mode', None) == 'multiclip' else 0
+    authored_duration = max(1e-9, float(authored_duration or 0.0))
+    visible_frames = max(1, segment_length - hidden_prefix)
+    scale = float(visible_frames) / authored_duration
+    out = []
+    for raw in specs or ():
+        start_s = max(0.0, min(authored_duration, float(raw.get('start_seconds') or 0.0)))
+        end_s = max(start_s, min(authored_duration, float(raw.get('end_seconds') or authored_duration)))
+        if end_s <= start_s + 1e-9:
+            continue
+        start_f = hidden_prefix + int(math.floor(start_s * scale + 1e-9))
+        end_f = hidden_prefix + int(math.ceil(end_s * scale - 1e-9))
+        if end_s >= authored_duration - (0.5 / float(FPS)):
+            end_f = segment_length
+        item = dict(raw)
+        item['ref_index'] = int(native_ref_count) + int(raw.get('appended_block_index') or 0)
+        item['start_frame'] = max(0, min(segment_length, start_f))
+        item['end_frame'] = max(item['start_frame'] + 1, min(segment_length, end_f))
+        item['target_frame_count'] = int(segment_length)
+        out.append(item)
+    return tuple(out)
 
 
 
@@ -1241,7 +2287,7 @@ def _lm_director_legacy_single_take_matches_prefix(
         # Timeline mode itself is deliberately ignored: this bridge exists precisely
         # for single -> multiclip append.  The remaining rendering ownership fields
         # must stay unchanged.
-        for key in ('audio_mode', 'setup_h3_mode', 'resolution_source', 'resolution', 'megapixel'):
+        for key in ('audio_mode', 'setup_h3_mode', 'resolution_source', 'resolution', 'megapixel', 'render_mode'):
             if key in saved_snapshot or key in current_snapshot:
                 if _director_canonical_hash(saved_snapshot.get(key)) != _director_canonical_hash(current_snapshot.get(key)):
                     return False
@@ -1809,7 +2855,10 @@ def _reconstruction_attach_frame_aligned_guide(positive, guide_latent: torch.Ten
 # Release console policy.  release_guard=True keeps production output quiet;
 # release_guard=False restores the full development console so profiling and
 # execution-path diagnostics are visible without maintaining a separate build.
-_LONGMEDIA_ALWAYS_CONSOLE = ("cuda oom", "[error]", "exception", "terminal failure", "failed to")
+_LONGMEDIA_ALWAYS_CONSOLE = (
+    "cuda oom", "[error]", "exception", "terminal failure", "failed to",
+    "setup memory isolation", "media clamp video", "video resize", "ref video vae",
+)
 _LONGMEDIA_RELEASE_GUARD = True
 
 def _set_longmedia_release_guard(enabled: bool) -> bool:
@@ -2115,25 +3164,107 @@ def _h3_safe_reference_images(images, max_pixels: int = _H3_SAFE_REF_PIXELS):
     return prepared, reports
 
 
-def _lm_clamp_media_to_target_geometry(media: torch.Tensor, target_width: int, target_height: int, *, kind: str):
-    """Clamp one IMAGE/VIDEO tensor so it never exceeds target spatial geometry.
+def _lm_video_reference_scale(value: Any, fallback: float = 1.0) -> float:
+    """Normalize Director's linear source-video reference scale to [0.25, 1]."""
+    try:
+        scale = float(value)
+    except (TypeError, ValueError, OverflowError):
+        scale = float(fallback)
+    if not math.isfinite(scale):
+        scale = float(fallback)
+    return max(0.25, min(1.0, scale))
 
-    This is a global runtime safety contract: any external image/video input that
-    participates in conditioning is spatially bounded by the active target canvas.
-    Aspect ratio is preserved, upscaling is forbidden, and the result remains on the
-    standard 32px H3-safe grid.
-    """
-    if media is None:
-        return None, None
-    if not torch.is_tensor(media) or media.ndim < 3:
-        return media, None
-    h = int(media.shape[-3])
-    w = int(media.shape[-2])
-    target_w = max(int(CANVAS_MULTIPLE), int(target_width))
-    target_h = max(int(CANVAS_MULTIPLE), int(target_height))
-    scale = min(1.0, float(target_w) / float(max(1, w)), float(target_h) / float(max(1, h)))
-    tw = max(int(CANVAS_MULTIPLE), min(target_w, int(math.floor((w * scale) / CANVAS_MULTIPLE)) * int(CANVAS_MULTIPLE)))
-    th = max(int(CANVAS_MULTIPLE), min(target_h, int(math.floor((h * scale) / CANVAS_MULTIPLE)) * int(CANVAS_MULTIPLE)))
+
+def _lm_director_video_reference_scale(clip_plan: Any, index: int = 0) -> float:
+    """Get a clip's source-video scale while keeping old plans at native size."""
+    clips = clip_plan.get('clips') if isinstance(clip_plan, dict) else None
+    if not isinstance(clips, (list, tuple)) or not clips:
+        return 1.0
+    clip_index = 0 if len(clips) == 1 else max(0, min(int(index), len(clips) - 1))
+    clip = clips[clip_index]
+    return _lm_video_reference_scale(
+        clip.get('video_reference_scale', 1.0) if isinstance(clip, dict) else 1.0
+    )
+
+
+def _lm_video_reference_canvas_geometry(width: int, height: int, scale: float) -> tuple[int, int]:
+    """Scale the source-reference canvas on H3's 32px grid, not the output canvas."""
+    reference_scale = _lm_video_reference_scale(scale)
+    target_width = max(int(CANVAS_MULTIPLE), int(width))
+    target_height = max(int(CANVAS_MULTIPLE), int(height))
+    scaled_width = max(
+        int(CANVAS_MULTIPLE),
+        int(math.floor((target_width * reference_scale) / CANVAS_MULTIPLE)) * int(CANVAS_MULTIPLE),
+    )
+    scaled_height = max(
+        int(CANVAS_MULTIPLE),
+        int(math.floor((target_height * reference_scale) / CANVAS_MULTIPLE)) * int(CANVAS_MULTIPLE),
+    )
+    return scaled_width, scaled_height
+
+
+def _lm_plan_video_reference_scale(plan: Any, segment_index: int) -> float:
+    """Resolve the Director clip scale for a timeline pass or segmented continuation."""
+    metadata = getattr(plan, 'director_clip_metadata', None) or ()
+    if not metadata:
+        return 1.0
+    clip_index = 0 if len(metadata) == 1 else max(0, min(int(segment_index), len(metadata) - 1))
+    clip_meta = metadata[clip_index]
+    if not isinstance(clip_meta, dict):
+        return 1.0
+    return _lm_video_reference_scale(clip_meta.get('video_reference_scale', 1.0))
+
+
+def _lm_media_target_geometry(
+    source_width: int,
+    source_height: int,
+    target_width: int,
+    target_height: int,
+    *,
+    kind: str,
+    spatial_scale: float = 1.0,
+) -> dict[str, Any]:
+    """Resolve the shared H3-safe geometry without allocating a media tensor."""
+    h = max(1, int(source_height))
+    w = max(1, int(source_width))
+    canvas_w = max(int(CANVAS_MULTIPLE), int(target_width))
+    canvas_h = max(int(CANVAS_MULTIPLE), int(target_height))
+    reference_scale = _lm_video_reference_scale(spatial_scale)
+    target_w = max(
+        int(CANVAS_MULTIPLE),
+        int(math.floor((canvas_w * reference_scale) / CANVAS_MULTIPLE)) * int(CANVAS_MULTIPLE),
+    )
+    target_h = max(
+        int(CANVAS_MULTIPLE),
+        int(math.floor((canvas_h * reference_scale) / CANVAS_MULTIPLE)) * int(CANVAS_MULTIPLE),
+    )
+    if reference_scale < 1.0 and str(kind) == 'video':
+        # At small scales, flooring both axes independently can turn a 16:9 input
+        # into a visibly different aspect ratio (for example 448x224 instead of
+        # 448x256). Pick the largest H3-safe pair with the closest source aspect.
+        max_w = min(target_w, w) // int(CANVAS_MULTIPLE) * int(CANVAS_MULTIPLE)
+        max_h = min(target_h, h) // int(CANVAS_MULTIPLE) * int(CANVAS_MULTIPLE)
+        best_geometry = None
+        best_score = None
+        if max_w >= int(CANVAS_MULTIPLE) and max_h >= int(CANVAS_MULTIPLE):
+            source_ratio = float(w) / float(max(1, h))
+            for candidate_w in range(int(CANVAS_MULTIPLE), max_w + 1, int(CANVAS_MULTIPLE)):
+                for candidate_h in range(int(CANVAS_MULTIPLE), max_h + 1, int(CANVAS_MULTIPLE)):
+                    ratio_error = abs(math.log((candidate_w / float(candidate_h)) / source_ratio))
+                    score = (ratio_error, -(candidate_w * candidate_h))
+                    if best_score is None or score < best_score:
+                        best_score = score
+                        best_geometry = (candidate_w, candidate_h)
+        if best_geometry is not None:
+            tw, th = best_geometry
+        else:
+            scale = min(1.0, float(target_w) / float(max(1, w)), float(target_h) / float(max(1, h)))
+            tw = max(int(CANVAS_MULTIPLE), min(target_w, int(math.floor((w * scale) / CANVAS_MULTIPLE)) * int(CANVAS_MULTIPLE)))
+            th = max(int(CANVAS_MULTIPLE), min(target_h, int(math.floor((h * scale) / CANVAS_MULTIPLE)) * int(CANVAS_MULTIPLE)))
+    else:
+        scale = min(1.0, float(target_w) / float(max(1, w)), float(target_h) / float(max(1, h)))
+        tw = max(int(CANVAS_MULTIPLE), min(target_w, int(math.floor((w * scale) / CANVAS_MULTIPLE)) * int(CANVAS_MULTIPLE)))
+        th = max(int(CANVAS_MULTIPLE), min(target_h, int(math.floor((h * scale) / CANVAS_MULTIPLE)) * int(CANVAS_MULTIPLE)))
     # Guard against tiny aspect-ratio edge cases where flooring one side to 0 would
     # otherwise collapse the tensor. If that happens, keep the smallest legal H3-safe
     # dimension on the short side and recompute the long side inside the target box.
@@ -2144,27 +3275,153 @@ def _lm_clamp_media_to_target_geometry(media: torch.Tensor, target_width: int, t
         else:
             th = min(target_h, max(int(CANVAS_MULTIPLE), int(math.floor(target_h / CANVAS_MULTIPLE)) * int(CANVAS_MULTIPLE)))
             tw = max(int(CANVAS_MULTIPLE), min(target_w, int(math.floor((w * (th / float(max(1, h)))) / CANVAS_MULTIPLE)) * int(CANVAS_MULTIPLE)))
-    if tw == w and th == h:
-        clamped = media[..., :3]
-        changed = False
-    else:
-        clamped = _resize_frames(media, tw, th, 'stretch')
-        changed = True
-    return clamped, {
+    return {
         'kind': str(kind),
         'source_width': w,
         'source_height': h,
-        'target_width': target_w,
-        'target_height': target_h,
+        'target_width': canvas_w,
+        'target_height': canvas_h,
+        'reference_scale': reference_scale,
+        'reference_target_width': target_w,
+        'reference_target_height': target_h,
         'safe_width': tw,
         'safe_height': th,
         'source_pixels': int(max(1, w * h)),
         'safe_pixels': int(max(1, tw * th)),
-        'changed': bool(changed),
-        'policy': 'fit_inside_target_geometry_no_upscale',
+        'changed': bool(tw != w or th != h),
+        'policy': (
+            'fit_inside_scaled_video_reference_geometry_no_upscale'
+            if str(kind) == 'video' else 'fit_inside_target_geometry_no_upscale'
+        ),
         'latent_width': tw // 16,
         'latent_height': th // 16,
     }
+
+
+def _lm_resample_video_frames_to_rate(
+    frames: torch.Tensor,
+    source_fps: float,
+    target_fps: float,
+) -> tuple[torch.Tensor, int]:
+    """Uniformly map a decoded video tensor onto the requested fixed-rate clock."""
+    if not torch.is_tensor(frames) or frames.ndim != 4 or int(frames.shape[0]) <= 0:
+        raise ValueError('FPS normalization requires a non-empty [T,H,W,C] video tensor.')
+    source_rate = max(1e-6, float(source_fps))
+    target_rate = max(1e-6, float(target_fps))
+    source_count = int(frames.shape[0])
+    target_count = max(1, int(round(source_count * target_rate / source_rate)))
+    if target_count == source_count and abs(source_rate - target_rate) < 1e-6:
+        return frames, target_count
+    indices = torch.linspace(
+        0, source_count - 1, steps=target_count, dtype=torch.float64,
+    ).round().to(device=frames.device, dtype=torch.long)
+    return frames.index_select(0, indices).contiguous(), target_count
+
+
+def _lm_clamp_media_to_target_geometry(
+    media: torch.Tensor,
+    target_width: int,
+    target_height: int,
+    *,
+    kind: str,
+    spatial_scale: float = 1.0,
+):
+    """Clamp one IMAGE/VIDEO tensor to the shared H3-safe target geometry."""
+    if media is None:
+        return None, None
+    if not torch.is_tensor(media) or media.ndim < 3:
+        return media, None
+    h = int(media.shape[-3])
+    w = int(media.shape[-2])
+    geometry = _lm_media_target_geometry(
+        w, h, target_width, target_height, kind=kind, spatial_scale=spatial_scale,
+    )
+    tw = int(geometry['safe_width'])
+    th = int(geometry['safe_height'])
+    if tw == w and th == h:
+        clamped = media[..., :3]
+    else:
+        clamped = (
+            _lm_resize_video_frames_chunked(media, tw, th)
+            if str(kind) == 'video'
+            else _resize_frames(media, tw, th, 'stretch')
+        )
+    return clamped, geometry
+
+
+def _lm_resize_video_frames_chunked(
+    frames: torch.Tensor,
+    width: int,
+    height: int,
+    *,
+    chunk_frames: int = 16,
+) -> torch.Tensor:
+    """Resize CPU-backed video frames in bounded batches, using Comfy's CUDA device when available.
+
+    Director videos arrive as float32 CPU IMAGE batches. Resizing all frames in one
+    Lanczos call makes a large temporary allocation and leaves the operation entirely
+    CPU-bound. Chunking bounds transient VRAM while preserving Comfy's resize kernel.
+    """
+    import comfy.model_management
+    import comfy.utils
+
+    rgb = frames[..., :3]
+    if int(rgb.shape[1]) == int(height) and int(rgb.shape[2]) == int(width):
+        return rgb
+
+    resize_device = rgb.device
+    if rgb.device.type == 'cpu':
+        try:
+            candidate = comfy.model_management.get_torch_device()
+            if getattr(candidate, 'type', None) == 'cuda' and torch.cuda.is_available():
+                resize_device = candidate
+        except Exception:
+            resize_device = rgb.device
+
+    batch = max(1, int(chunk_frames))
+    _lm_print(
+        '[MiniMaxH3 LongMedia][VIDEO RESIZE] '
+        f'frames={int(rgb.shape[0])}; input={int(rgb.shape[2])}x{int(rgb.shape[1])}; '
+        f'output={int(width)}x{int(height)}; compute_device={resize_device}; '
+        f'chunk_frames={batch}; output_device={rgb.device}',
+        flush=True,
+    )
+
+    def resize_on(device):
+        output = torch.empty(
+            (int(rgb.shape[0]), int(height), int(width), 3),
+            dtype=rgb.dtype,
+            device=rgb.device,
+        )
+        for start in range(0, int(rgb.shape[0]), batch):
+            end = min(int(rgb.shape[0]), start + batch)
+            samples = rgb[start:end].movedim(-1, 1)
+            if samples.device != device:
+                samples = samples.to(device)
+            resized = comfy.utils.common_upscale(
+                samples, int(width), int(height), 'lanczos', 'disabled'
+            ).movedim(1, -1)
+            if resized.device != output.device:
+                resized = resized.to(output.device)
+            output[start:end].copy_(resized)
+            del samples, resized
+        return output
+
+    try:
+        return resize_on(resize_device)
+    except Exception as exc:
+        if resize_device == rgb.device or rgb.device.type != 'cpu':
+            raise
+        _lm_print(
+            '[MiniMaxH3 LongMedia][VIDEO RESIZE] CUDA path failed; '
+            f'falling back to CPU chunks ({type(exc).__name__}: {exc})',
+            flush=True,
+        )
+        try:
+            _soft_empty_cuda_cache()
+        except Exception:
+            pass
+        return resize_on(rgb.device)
 
 
 def _lm_clamp_media_list_to_target_geometry(items, target_width: int, target_height: int, *, kind: str):
@@ -4155,6 +5412,11 @@ def _lm_h3_rebuild_runtime_layout(payload, x, text_len, reason):
             )
 
     if not rebuild:
+        _kept_layout = normalized.get("layout")
+        if _kept_layout is not None:
+            # PackedLayout intentionally does not retain its source descriptors.
+            # LongMedia RefMod routing needs the exact ordered block list beside it.
+            _kept_layout.ref_blocks = tuple(normalized.get("refs") or ())
         return normalized, False
 
     import inspect
@@ -4217,6 +5479,7 @@ def _lm_h3_rebuild_runtime_layout(payload, x, text_len, reason):
                 f"layout_cond_rows={cond_a}, actual_cond_rows={cond_audio_rows}."
             )
 
+    fresh.ref_blocks = tuple(normalized.get("refs") or ())
     out = dict(normalized)
     out["layout"] = fresh
     if _frame_count is not None and not _accepts_frame_count:
@@ -4232,6 +5495,111 @@ def _lm_h3_rebuild_runtime_layout(payload, x, text_len, reason):
         f"reason={reason}; signature={old_signature}->{expected_signature}; "
         f"target_video_rows={old_counts[0] if old_counts else 'n/a'}->{target_video_rows}; "
         f"metadata_normalized={metadata_changed}",
+        flush=True,
+    )
+    return out, True
+
+
+def _lm_h3_recover_refmod_descriptors(transformer_options):
+    """Identity-complete ordered native ``minimax_refs`` descriptors, or ``()``.
+
+    Selection is layered because host wrappers may shallow-copy
+    ``transformer_options`` between DIFFUSION_MODEL and the H3 blocks and drop
+    the side-channel list while leaving the authored RefMod specs in place.
+
+    Whichever layer answers, the result is always identity-complete.
+    ``convert_to_native_block`` emits only the native descriptor schema
+    (``kind`` / ``latent_h`` / ``latent_w`` / ``latent`` / ``latent_t`` /
+    ``ref_audio_t`` / ``audio_latent``) and host ``PackedLayout(refs=...)`` is
+    contracted to that schema alone, so the ``longmedia_refmod_*`` annotations
+    written in ``_lm_refmod_blocks_for_segment`` sit outside every guarantee the
+    host makes: the CONDITIONING hop, ``payload['refs']`` and each layout rebuild
+    in between are free to drop them -- the same loss class as a
+    ``transformer_options`` shallow-copy dropping the side channel.
+    ``resolve_refmod_spec_index`` matches on exactly those keys, so identity is
+    re-stamped here from the authored specs, which never leave our own objects.
+
+    The stamp position uses the contract ``_lm_localize_refmod_specs`` already
+    relies on for ``ref_index``: the authored RefMod blocks are appended AFTER
+    the host's own native refs, so block ``appended_block_index`` ``i`` lives at
+    ``len(blocks) - len(specs) + i``.
+    """
+    identity_keys = (
+        'longmedia_refmod_id',
+        'longmedia_refmod_member_index',
+        'longmedia_refmod_appended_block_index',
+        'longmedia_refmod_strength',
+    )
+    options = transformer_options if isinstance(transformer_options, dict) else {}
+    specs = sorted(
+        (item for item in (options.get('latentlab_h3_refmod_specs') or ())
+         if isinstance(item, dict) and isinstance(item.get('native_block'), dict)),
+        key=lambda item: int(item.get('appended_block_index', 0) or 0),
+    )
+    blocks = tuple(options.get('latentlab_h3_refmod_blocks') or ())
+    if not blocks:
+        layout = options.get('latentlab_h3_packed_layout')
+        blocks = tuple(getattr(layout, 'ref_blocks', None) or ())
+    if not blocks:
+        # No runtime container survived. The authored descriptors are copies of
+        # these same blocks and are identity-complete by construction.
+        return tuple(
+            dict(item['native_block'])
+            for item in specs
+        )
+    out = [dict(block) for block in blocks]
+    base = len(out) - len(specs)
+    for spec in specs:
+        index = base + int(spec.get('appended_block_index', 0) or 0)
+        if index < 0 or index >= len(out):
+            continue
+        stamp = spec.get('native_block') or {}
+        for key in identity_keys:
+            if key in stamp:
+                out[index][key] = stamp[key]
+    return tuple(out)
+
+
+def _lm_h3_reinject_refmod_refs(payload, transformer_options, text_len, runtime_x):
+    """Restore missing native ``minimax_refs`` before H3 packs its layout.
+
+    ``minimax_refs`` normally rides CONDITIONING metadata into
+    ``MiniMaxH3Video.extra_conds`` and from there into ``minimax_payload``. When
+    that hop is lost the payload keeps its layout slot but carries no ref
+    descriptors/rows, and RefMod routing aborts with "no native minimax_refs
+    descriptors" against a layout that has nowhere to put them. The exact
+    ordered descriptors travel with the authored specs, so they can be restored
+    here and pushed through the normal layout / condition-tensor geometry path.
+    """
+    if not isinstance(payload, dict):
+        return payload, False
+    if payload.get('refs'):
+        return payload, False
+    branch = tuple(
+        int(v) for v in ((transformer_options or {}).get('cond_or_uncond') or (0,))
+    )
+    # Negative CFG never carries positive-only native refs, and batched CFG is
+    # rejected later with its own contract error.
+    if (branch and all(v == 1 for v in branch)) or len(branch) > 1:
+        return payload, False
+    blocks = _lm_h3_recover_refmod_descriptors(transformer_options)
+    if not blocks:
+        return payload, False
+    out = dict(payload)
+    out['refs'] = [dict(block) for block in blocks]
+    out['cond_video_latents'] = list(payload.get('cond_video_latents') or []) + [
+        block['latent'] for block in blocks if block.get('latent') is not None
+    ]
+    out['cond_audio_latents'] = list(payload.get('cond_audio_latents') or []) + [
+        block['audio_latent'] for block in blocks if block.get('audio_latent') is not None
+    ]
+    # Force a PackedLayout rebuild so the restored ref rows are actually packed.
+    out.pop('layout', None)
+    out['longmedia_refmod_recovered_descriptors'] = int(len(blocks))
+    _lm_print(
+        '[MiniMaxH3 LongMedia][DIRECTOR REFMOD RECOVERY] '
+        f'restored {len(blocks)} native minimax_refs descriptors from authored specs; '
+        'PackedLayout will be rebuilt with the exact ref rows',
         flush=True,
     )
     return out, True
@@ -4283,10 +5651,18 @@ def _h3_segment_layout_guard_wrapper(executor, *args, **kwargs):
         # this exact forward. This catches stale layouts even when their cached
         # signature was forged/copied by another wrapper.
         runtime_x = call_args[0] if call_args else kwargs.get('x')
+        runtime_options = kwargs.get('transformer_options')
+        if not isinstance(runtime_options, dict) and len(call_args) >= 4 and isinstance(call_args[3], dict):
+            runtime_options = call_args[3]
+        # v0.6.57: restore native minimax_refs descriptors lost in the host
+        # CONDITIONING hop before the layout is validated against the payload.
+        payload, _refmod_recovered = _lm_h3_reinject_refmod_refs(
+            payload, runtime_options, text_len, runtime_x,
+        )
         payload, _layout_rebuilt = _lm_h3_rebuild_runtime_layout(
             payload, runtime_x, text_len, 'diffusion_model_preflight'
         )
-        if _layout_rebuilt:
+        if _layout_rebuilt or _refmod_recovered:
             if payload_location and payload_location[0] == 'arg':
                 call_args[int(payload_location[1])] = payload
             else:
@@ -4383,6 +5759,18 @@ def _h3_segment_layout_guard_wrapper(executor, *args, **kwargs):
                 _opts['latentlab_h3_packed_layout'] = _layout
             else:
                 _opts.pop('latentlab_h3_packed_layout', None)
+            _native_refs = payload.get('refs')
+            if not _native_refs:
+                # Same layered recovery as attention uses; keeps the side channel,
+                # the layout carrier and the authored specs in lockstep.
+                _native_refs = _lm_h3_recover_refmod_descriptors(_opts)
+            if _native_refs:
+                # PackedLayout intentionally does not retain its source block
+                # descriptors. Keep the exact ordered list beside the layout so
+                # RefMod routing can signature-walk native packed rows.
+                _opts['latentlab_h3_refmod_blocks'] = tuple(_native_refs)
+            else:
+                _opts.pop('latentlab_h3_refmod_blocks', None)
 
     return executor(*call_args, **kwargs)
 
@@ -8709,7 +10097,7 @@ def _lm_h3_temporal_embedding_route_plan(transformer_options, seq_len=None):
     }
 
 
-def _run_h3_temporal_embedding_attention(attn, x, rope_freqs, transformer_options, state):
+def _run_h3_temporal_embedding_attention_legacy(attn, x, rope_freqs, transformer_options, state):
     """Single-pass exact attention routing for Director temporal H3 embeddings.
 
     Partial embedding KEY rows are masked or unmasked per contiguous query interval.
@@ -8916,6 +10304,344 @@ def _run_h3_temporal_embedding_attention(attn, x, rope_freqs, transformer_option
             flush=True,
         )
         state['temporal_embedding_announced'] = True
+    return result
+
+
+def _run_h3_temporal_embedding_attention(attn, x, rope_freqs, transformer_options, state):
+    """Route temporal text keys and native RefMod keys in one Q partition.
+
+    Without RefMods this delegates to the established temporal-control path.
+    With RefMods, the packed sequence and native ``minimax_refs`` rows remain
+    untouched; only target audio/video queries receive a 1xK visibility/bias
+    mask derived from Director-authored target-frame intervals.
+    """
+    ref_specs = tuple(transformer_options.get('latentlab_h3_refmod_specs') or ())
+    if not ref_specs:
+        return _run_h3_temporal_embedding_attention_legacy(
+            attn, x, rope_freqs, transformer_options, state,
+        )
+
+    import comfy.model_management
+    import comfy.quant_ops
+    from comfy.ldm.modules.attention import optimized_attention
+    from comfy.ldm.minimax.model import FRAME_PER_TOKEN
+    from .refmod_routing import (
+        compute_temporal_gates, merge_attention_routes, resolve_refmod_spec_index,
+    )
+
+    if x.ndim != 2:
+        raise ValueError(f'Director H3 attention requires packed [S,D] rows, got {tuple(x.shape)}.')
+    seq = int(x.shape[0])
+    layout = transformer_options.get('latentlab_h3_packed_layout')
+    native_blocks = _lm_h3_recover_refmod_descriptors(transformer_options)
+    branch = tuple(int(v) for v in (transformer_options.get('cond_or_uncond') or (0,)))
+    if branch and all(v == 1 for v in branch) and not native_blocks:
+        # Negative CFG has no positive-only native refs. Temporal routing, when
+        # present, already has its own branch guard in the legacy path.
+        return _run_h3_temporal_embedding_attention_legacy(
+            attn, x, rope_freqs, transformer_options, state,
+        )
+    if branch and len(branch) > 1:
+        raise ValueError('Director RefMod routing requires unbatched CFG branches.')
+    if layout is None or not hasattr(layout, 'segments'):
+        raise RuntimeError('Director RefMod routing requires the runtime H3 PackedLayout guard.')
+    if not native_blocks:
+        raise RuntimeError('Director RefMod routing has authored specs but no native minimax_refs descriptors.')
+
+    routed_blocks = [dict(block) for block in native_blocks]
+    character_ref_indices = set()
+    for raw in ref_specs:
+        spec = dict(raw)
+        try:
+            ref_index = resolve_refmod_spec_index(routed_blocks, spec)
+        except ValueError as exc:
+            raise RuntimeError(f'Director RefMod descriptor mapping failed: {exc}') from exc
+        block = routed_blocks[ref_index]
+        block['start_frame'] = max(0, int(spec.get('start_frame', 0) or 0))
+        block['end_frame'] = max(
+            block['start_frame'], int(spec.get('end_frame', 0) or 0),
+        )
+        block['strength'] = max(0.0, min(1.0, float(spec.get('strength', 1.0) or 0.0)))
+        if (str(spec.get('concept_type') or '').strip().lower() == 'character'
+                and block['strength'] > 0.0):
+            character_ref_indices.add(int(ref_index))
+
+    temporal_specs = tuple(transformer_options.get('latentlab_h3_temporal_embeddings') or ())
+    expected_frame_counts = {
+        int(spec.get('target_frame_count')) for spec in ref_specs
+        if spec.get('target_frame_count') is not None
+    }
+    if len(expected_frame_counts) > 1:
+        raise RuntimeError(
+            'Director RefMod specs disagree on the authored target clock: '
+            f'{sorted(expected_frame_counts)}.'
+        )
+    expected_frame_count = next(iter(expected_frame_counts), None)
+
+    def _spec_key(items):
+        # ``native_block`` carries live tensors; excluding it keeps the cached
+        # route key cheap and stable across forwards.
+        return tuple(
+            tuple(sorted(
+                (str(k), repr(v)) for k, v in dict(item).items()
+                if k != 'native_block'
+            ))
+            for item in items
+        )
+
+    block_key = tuple((
+        str(block.get('kind') or ''),
+        int(block.get('latent_t', 0) or 0),
+        int(block.get('latent_h', 0) or 0),
+        int(block.get('latent_w', 0) or 0),
+        int(block.get('ref_audio_t', 0) or 0),
+        int(block.get('start_frame', 0) or 0),
+        int(block.get('end_frame', 0) or 0),
+        float(block.get('strength', 1.0) or 0.0),
+    ) for block in routed_blocks)
+    route_key = (
+        seq,
+        tuple(getattr(layout, 'signature', ()) or ()),
+        tuple(getattr(layout, 'segments', ()) or ()),
+        _spec_key(temporal_specs),
+        _spec_key(ref_specs),
+        block_key,
+        branch,
+    )
+    if state.get('director_combined_route_key') == route_key:
+        temporal_route, refmod_route, query_intervals, character_balance_by_query = state['director_combined_route']
+    else:
+        temporal_route = _lm_h3_temporal_embedding_route_plan(
+            transformer_options, seq_len=seq,
+        ) if temporal_specs else None
+        refmod_route = compute_temporal_gates(
+            layout, ref_blocks=routed_blocks, frame_pattern=tuple(int(v) for v in FRAME_PER_TOKEN),
+            expected_frame_count=expected_frame_count,
+        )
+
+        hidden_keys = []
+        temporal_intervals = []
+        if temporal_route is not None:
+            if temporal_route.get('regional'):
+                by_name = {
+                    str(name): (int(a), int(b))
+                    for a, b, name in temporal_route['key_ranges']
+                }
+                hidden_keys.extend(by_name.values())
+                if temporal_route.get('temporal_controls'):
+                    raw_intervals = temporal_route['query_intervals']
+                else:
+                    raw_intervals = tuple(
+                        (int(a), int(b), ((str(name), 1.0),) if name else tuple())
+                        for a, b, name in temporal_route['query_intervals']
+                    )
+                for qa, qb, active in raw_intervals:
+                    keys = tuple(
+                        (by_name[str(name)][0], by_name[str(name)][1], float(weight))
+                        for name, weight in active if str(name) in by_name
+                    )
+                    temporal_intervals.append((int(qa), int(qb), keys))
+            else:
+                by_name = {
+                    str(name): tuple(int(v) for v in temporal_route['row_ranges'][name])
+                    for name in temporal_route['temporal_names']
+                }
+                hidden_keys.extend(by_name.values())
+                for group in temporal_route['groups']:
+                    keys = tuple(
+                        (by_name[str(name)][0], by_name[str(name)][1], 1.0)
+                        for name in group['active_names'] if str(name) in by_name
+                    )
+                    temporal_intervals.append((
+                        int(group['q_start']), int(group['q_stop']), keys,
+                    ))
+
+        query_intervals = merge_attention_routes(
+            seq,
+            always_hidden=tuple(hidden_keys),
+            temporal_intervals=tuple(temporal_intervals),
+            refmod_route=refmod_route,
+        )
+        character_key_ranges = set()
+        visual_ref_key_ranges = set()
+        for member in refmod_route.members:
+            for start, stop, segment_kind in member.segment_groups:
+                if str(segment_kind) != 'ref_img' or int(stop) <= int(start):
+                    continue
+                key_range = (int(start), int(stop))
+                visual_ref_key_ranges.add(key_range)
+                if int(member.member_index) in character_ref_indices:
+                    character_key_ranges.add(key_range)
+
+        # Later MultiClip targets also see the prior clip's motion-context
+        # reference. At neutral strength=1, a still RefMod has zero per-key
+        # bias and can lose the joint softmax simply because the video context
+        # contributes many more visual rows. Balance character refs only,
+        # against competing visual references, and on target-video queries.
+        character_balance_by_query = {}
+        if character_key_ranges and visual_ref_key_ranges:
+            video_start, video_stop = (int(v) for v in refmod_route.video_span)
+            max_balance_bias = math.log(64.0)
+            for qa, qb, _hidden, active in query_intervals:
+                qa, qb = int(qa), int(qb)
+                if qa < video_start or qb > video_stop:
+                    continue
+                character_rows = sum(
+                    max(0, int(kb) - int(ka))
+                    for ka, kb, _weight in active
+                    if (int(ka), int(kb)) in character_key_ranges
+                )
+                competing_rows = sum(
+                    max(0, int(kb) - int(ka))
+                    for ka, kb, _weight in active
+                    if ((int(ka), int(kb)) in visual_ref_key_ranges
+                        and (int(ka), int(kb)) not in character_key_ranges)
+                )
+                if character_rows <= 0 or competing_rows <= character_rows:
+                    continue
+                bias = min(max_balance_bias, math.log(competing_rows / character_rows))
+                if bias > 1e-7:
+                    character_balance_by_query[(qa, qb)] = bias
+        state['director_combined_route_key'] = route_key
+        state['director_combined_route'] = (
+            temporal_route, refmod_route, query_intervals, character_balance_by_query,
+        )
+
+    character_key_ranges = {
+        (int(start), int(stop))
+        for member in refmod_route.members
+        if int(member.member_index) in character_ref_indices
+        for start, stop, segment_kind in member.segment_groups
+        if str(segment_kind) == 'ref_img' and int(stop) > int(start)
+    }
+    if character_balance_by_query and state.get('director_refmod_identity_balance_key') != route_key:
+        _lm_print(
+            '[MiniMaxH3 LongMedia][DIRECTOR REFMOD CHARACTER BALANCE] '
+            f'members={len(character_ref_indices)}; '
+            f'video_query_partitions={len(character_balance_by_query)}; '
+            f'max_logit_bias={max(character_balance_by_query.values()):.3f}; '
+            'visual_reference_token_mass=balanced; audio_and_non_character_refs=unchanged',
+            flush=True,
+        )
+        state['director_refmod_identity_balance_key'] = route_key
+
+    # Route identity is the authoritative test for whether custom masked
+    # attention is needed. Checking authored frame counts alone is brittle:
+    # H3's target frame clock can differ from the workflow duration by an
+    # endpoint cell. If every hidden key is restored at unit weight and there
+    # are no non-unit biases, the mask changes no logits at all, so keep the
+    # selected native backend (including the zero-copy SLA fast path).
+    def _route_interval_is_identity(hidden_ranges, active_ranges):
+        if any(float(weight) < 1.0 - 1e-7 for _a, _b, weight in active_ranges):
+            return False
+        unit_ranges = sorted((int(a), int(b)) for a, b, weight in active_ranges
+                             if float(weight) >= 1.0 - 1e-7)
+        for hidden_start, hidden_stop in hidden_ranges:
+            cursor = int(hidden_start)
+            for active_start, active_stop in unit_ranges:
+                if active_stop <= cursor:
+                    continue
+                if active_start > cursor:
+                    break
+                cursor = max(cursor, active_stop)
+                if cursor >= int(hidden_stop):
+                    break
+            if cursor < int(hidden_stop):
+                return False
+        return True
+
+    if not character_balance_by_query and all(_route_interval_is_identity(hidden, active)
+           for _qa, _qb, hidden, active in query_intervals):
+        if not state.get('director_route_identity_announced'):
+            _lm_print(
+                '[MiniMaxH3 LongMedia][DIRECTOR REFMOD ATTENTION] '
+                f'members={len(ref_specs)}; query_partitions={len(query_intervals)}; '
+                'combined mask is identity; preserving selected attention backend/SLA',
+                flush=True,
+            )
+            state['director_route_identity_announced'] = True
+        return None
+
+    # Combined temporal routing needs one shared full K/V store. Preserve the
+    # existing exactness guard rather than silently splitting a Director shot.
+    if _h3_existing_ck_stream_needed(attn, x, transformer_options, state):
+        raise RuntimeError(
+            'Single-pass Director RefMod routing requires the dense exact Q/K/V path for this sequence, '
+            'but the current target requires streamed CK attention. Reduce target resolution/length or '
+            'remove interval-gated RefMods; LongMedia will not silently split the MAIN shot.'
+        )
+
+    _ensure_h3_existing_workspace(attn, x, transformer_options, state)
+    heads = int(attn.heads)
+    head_dim = int(attn.head_dim)
+    inner = heads * head_dim
+    q, k, v = attn.qkv_proj(x).split(inner, dim=-1)
+    v = v.view(seq, heads, head_dim)
+    if rope_freqs is not None:
+        q = q.view(1, seq, heads, head_dim)
+        k = k.view(1, seq, heads, head_dim)
+        qw = comfy.model_management.cast_to(attn.q_norm.weight, device=x.device)
+        kw = comfy.model_management.cast_to(attn.k_norm.weight, device=x.device)
+        rot = int(rope_freqs.shape[-3]) * 2
+        if comfy.model_management.in_training:
+            q, k = comfy.quant_ops.ck.rms_rope_split_half(
+                q, k, rope_freqs, qw, kw, epsilon=attn.q_norm.eps, rot_dim=rot,
+            )
+        else:
+            comfy.quant_ops.ck.rms_rope_split_half_(
+                q, k, rope_freqs, qw, kw, epsilon=attn.q_norm.eps, rot_dim=rot,
+            )
+        q, k = q[0], k[0]
+    else:
+        q = attn.q_norm(q.view(seq, heads, head_dim))
+        k = attn.k_norm(k.view(seq, heads, head_dim))
+
+    q_hnd = q.transpose(0, 1).unsqueeze(0)
+    k_hnd = k.transpose(0, 1).unsqueeze(0)
+    v_hnd = v.transpose(0, 1).unsqueeze(0)
+    neg = torch.finfo(q_hnd.dtype).min
+    flat = x.new_empty((seq, inner))
+    for qa, qb, hidden_ranges, active_ranges in query_intervals:
+        mask = torch.zeros((1, 1, 1, seq), dtype=q_hnd.dtype, device=q_hnd.device)
+        for ka, kb in hidden_ranges:
+            mask[..., int(ka):int(kb)] = neg
+        for ka, kb, weight in active_ranges:
+            weight = max(0.0, min(1.0, float(weight)))
+            if weight <= 0.0:
+                continue
+            logit_bias = 0.0 if weight >= 1.0 - 1e-7 else math.log(max(weight, 1e-4))
+            if (int(qa), int(qb)) in character_balance_by_query and (
+                    int(ka), int(kb)) in character_key_ranges:
+                logit_bias += float(weight) * character_balance_by_query[(int(qa), int(qb))]
+            mask[..., int(ka):int(kb)] = logit_bias
+        part = optimized_attention(
+            q_hnd[:, :, int(qa):int(qb), :], k_hnd, v_hnd, heads,
+            mask=mask, skip_reshape=True, transformer_options={},
+        ).squeeze(0)
+        flat[int(qa):int(qb)].copy_(part)
+        del part, mask
+
+    chunk_tokens = int(state.get('existing_out_proj_chunk_tokens', 16384) or 16384)
+    if seq <= chunk_tokens:
+        result = attn.out_proj(flat)
+    else:
+        result = torch.empty_like(x)
+        for start in range(0, seq, chunk_tokens):
+            end = min(seq, start + chunk_tokens)
+            part = attn.out_proj(flat[start:end])
+            result[start:end].copy_(part)
+            del part
+
+    if not state.get('director_refmod_attention_announced'):
+        _lm_print(
+            '[MiniMaxH3 LongMedia][DIRECTOR REFMOD ATTENTION] '
+            f'members={len(refmod_route.members)}; target_cells={len(refmod_route.cells)}; '
+            f'query_partitions={len(query_intervals)}; temporal_controls={len(temporal_specs)}; '
+            'native_minimax_refs=True; authored_frame_clock=True; attention=ComfyUI optimized masked backend; '
+            'MAIN split=False; TAKE continuity unchanged',
+            flush=True,
+        )
+        state['director_refmod_attention_announced'] = True
     return result
 
 
@@ -11597,7 +13323,8 @@ class _H3MLPChunkPatch:
                 _v30_attn_t0 = time.perf_counter()
             sol_mode = state.get('sol_mode', 'existing')
             _temporal_embedding_attn = None
-            if transformer_options.get('latentlab_h3_temporal_embeddings'):
+            if (transformer_options.get('latentlab_h3_temporal_embeddings')
+                    or transformer_options.get('latentlab_h3_refmod_specs')):
                 _temporal_embedding_attn = _run_h3_temporal_embedding_attention(
                     block.attn, h, rope_freqs, transformer_options, state
                 )
@@ -12571,6 +14298,32 @@ class MiniMaxH3LatentLabMLPChunking:
         wrapped.model_options = _clone_model_options_safe(getattr(guider, 'model_options', {}) or {})
 
         transformer_options = wrapped.model_options.setdefault('transformer_options', {})
+        # H3 SLA stores its optimized-attention hook on ModelPatcher.model_options.
+        # The main LongMedia sampler clones guider.model_options before installing
+        # its block wrapper, so without copying this hook the SLA node appears
+        # installed but neither Comfy attention nor LongMedia's direct SLA path can
+        # see it. Keep an existing guider-level override authoritative.
+        _patcher_model_options = getattr(
+            getattr(guider, 'model_patcher', None), 'model_options', {}
+        ) or {}
+        _patcher_transformer_options = (
+            _patcher_model_options.get('transformer_options', {})
+            if isinstance(_patcher_model_options, dict) else {}
+        ) or {}
+        _patcher_attn_override = (
+            _patcher_transformer_options.get('optimized_attention_override')
+            if isinstance(_patcher_transformer_options, dict) else None
+        )
+        if (
+            _patcher_attn_override is not None
+            and transformer_options.get('optimized_attention_override') is None
+        ):
+            transformer_options['optimized_attention_override'] = _patcher_attn_override
+            _lm_print(
+                '[MiniMaxH3 LongMedia][ATTENTION HOOK FIX] inherited '
+                'ModelPatcher optimized_attention_override into main sampler options',
+                flush=True,
+            )
         _runtime_backend = str(
             runtime_profile.get('backend', 'unknown')
         ).lower()
@@ -13929,7 +15682,8 @@ def _fit_passthrough_audio_to_timeline(audio, total_duration):
     duration_source independent from audio_mode while guaranteeing mux duration
     matches the generated video timeline.
     """
-    if not isinstance(audio, dict) or audio.get('waveform') is None:
+    audio = _lm_materialize_comfy_audio(audio, context='LongMedia passthrough audio')
+    if audio is None or audio.get('waveform') is None:
         return audio, {'action': 'invalid_passthrough', 'source_samples': None, 'target_samples': None}
     waveform = audio['waveform']
     sample_rate = int(audio.get('sample_rate', 0) or 0)
@@ -13949,6 +15703,34 @@ def _fit_passthrough_audio_to_timeline(audio, total_duration):
     out['waveform'] = fitted
     out['sample_rate'] = sample_rate
     return out, {'action': action, 'source_samples': source_samples, 'target_samples': target_samples}
+
+
+def _lm_materialize_comfy_audio(audio, *, context: str):
+    """Return a validated ComfyUI AUDIO dict, materializing lazy Mapping inputs."""
+    if audio is None:
+        return None
+    if not isinstance(audio, Mapping):
+        raise TypeError(
+            f'{context} must be a ComfyUI AUDIO mapping, got {type(audio).__name__}.'
+        )
+    if isinstance(audio, dict):
+        payload = audio
+    else:
+        try:
+            # VHS LazyAudioMap decodes the selected audio window when iterated.
+            payload = dict(audio)
+        except Exception as exc:
+            raise RuntimeError(f'{context} could not materialize its lazy AUDIO mapping: {exc}') from exc
+    waveform = payload.get('waveform')
+    try:
+        sample_rate = int(payload.get('sample_rate') or 0)
+    except (TypeError, ValueError, OverflowError):
+        sample_rate = 0
+    if not torch.is_tensor(waveform) or sample_rate <= 0:
+        raise ValueError(
+            f'{context} is missing a tensor waveform or positive sample_rate.'
+        )
+    return payload
 
 
 def _normalize_decoded_audio(decoded, sample_rate, target_samples=None):
@@ -14371,6 +16153,81 @@ def _conditioning_meta(entry):
     if isinstance(entry, (list, tuple)) and len(entry) >= 2 and isinstance(entry[1], dict):
         return entry[1]
     return None
+
+
+def _lm_attach_refmod_blocks(conditioning, blocks):
+    """Append unlabelled native H3 reference blocks without altering TE rows."""
+    if not blocks:
+        return conditioning
+    import node_helpers
+    out = []
+    attached = False
+    for entry in conditioning or []:
+        if isinstance(entry, dict):
+            meta = dict(entry)
+            meta['minimax_refs'] = list(meta.get('minimax_refs') or []) + [dict(v) for v in blocks]
+            out.append(meta)
+            attached = True
+        elif isinstance(entry, (list, tuple)) and len(entry) >= 2 and isinstance(entry[1], dict):
+            copied = list(entry)
+            meta = dict(copied[1])
+            meta['minimax_refs'] = list(meta.get('minimax_refs') or []) + [dict(v) for v in blocks]
+            copied[1] = meta
+            out.append(copied)
+            attached = True
+        else:
+            out.append(entry)
+    if not attached:
+        raise RuntimeError('Director RefMod could not attach native minimax_refs metadata.')
+    return out
+
+
+def _lm_order_refmod_refs_last(conditioning, refmod_specs):
+    """Keep authored RefMod descriptors after every per-pass continuation ref.
+
+    H3's native conversion may discard LongMedia identity annotations. The
+    recovery path can then identify RefMods by their position at the end of
+    ``minimax_refs``. MultiClip appends motion-context refs after Setup has
+    attached RefMods, so restore that ordering after per-pass context assembly.
+    """
+    ids = {
+        (str(spec.get('refmod_id') or ''), int(spec.get('member_index', 0) or 0),
+         int(spec.get('appended_block_index', 0) or 0))
+        for spec in (refmod_specs or ()) if isinstance(spec, dict)
+    }
+    if not ids:
+        return conditioning
+
+    out = []
+    for entry in conditioning or ():
+        meta = _conditioning_meta(entry)
+        if not isinstance(meta, dict):
+            out.append(entry)
+            continue
+        refs = list(meta.get('minimax_refs') or ())
+        refmods, other_refs = [], []
+        for ref in refs:
+            if not isinstance(ref, dict):
+                other_refs.append(ref)
+                continue
+            key = (
+                str(ref.get('longmedia_refmod_id') or ''),
+                int(ref.get('longmedia_refmod_member_index', 0) or 0),
+                int(ref.get('longmedia_refmod_appended_block_index', 0) or 0),
+            )
+            (refmods if key in ids else other_refs).append(ref)
+        if not refmods:
+            out.append(entry)
+            continue
+        new_meta = dict(meta)
+        new_meta['minimax_refs'] = other_refs + refmods
+        if isinstance(entry, dict):
+            out.append(new_meta)
+        else:
+            copied = list(entry)
+            copied[1] = new_meta
+            out.append(copied)
+    return out
 
 
 def _v041_normalize_minimax_audio_ref_geometry(conditioning):
@@ -14964,11 +16821,11 @@ def _lm_tokenize_h3_prompt(clip, prompt, *, minimax_ref_items=None, images=None,
 def _v329_encode_continuation_native_refs(
     clip, prompt, positive, plan, segment_index, ref_items, ref_blocks,
 ):
-    """Re-encode continuation text with the exact pass-0 Ref2VA presentation.
+    """Re-encode continuation text with its source-window Ref2VA presentation.
 
-    Picture/video/audio ordering and every reference latent geometry stay
-    unchanged across passes. This never exceeds pass-0 reference cost and avoids
-    a conditioning-family discontinuity at the visible join.
+    Picture/video/audio ordering and reference latent geometry stay unchanged
+    across passes, while the sparse video presentation frames may be refreshed
+    to the source window owned by this pass.
     """
     import node_helpers
 
@@ -15003,7 +16860,7 @@ def _v329_encode_continuation_native_refs(
     return node_helpers.conditioning_set_values(encoded, values)
 
 
-def _v57_preencode_segment_conditionings(clip, base_prompt, positive, plan, v329_native_refs=None, lip_sync_audio=None, audio_vae=None):
+def _v57_preencode_segment_conditionings(clip, base_prompt, positive, plan, v329_native_refs=None, lip_sync_audio=None, audio_vae=None, segment_refmod_blocks=None, segment_refmod_specs=None):
     """Encode every pass in Setup and store Comfy's *converted* guider format.
 
     Raw CONDITIONING is ``[[cross_attn, metadata], ...]``. ``CFGGuider.original_conds``
@@ -15016,12 +16873,30 @@ def _v57_preencode_segment_conditionings(clip, base_prompt, positive, plan, v329
     """
     import comfy.sampler_helpers
 
+    refmod_blocks = list(segment_refmod_blocks or [() for _ in range(int(getattr(plan, 'passes', 1)))])
+    if len(refmod_blocks) < int(getattr(plan, 'passes', 1)):
+        refmod_blocks.extend([()] * (int(getattr(plan, 'passes', 1)) - len(refmod_blocks)))
+    refmod_specs = list(segment_refmod_specs or [() for _ in range(int(getattr(plan, 'passes', 1)))])
+    if len(refmod_specs) < int(getattr(plan, 'passes', 1)):
+        refmod_specs.extend([()] * (int(getattr(plan, 'passes', 1)) - len(refmod_specs)))
     raw_result = [positive]
-    prompts = [_v57_build_segment_prompt(base_prompt, plan, 0)]
+    if refmod_blocks and refmod_blocks[0]:
+        # Rebind pass 0 only. Keep ``positive`` pristine because it is the
+        # metadata template for later passes; mutating it would make pass N
+        # inherit pass-0 RefMods before its own blocks are appended.
+        raw_result[0] = _v041_normalize_minimax_audio_ref_geometry(
+            _lm_attach_refmod_blocks(positive, refmod_blocks[0])
+        )
+    prompt0 = _v57_build_segment_prompt(base_prompt, plan, 0)
+    prompt0 = _lm_append_positive_prompt_guidance(prompt0, _lm_refmod_concept_hint(refmod_specs[0], log=False))
+    prompts = [prompt0]
     decouple_image_refs = bool(getattr(plan, 'decouple_original_image_refs_after_pass0', False))
     total_dropped_image_refs = 0
     for segment_index in range(1, int(getattr(plan, 'passes', 1))):
         segment_prompt = _v57_build_segment_prompt(base_prompt, plan, segment_index)
+        segment_prompt = _lm_append_positive_prompt_guidance(
+            segment_prompt, _lm_refmod_concept_hint(refmod_specs[segment_index], log=False),
+        )
         drop_image_refs = bool(decouple_image_refs and int(segment_index) > 0)
         if v329_native_refs is not None:
             ref_items, ref_blocks = v329_native_refs
@@ -15100,6 +16975,8 @@ def _v57_preencode_segment_conditionings(clip, base_prompt, positive, plan, v329
             encoded = _v57_attach_minimax_metadata(
                 encoded, positive, plan, segment_index, drop_image_refs=drop_image_refs,
             )
+        if refmod_blocks[segment_index]:
+            encoded = _lm_attach_refmod_blocks(encoded, refmod_blocks[segment_index])
         if lip_sync_audio is not None:
             encoded = _v104_attach_native_lipsync_guide(
                 encoded, audio_vae, lip_sync_audio, plan, segment_index,
@@ -15701,13 +17578,48 @@ def _lm_apply_temporal_specs_runtime_option(guider, specs):
 
 
 def _lm_apply_temporal_embedding_runtime_option(guider, plan, segment_index):
-    """Expose one segment's temporal routes to H3 attention."""
+    """Expose one segment's independent temporal embedding and RefMod routes."""
     per_segment = getattr(plan, 'segment_temporal_embeddings', None)
     specs = ()
     idx = int(segment_index)
     if per_segment and idx < len(per_segment):
         specs = tuple(dict(item) for item in (per_segment[idx] or ()))
-    return _lm_apply_temporal_specs_runtime_option(guider, specs)
+    _lm_apply_temporal_specs_runtime_option(guider, specs)
+    options = getattr(guider, 'model_options', None)
+    if not isinstance(options, dict):
+        return guider
+    transformer_options = options.setdefault('transformer_options', {})
+    per_refmods = getattr(plan, 'segment_refmods', None)
+    ref_specs = ()
+    if per_refmods and idx < len(per_refmods):
+        ref_specs = tuple(dict(item) for item in (per_refmods[idx] or ()))
+    if ref_specs:
+        transformer_options['latentlab_h3_refmod_specs'] = ref_specs
+        transformer_options['latentlab_h3_refmod_single_pass'] = True
+    else:
+        transformer_options.pop('latentlab_h3_refmod_specs', None)
+        transformer_options.pop('latentlab_h3_refmod_single_pass', None)
+    return guider
+
+
+def _lm_slice_refmod_specs_for_hires_refine(specs, *, window_start_frame, window_frame_count):
+    """Project RefMod target-query gates onto one local Stage-2 window."""
+    start = max(0, int(window_start_frame))
+    stop = start + max(1, int(window_frame_count))
+    out = []
+    for raw in specs or ():
+        if not isinstance(raw, dict):
+            continue
+        item = dict(raw)
+        a = max(start, int(raw.get('start_frame', 0) or 0))
+        b = min(stop, int(raw.get('end_frame', 0) or 0))
+        # Keep one spec per native block even when inactive. Dropping it would
+        # make the unchanged minimax_refs descriptor fall back to full-span.
+        item['start_frame'] = int(a - start) if b > a else 0
+        item['end_frame'] = int(b - start) if b > a else 0
+        item['target_frame_count'] = int(stop - start)
+        out.append(item)
+    return tuple(out)
 
 
 def _lm_slice_temporal_specs_for_hires_refine(specs, *, window_start_frame, window_frame_count):
@@ -15767,6 +17679,35 @@ def _lm_slice_temporal_embedding_specs_for_motion_repair(specs, dilation, *, sou
         local_spec['end_frame'] = int(active_targets[-1] + 1) if active_targets else 0
         local_specs.append(local_spec)
     local_specs.sort(key=lambda item: (int(item.get('order', 0)), int(item.get('start_frame', 0)), int(item.get('end_frame', 0))))
+    return tuple(local_specs)
+
+
+def _lm_slice_refmod_specs_for_motion_repair(specs, dilation, *, source_frame_offset):
+    """Project every native RefMod descriptor onto a dilated repair clock.
+
+    Inactive descriptors remain present with a zero-width window so their
+    native minimax_refs rows stay explicitly hidden instead of reverting to
+    the full-span default.
+    """
+    if not specs:
+        return tuple()
+    frame_map = tuple(int(v) for v in (dilation.get('expanded_frame_to_source_frame') or ()))
+    source_offset = max(0, int(source_frame_offset))
+    local_specs = []
+    for raw in specs:
+        if not isinstance(raw, dict):
+            continue
+        start_f = max(0, int(raw.get('start_frame', 0) or 0))
+        end_f = max(start_f, int(raw.get('end_frame', 0) or 0))
+        active_targets = [
+            idx for idx, local_source_frame in enumerate(frame_map)
+            if start_f <= source_offset + int(local_source_frame) < end_f
+        ]
+        local_spec = dict(raw)
+        local_spec['start_frame'] = int(active_targets[0]) if active_targets else 0
+        local_spec['end_frame'] = int(active_targets[-1] + 1) if active_targets else 0
+        local_spec['target_frame_count'] = int(len(frame_map))
+        local_specs.append(local_spec)
     return tuple(local_specs)
 
 
@@ -15915,21 +17856,48 @@ def _clone_guider_with_segment_audio(guider, plan, segment_index, previous_av=No
                 target_h = int(getattr(plan, 'reconstruction_target_height', 0) or 0)
                 if target_w <= 0 or target_h <= 0:
                     raise RuntimeError('Reconstruction V5 target canvas contract is missing.')
-                source_frames = _reconstruction_fit_source_frames(
-                    source_frames, target_w, target_h,
-                    str(getattr(plan, 'reconstruction_resize_mode', 'center_crop')),
-                )
-                ref_h = int(ref.get('latent_h', 0) or 0)
-                ref_w = int(ref.get('latent_w', 0) or 0)
-                if ref_h <= 0 or ref_w <= 0:
-                    latent0 = ref.get('latent')
-                    if latent0 is not None and hasattr(latent0, 'shape') and len(latent0.shape) == 5:
-                        ref_h = int(latent0.shape[3]); ref_w = int(latent0.shape[4])
-                if ref_h <= 0 or ref_w <= 0:
-                    raise RuntimeError('Reconstruction V5 source reference is missing latent H/W geometry.')
-                # Source-fit already established target composition. This second
-                # resize only maps that composition onto Ref2VA's reference canvas.
-                ref_frames = _resize_frames(source_frames, ref_w * 16, ref_h * 16, 'stretch')
+                reference_scale = _lm_plan_video_reference_scale(plan, segment_index)
+                resize_mode = str(getattr(plan, 'reconstruction_resize_mode', 'center_crop'))
+                if reference_scale < 0.999:
+                    ref_width, ref_height = _lm_video_reference_canvas_geometry(
+                        target_w, target_h, reference_scale,
+                    )
+                    # Fit/crop directly to the requested reference geometry. This
+                    # avoids constructing a full-resolution target-sized window
+                    # and then immediately downscaling it before the VAE.
+                    ref_frames = _reconstruction_fit_source_frames(
+                        source_frames, ref_width, ref_height, resize_mode,
+                    )
+                    clip_meta = (getattr(plan, 'director_clip_metadata', None) or ())
+                    clip_index = 0 if len(clip_meta) == 1 else max(
+                        0, min(int(segment_index), max(0, len(clip_meta) - 1)),
+                    )
+                    clip_name = (
+                        str(clip_meta[clip_index].get('name') or clip_meta[clip_index].get('clip_id') or clip_index + 1)
+                        if clip_meta and isinstance(clip_meta[clip_index], dict)
+                        else str(clip_index + 1)
+                    )
+                    _lm_print(
+                        '[MiniMaxH3 LongMedia][DIRECTOR VIDEO REF SCALE] '
+                        f'clip={clip_name}; scale={reference_scale:.2f}; '
+                        f'output={target_w}x{target_h}; reference={ref_width}x{ref_height}',
+                        flush=True,
+                    )
+                else:
+                    source_frames = _reconstruction_fit_source_frames(
+                        source_frames, target_w, target_h, resize_mode,
+                    )
+                    ref_h = int(ref.get('latent_h', 0) or 0)
+                    ref_w = int(ref.get('latent_w', 0) or 0)
+                    if ref_h <= 0 or ref_w <= 0:
+                        latent0 = ref.get('latent')
+                        if latent0 is not None and hasattr(latent0, 'shape') and len(latent0.shape) == 5:
+                            ref_h = int(latent0.shape[3]); ref_w = int(latent0.shape[4])
+                    if ref_h <= 0 or ref_w <= 0:
+                        raise RuntimeError('Reconstruction V5 source reference is missing latent H/W geometry.')
+                    # Preserve the established full-size path byte-for-byte when
+                    # scale is 100%; reduced clips use their own direct geometry.
+                    ref_frames = _resize_frames(source_frames, ref_w * 16, ref_h * 16, 'stretch')
                 ref_latent = plan.video_vae.encode(ref_frames)
                 ref['latent'] = ref_latent
                 ref['latent_t'] = int(ref_latent.shape[2])
@@ -15941,6 +17909,24 @@ def _clone_guider_with_segment_audio(guider, plan, segment_index, previous_av=No
                 ref['latent_t'] = int(ref_latent.shape[2])
                 ref['latent_h'] = int(ref_latent.shape[3])
                 ref['latent_w'] = int(ref_latent.shape[4])
+            if (
+                ref.get('kind') == 'video_audio'
+                and reference_audio is not None
+                and plan.audio_vae is not None
+            ):
+                audio_window, _ = _slice_source_audio_for_segment(
+                    reference_audio, start_frame, length_frames,
+                )
+                audio_window_input = {
+                    'waveform': audio_window,
+                    'sample_rate': int(reference_audio['sample_rate']),
+                }
+                audio_latent, audio_latent_frames = _hybrid_encode_ref_audio(
+                    plan.audio_vae, audio_window_input,
+                )
+                ref['audio_latent'] = audio_latent
+                ref['ref_audio_t'] = int(audio_latent_frames)
+                ref['longmedia_audio_context_start_frame'] = int(timeline['context_start'])
             ref['longmedia_context_start_frame'] = int(timeline['context_start'])
             ref['longmedia_visible_start_frame'] = int(timeline['visible_start'])
             ref['longmedia_local_visible_offset_frames'] = int(timeline['local_visible_offset'])
@@ -15952,6 +17938,16 @@ def _clone_guider_with_segment_audio(guider, plan, segment_index, previous_av=No
     shifted.original_conds['positive'] = _v041_normalize_minimax_audio_ref_geometry(
         shifted.original_conds.get('positive', [])
     )
+    if int(segment_index) > 0:
+        per_segment_refmods = getattr(plan, 'segment_refmods', None)
+        refmod_specs = (
+            per_segment_refmods[int(segment_index)]
+            if per_segment_refmods and int(segment_index) < len(per_segment_refmods)
+            else ()
+        )
+        shifted.original_conds['positive'] = _lm_order_refmod_refs_last(
+            shifted.original_conds['positive'], refmod_specs,
+        )
     _lm_apply_temporal_embedding_runtime_option(shifted, plan, segment_index)
     return shifted
 
@@ -16802,11 +18798,48 @@ def _hybrid_encode_ref_audio(audio_vae, audio):
     return z, int(z.shape[-1])
 
 
+def _lm_video_ref_presentation_item(video_frames, target_frames):
+    """Build the sparse Qwen video item using the same geometry as H3 Ref2VA."""
+    try:
+        from comfy_extras.nodes_minimax_h3 import _resize, adapt_canvas, FPS as H3_FPS
+    except Exception as exc:
+        raise RuntimeError(f'Current ComfyUI MiniMax H3 video-reference helpers unavailable: {exc}') from exc
+    if video_frames is None or not hasattr(video_frames, 'shape') or len(video_frames.shape) != 4:
+        raise ValueError('Windowed video reference must be an IMAGE batch [frames, height, width, channels].')
+    if int(video_frames.shape[0]) < 5:
+        raise ValueError('MiniMax H3 reference videos need at least 5 frames.')
+    vh, vw = int(video_frames.shape[1]), int(video_frames.shape[2])
+    cw, ch = adapt_canvas(vw, vh)
+    if vw * vh < cw * ch:
+        cw = max(CANVAS_MULTIPLE, round(vw / CANVAS_MULTIPLE) * CANVAS_MULTIPLE)
+        ch = max(CANVAS_MULTIPLE, round(vh / CANVAS_MULTIPLE) * CANVAS_MULTIPLE)
+    frames = (
+        video_frames[..., :3]
+        if vh == int(ch) and vw == int(cw)
+        else _resize(video_frames, int(cw), int(ch), 'disabled')
+    )
+    if int(frames.shape[0]) > int(target_frames):
+        frames = frames[:int(target_frames)]
+    count = int(frames.shape[0])
+    while count >= 5 and count % 17 != 5:
+        count -= 1
+    if count < 5:
+        raise ValueError('Windowed MiniMax H3 video reference is shorter than one native temporal unit.')
+    frames = frames[:count]
+    sample_step = max(1, int(H3_FPS) // 2)
+    sample_indices = list(range(0, count, sample_step))
+    return {
+        'type': 'video',
+        'data': frames[sample_indices],
+        'timestamps': [i / 2.0 for i in range(len(sample_indices))],
+    }
+
+
 def _build_longmedia_hybrid_conditioning(
     clip, vae, audio_vae, prompt, width, height, length, resolution_mode,
     first_frame=None, last_frame=None, ref_images=None, ref_videos=None,
     ref_audios=None, ref_video_audios=None, first_latent_override=None, last_latent_override=None,
-    shared_boundary_geometry=False,
+    shared_boundary_geometry=False, release_video_inputs=False,
 ):
     """Build H3 keyframes + Ref2VA references in one conditioning payload.
 
@@ -16824,6 +18857,8 @@ def _build_longmedia_hybrid_conditioning(
         raise RuntimeError('Current ComfyUI MiniMax H3 helpers are unavailable: %s' % exc)
 
     latent, frame_count = _empty_av_latent(int(width), int(height), int(length))
+    image_ref_count = sum(1 for img in (ref_images or []) if img is not None)
+    video_ref_count = sum(1 for video in (ref_videos or []) if video is not None)
     mc_key = getattr(payload_patch, 'LM_KEY', 'longmedia_hybrid_keyframe')
     native_guides = True
 
@@ -16903,6 +18938,11 @@ def _build_longmedia_hybrid_conditioning(
     for video_index, video_frames in enumerate(ref_videos or []):
         if video_frames is None:
             continue
+        # Temporal crop does not affect how each frame is spatially conditioned.
+        # Apply it before the full-batch resize so a short clip does not resample
+        # unused tail frames from a long source video.
+        if int(video_frames.shape[0]) > int(frame_count):
+            video_frames = video_frames[:int(frame_count)]
         paired_soundtrack = (
             paired_video_audios[video_index]
             if video_index < len(paired_video_audios)
@@ -16913,9 +18953,14 @@ def _build_longmedia_hybrid_conditioning(
         if vw * vh < cw * ch:
             cw = max(CANVAS_MULTIPLE, round(vw / CANVAS_MULTIPLE) * CANVAS_MULTIPLE)
             ch = max(CANVAS_MULTIPLE, round(vh / CANVAS_MULTIPLE) * CANVAS_MULTIPLE)
-        frames = _resize(video_frames, cw, ch, 'disabled')
-        if frames.shape[0] > frame_count:
-            frames = frames[:frame_count]
+        # Setup already clamps every external video to the output canvas.  The
+        # upstream _resize helper always runs Lanczos, including when the shape
+        # is unchanged; bypass that full-batch allocation/resample in the common
+        # case and only resize when adapt_canvas actually changes the geometry.
+        if int(video_frames.shape[1]) == int(ch) and int(video_frames.shape[2]) == int(cw):
+            frames = video_frames[..., :3]
+        else:
+            frames = _resize(video_frames, cw, ch, 'disabled')
         n = int(frames.shape[0])
         if n < 5:
             raise ValueError('MiniMax H3 reference videos need at least 5 frames.')
@@ -16935,11 +18980,43 @@ def _build_longmedia_hybrid_conditioning(
             # before the same-numbered <Video k>, while both tensors live in one
             # `video_audio` reference block and therefore share one time span.
             ref_items.append({'type': 'audio'})
+        qwen_frames = frames[sample_idx]
         ref_items.append({
-            'type': 'video', 'data': frames[sample_idx],
+            'type': 'video', 'data': qwen_frames,
             'timestamps': [i / 2.0 for i in range(len(sample_idx))],
         })
+        _video_encode_started = time.perf_counter()
+        _video_shape = tuple(int(dim) for dim in frames.shape)
+        _video_bytes = int(frames.numel() * frames.element_size())
+        _lm_print(
+            '[MiniMaxH3 LongMedia][REF VIDEO VAE] start '
+            f'index={video_index + 1}; frames={_video_shape[0]}; '
+            f'geometry={_video_shape[2]}x{_video_shape[1]}; '
+            f'dtype={frames.dtype}; device={frames.device}; '
+            f'rgb_bytes={_video_bytes / (1024.0 ** 3):.2f} GiB',
+            flush=True,
+        )
         video_latent = vae.encode(frames)
+        _video_encode_elapsed = time.perf_counter() - _video_encode_started
+        _host_after_video_vae = _host_memory_snapshot()
+        _host_after_video_vae_suffix = (
+            f'; host_available={_host_after_video_vae["available"] / (1024.0 ** 3):.1f} GB'
+            if isinstance(_host_after_video_vae, dict) else ''
+        )
+        _lm_print(
+            '[MiniMaxH3 LongMedia][REF VIDEO VAE] done '
+            f'index={video_index + 1}; elapsed={_video_encode_elapsed:.1f}s; '
+            f'latent_shape={tuple(int(dim) for dim in video_latent.shape)}'
+            f'{_host_after_video_vae_suffix}',
+            flush=True,
+        )
+        if release_video_inputs:
+            # This flag is used by the single-pass video_ref_edit path.  Once the
+            # VAE and sparse Qwen presentation frames exist, the full-resolution
+            # source and clamped RGB batch are no longer needed during TE encode.
+            if isinstance(ref_videos, list) and video_index < len(ref_videos):
+                ref_videos[video_index] = None
+            del frames, video_frames
         ref_blocks.append({
             'kind': ('video_audio' if paired_audio_t else 'video'),
             'latent_t': int(video_latent.shape[2]),
@@ -16992,8 +19069,8 @@ def _build_longmedia_hybrid_conditioning(
         cond = node_helpers.conditioning_set_values(cond, values)
     return cond, latent, {
         'keyframes': len(keyframes),
-        'image_refs': len(ref_images or []),
-        'video_refs': len(ref_videos or []),
+        'image_refs': image_ref_count,
+        'video_refs': video_ref_count,
         'audio_refs': len(ref_audios or []),
         'paired_video_audio_refs': sum(1 for a in paired_video_audios if a is not None),
         'native_guides': native_guides,
@@ -17377,9 +19454,33 @@ def _v85_parse_multiclip_json(raw, fallback_prompt, fallback_duration, *, min_cl
                     'start_seconds': emb_start,
                     'end_seconds': emb_end,
                 })
+        temporal_refmods = []
+        for raw_span in (item.get('director_refmod_spans') or []):
+            if not isinstance(raw_span, dict):
+                continue
+            refmod_id = str(raw_span.get('refmod_id') or '').strip()
+            path = str(raw_span.get('path') or '').strip()
+            try:
+                ref_start = max(0.0, float(raw_span.get('start_seconds') or 0.0))
+                ref_end = min(float(duration), float(raw_span.get('end_seconds') if raw_span.get('end_seconds') is not None else duration))
+                strength = max(0.0, min(1.0, float(raw_span.get('strength', 1.0) or 0.0)))
+            except Exception:
+                continue
+            if refmod_id and ref_end > ref_start + 1e-9 and strength > 0.0:
+                temporal_refmods.append({
+                    'refmod_id': refmod_id,
+                    'name': str(raw_span.get('name') or refmod_id),
+                    'path': path,
+                    'kind': str(raw_span.get('kind') or 'image'),
+                    'strength': strength,
+                    'start_seconds': ref_start,
+                    'end_seconds': ref_end,
+                    'order': int(raw_span.get('order') or len(temporal_refmods)),
+                })
         clips.append({
             'clip_id': clip_id, 'name': name, 'prompt': prompt, 'duration': duration, 'seed': seed,
             'director_embedding_spans': temporal_embeddings,
+            'director_refmod_spans': temporal_refmods,
             'director_conditioning_regions': [dict(r) for r in (item.get('director_conditioning_regions') or [])],
             'director_temporal_controls': [dict(r) for r in (item.get('director_temporal_controls') or []) if isinstance(r, dict)],
             'director_camera_spans': [dict(r) for r in (item.get('director_camera_spans') or []) if isinstance(r, dict)],
@@ -17674,7 +19775,7 @@ def _v107_attach_visible_lipsync_guide(positive, audio_vae, source_audio, plan, 
     )
     return out
 
-def _v85_preencode_multiclip_conditionings(clip, positive, plan, prompts, v329_native_refs=None, lip_sync_audio=None, audio_vae=None, director_clips=None, required_indices=None):
+def _v85_preencode_multiclip_conditionings(clip, positive, plan, prompts, v329_native_refs=None, lip_sync_audio=None, audio_vae=None, director_clips=None, required_indices=None, segment_refmod_blocks=None, segment_refmod_specs=None, segment_native_refs=None):
     import comfy.sampler_helpers
     total = len(prompts)
     required = set(range(total)) if required_indices is None else {
@@ -17687,13 +19788,32 @@ def _v85_preencode_multiclip_conditionings(clip, positive, plan, prompts, v329_n
     # working-set/file-cache pressure.  Keep tuple geometry stable but leave
     # skipped cached entries as None; the sampler never dereferences them.
     raw = [positive] + [None for _ in range(max(0, total - 1))]
+    refmod_blocks = list(segment_refmod_blocks or [() for _ in range(total)])
+    if len(refmod_blocks) < total:
+        refmod_blocks.extend([()] * (total - len(refmod_blocks)))
+    refmod_specs = list(segment_refmod_specs or [() for _ in range(total)])
+    if len(refmod_specs) < total:
+        refmod_specs.extend([()] * (total - len(refmod_specs)))
+    prompts = tuple(
+        _lm_append_positive_prompt_guidance(
+            prompt, _lm_refmod_concept_hint(refmod_specs[idx], log=False),
+        )
+        for idx, prompt in enumerate(prompts)
+    )
+    if total and raw[0] is not None and refmod_blocks[0]:
+        raw[0] = _v041_normalize_minimax_audio_ref_geometry(
+            _lm_attach_refmod_blocks(raw[0], refmod_blocks[0])
+        )
     encoded_indices = []
     for idx in range(1, total):
         if idx not in required:
             continue
         text = str(prompts[idx])
         if v329_native_refs is not None:
-            ref_items, ref_blocks = v329_native_refs
+            if segment_native_refs is not None and idx < len(segment_native_refs):
+                ref_items, ref_blocks = segment_native_refs[idx]
+            else:
+                ref_items, ref_blocks = v329_native_refs
             encoded = _v329_encode_continuation_native_refs(
                 clip, text, positive, plan, idx, ref_items, ref_blocks,
             )
@@ -17702,6 +19822,9 @@ def _v85_preencode_multiclip_conditionings(clip, positive, plan, prompts, v329_n
             encoded = _v57_attach_minimax_metadata(
                 encoded, positive, plan, idx, drop_image_refs=False,
             )
+        if refmod_blocks[idx]:
+            encoded = _lm_attach_refmod_blocks(encoded, refmod_blocks[idx])
+        encoded = _v041_normalize_minimax_audio_ref_geometry(encoded)
         if lip_sync_audio is not None:
             encoded = _v104_attach_native_lipsync_guide(
                 encoded, audio_vae, lip_sync_audio, plan, idx,
@@ -17731,7 +19854,9 @@ def _v85_preencode_multiclip_conditionings(clip, positive, plan, prompts, v329_n
         f'encoded={len(encoded_indices) + (1 if total else 0)}/{total}; '
         f'bootstrap_clip1=True; sampled_indices={[v + 1 for v in sorted(required)]}; '
         f'actually_encoded_indices={[1] + [v + 1 for v in encoded_indices] if total else []}; '
-        f'shared_native_refs=True; forced_target_audio={bool(getattr(plan, "lip_sync_target_audio_locked", False))}; '
+        f'shared_native_refs={segment_native_refs is None}; '
+        f'per_segment_video_refs={segment_native_refs is not None}; '
+        f'forced_target_audio={bool(getattr(plan, "lip_sync_target_audio_locked", False))}; '
         f'legacy_lip_sync_guide={bool(lip_sync_audio is not None)}',
         flush=True,
     )
@@ -18500,12 +20625,18 @@ def _lm_director_resolve_canvas(document: dict) -> dict:
     if source not in allowed:
         source = 'base_layer'
     try:
-        megapixel = float(doc.get('megapixel', 0.8))
+        nominal_megapixel = float(doc.get('megapixel', 0.8))
     except Exception:
-        megapixel = 0.8
-    if not math.isfinite(megapixel):
-        megapixel = 0.8
-    megapixel = max(0.1, min(8.0, megapixel))
+        nominal_megapixel = 0.8
+    if not math.isfinite(nominal_megapixel):
+        nominal_megapixel = 0.8
+    nominal_megapixel = max(0.1, min(8.0, nominal_megapixel))
+    render_mode = str(doc.get('render_mode') or 'final').strip().lower()
+    if render_mode not in {'preview', 'final'}:
+        render_mode = 'final'
+    render_scale = 0.5 if render_mode == 'preview' else 1.0
+    # Preview halves both dimensions, so its pixel budget is one quarter.
+    megapixel = max(0.025, min(8.0, nominal_megapixel * render_scale * render_scale))
 
     ratio_w = ratio_h = None
     basis = source
@@ -18573,6 +20704,9 @@ def _lm_director_resolve_canvas(document: dict) -> dict:
         'basis': basis,
         'resolution': str(doc.get('resolution') or '1920x1080'),
         'megapixel': megapixel,
+        'nominal_megapixel': nominal_megapixel,
+        'render_mode': render_mode,
+        'render_scale': render_scale,
         'aspect_ratio': ratio,
         'width': int(safe_w),
         'height': int(safe_h),
@@ -18625,10 +20759,9 @@ class MiniMaxH3LongMediaDirector:
             global_prompt=global_prompt,
             camera_compiler=_lm_director_camera_instruction,
         )
-        director_media = _lm_build_director_media_bundle(director_json)
         _document = director_plan.get('document') if isinstance(director_plan, dict) else None
-        _director_audio_mode = str((_document or {}).get('audio_mode') or 'auto')
         _document = _document if isinstance(_document, dict) else {}
+        _director_audio_mode = str(_document.get('audio_mode') or 'auto')
         _director_h3_mode = str((_document or {}).get('setup_h3_mode') or 'auto').strip().lower()
         if _director_h3_mode not in ('auto', 't2va', 'fl2va', 'ref2va', 'hybrid', 'video_ref_edit'):
             _director_h3_mode = 'auto'
@@ -18636,6 +20769,28 @@ class MiniMaxH3LongMediaDirector:
         if _director_timeline_mode not in ('auto', 'single', 'segmented', 'multiclip'):
             _director_timeline_mode = 'auto'
         _director_resolution = _lm_director_resolve_canvas(_document or {})
+        _safe_width, _safe_height, _ = _h3_safe_target_canvas(
+            int(_director_resolution.get('width') or 0),
+            int(_director_resolution.get('height') or 0),
+        )
+        _has_video_reference = any(
+            isinstance(subject, dict)
+            and str(subject.get('kind') or '').strip().title() == 'Video'
+            and isinstance(subject.get('media'), dict)
+            and bool(str(subject['media'].get('filename') or '').strip())
+            for subject in (_document.get('subjects') or [])
+        )
+        _scale_video_references = _director_h3_mode in ('video_ref_edit', 'ref2va', 'hybrid') or (
+            _director_h3_mode == 'auto' and _has_video_reference
+        )
+        director_media = _lm_build_director_media_bundle(
+            director_json,
+            clip_plan=clip_plan,
+            target_width=_safe_width,
+            target_height=_safe_height,
+            scale_video_references=_scale_video_references,
+            run_id=str(unique_id or ''),
+        )
         # Keep the browser-authored document, not only the compiler projection. The
         # compiler intentionally drops editor-only fields such as scene anchoring and
         # UI timeline preferences, but Restore Take must recover the authored state.
@@ -19744,6 +21899,55 @@ class MiniMaxH3LatentLabLongMediaSetup:
                 (director_media_cfg or {}).get('manifest') if isinstance(director_media_cfg, dict) else None,
                 (director_media_cfg or {}).get('frame_anchors') if isinstance(director_media_cfg, dict) else None,
             )
+
+        # Reject unsupported source-video/timeline combinations before the expensive
+        # full-batch media clamp. Previously this validation ran after the CPU video
+        # resize, so an invalid Director selection could spend tens of seconds before
+        # returning the same error.
+        _preflight_h3_mode = str(h3_mode or 'legacy').strip().lower()
+        _preflight_timeline_mode = str(timeline_mode or 'legacy').strip().lower()
+        if control_mode == 'director' and director_cfg is not None:
+            _preflight_h3_mode = str((director_settings_cfg or {}).get('h3_mode') or 'auto').strip().lower()
+            _preflight_timeline_mode = str((director_settings_cfg or {}).get('timeline_mode') or 'auto').strip().lower()
+            if director_native_character_replace_cfg is not None:
+                _preflight_h3_mode = 'video_ref_edit'
+                _preflight_timeline_mode = 'single'
+            else:
+                if _preflight_h3_mode == 'auto':
+                    _preflight_h3_mode = (
+                        'hybrid' if director_frame_anchor_cfg is not None
+                        else ('ref2va' if any(v is not None for v in videos) or any(v is not None for v in images) else 't2va')
+                    )
+                if _preflight_timeline_mode == 'auto':
+                    _preflight_clip_count = len(list((director_clip_plan or {}).get('clips') or []))
+                    _preflight_timeline_mode = 'multiclip' if _preflight_clip_count > 1 else 'single'
+        elif control_mode == 'legacy' or _preflight_h3_mode == 'legacy' or _preflight_timeline_mode == 'legacy':
+            _preflight_legacy_map = {
+                'hybrid_auto': ('auto', 'hybrid', 'single'),
+                'segmented_continuation': ('auto', 'ref2va', 'segmented'),
+                'multiclip': ('auto', 'ref2va', 'multiclip'),
+                'ref2va_full': ('auto', 'ref2va', 'single'),
+                'video_ref_edit': ('auto', 'video_ref_edit', 'single'),
+                'manual': ('manual', 'hybrid', 'segmented'),
+                'loop': ('auto', 'hybrid', 'single'),
+                'reconstruct': ('auto', 'video_ref_edit', 'segmented'),
+            }
+            _preflight_migrated = _preflight_legacy_map.get(
+                str(legacy_workflow_mode or 'hybrid_auto'), ('auto', 'hybrid', 'single')
+            )
+            if _preflight_h3_mode == 'legacy':
+                _preflight_h3_mode = _preflight_migrated[1]
+            if _preflight_timeline_mode == 'legacy':
+                _preflight_timeline_mode = _preflight_migrated[2]
+        if (
+            reconstruction_cfg is None
+            and _preflight_h3_mode == 'video_ref_edit'
+            and _preflight_timeline_mode not in ('single', 'segmented', 'multiclip', 'auto', 'legacy')
+        ):
+            raise ValueError(
+                "video_ref_edit supports single, segmented, or multiclip timelines; "
+                f"unsupported timeline_mode={_preflight_timeline_mode!r}."
+            )
         if lip_sync_enabled:
             if audio_1 is None:
                 raise ValueError("audio_mode='lip_sync' requires connected audio_1 as the forced target-audio clock.")
@@ -19787,6 +21991,34 @@ class MiniMaxH3LatentLabLongMediaSetup:
         # This applies uniformly to plain Setup sockets and Director-provided media.
         image_inputs = [image_1, image_2, image_3, image_4, image_5, image_6, image_7, image_8, image_9]
         video_inputs = [video_1, video_2, video_3]
+        director_video_reference_max_scales = [None, None, None]
+        if control_mode == 'director' and _preflight_h3_mode in ('video_ref_edit', 'ref2va', 'hybrid'):
+            _director_scale_clips = (director_clip_plan or {}).get('clips') or []
+            if isinstance(_director_scale_clips, (list, tuple)) and _director_scale_clips:
+                for _scale_clip in _director_scale_clips:
+                    if not isinstance(_scale_clip, dict):
+                        continue
+                    _slot_scales = _scale_clip.get('video_reference_scales')
+                    if isinstance(_slot_scales, dict):
+                        for _slot_index in range(3):
+                            _slot_value = _slot_scales.get(str(_slot_index + 1))
+                            if _slot_value is None:
+                                continue
+                            _slot_scale = _lm_video_reference_scale(_slot_value)
+                            _current_max = director_video_reference_max_scales[_slot_index]
+                            director_video_reference_max_scales[_slot_index] = (
+                                _slot_scale if _current_max is None else max(_current_max, _slot_scale)
+                            )
+                    else:
+                        _slot_scale = _lm_video_reference_scale(_scale_clip.get('video_reference_scale', 1.0))
+                        _current_max = director_video_reference_max_scales[0]
+                        director_video_reference_max_scales[0] = (
+                            _slot_scale if _current_max is None else max(_current_max, _slot_scale)
+                        )
+        director_video_reference_max_scales = [
+            1.0 if value is None else float(value)
+            for value in director_video_reference_max_scales
+        ]
         safe_image_slots = []
         h3_image_geometry = []
         for _img in image_inputs:
@@ -19798,17 +22030,50 @@ class MiniMaxH3LatentLabLongMediaSetup:
             h3_image_geometry.append(_report)
         safe_video_slots = []
         h3_video_geometry = []
-        for _vid in video_inputs:
+        for _video_slot_index, _vid in enumerate(video_inputs):
             if _vid is None:
                 safe_video_slots.append(None)
                 continue
-            _safe_vid, _report = _lm_clamp_media_to_target_geometry(_vid, width, height, kind='video')
+            _video_reference_scale = (
+                director_video_reference_max_scales[_video_slot_index]
+                if (
+                    control_mode == 'director'
+                    and _preflight_h3_mode in ('video_ref_edit', 'ref2va', 'hybrid')
+                )
+                else 1.0
+            )
+            _video_clamp_started = time.perf_counter()
+            _video_clamp_shape = tuple(int(dim) for dim in _vid.shape)
+            _video_clamp_bytes = int(_vid.numel() * _vid.element_size())
+            _lm_print(
+                '[MiniMaxH3 LongMedia][MEDIA CLAMP VIDEO] start '
+                f'frames={_video_clamp_shape[0]}; '
+                f'geometry={_video_clamp_shape[2]}x{_video_clamp_shape[1]}; '
+                f'dtype={_vid.dtype}; device={_vid.device}; '
+                f'rgb_bytes={_video_clamp_bytes / (1024.0 ** 3):.2f} GiB',
+                flush=True,
+            )
+            _safe_vid, _report = _lm_clamp_media_to_target_geometry(
+                _vid, width, height, kind='video', spatial_scale=_video_reference_scale,
+            )
+            _video_clamp_elapsed = time.perf_counter() - _video_clamp_started
+            _lm_print(
+                '[MiniMaxH3 LongMedia][MEDIA CLAMP VIDEO] done '
+                f'elapsed={_video_clamp_elapsed:.1f}s; '
+                f'geometry={int(_safe_vid.shape[2])}x{int(_safe_vid.shape[1])}; '
+                f'reference_scale={_video_reference_scale:.2f}; '
+                f'changed={bool((_report or {}).get("changed"))}',
+                flush=True,
+            )
             safe_video_slots.append(_safe_vid)
             h3_video_geometry.append(_report)
         (
             image_1, image_2, image_3, image_4, image_5, image_6, image_7, image_8, image_9,
         ) = safe_image_slots
         (video_1, video_2, video_3) = safe_video_slots
+        # The originals have been replaced by the bounded batches above.  Keep no
+        # extra Python references to full-resolution source video while conditioning.
+        del video_inputs
         images = [v for v in safe_image_slots if v is not None]
         videos = [v for v in safe_video_slots if v is not None]
         safe_images = list(images)
@@ -20004,6 +22269,15 @@ class MiniMaxH3LatentLabLongMediaSetup:
                 # injection is native-only or LongMedia-enhanced.
                 workflow_mode = 'hybrid_auto'
 
+        # Source-video edits can use the same native continuation clock as
+        # Segmented and MultiClip. Keep the target latent fresh and let each pass
+        # receive its own source-video window as a native Video reference.
+        windowed_video_ref_edit = bool(
+            reconstruction_cfg is None
+            and h3_mode == 'video_ref_edit'
+            and timeline_mode in ('segmented', 'multiclip')
+        )
+
         # Director owns the MultiClip plan when present. A separately connected Planner
         # remains available for non-Director workflows, but is ignored while the complete
         # Director contract is connected to avoid split ownership.
@@ -20103,12 +22377,6 @@ class MiniMaxH3LatentLabLongMediaSetup:
         elif h3_mode == 'video_ref_edit':
             if not videos:
                 raise ValueError("h3_mode='video_ref_edit' requires video_1 as the source clip.")
-            if timeline_mode != 'single' and reconstruction_cfg is None:
-                raise ValueError(
-                    "video_ref_edit currently owns a single source-video timeline. "
-                    "Segmented source-window editing remains the Video Reconstructor contract; "
-                    "choose timeline=single or connect the Reconstructor."
-                )
             if reconstruction_cfg is None and audio_mode in ('preserve', 'preserve_reference') and audio_1 is None:
                 raise ValueError(
                     f"h3_mode='video_ref_edit' with audio_mode={audio_mode!r} requires audio_1. "
@@ -20116,6 +22384,7 @@ class MiniMaxH3LatentLabLongMediaSetup:
                 )
             video_ref_edit_audio_sync = bool(
                 reconstruction_cfg is None
+                and timeline_mode == 'single'
                 and audio_1 is not None
                 and audio_mode in ('auto', 'preserve', 'preserve_reference')
             )
@@ -20216,13 +22485,13 @@ class MiniMaxH3LatentLabLongMediaSetup:
             plan,
             workflow_mode=workflow_mode,
             segmentation_active=bool(segmentation_active),
-            reconstruction_active=bool(workflow_mode == 'reconstruct'),
+            reconstruction_active=bool(workflow_mode == 'reconstruct' or windowed_video_ref_edit),
             reconstruction_strength=float(reconstruction_strength if workflow_mode == 'reconstruct' else 1.0),
             reconstruction_profile=str(reconstruction_profile),
             reconstruction_guidance=str(reconstruction_guidance if workflow_mode == 'reconstruct' else 'segmented_ref2va_edit'),
             reconstruction_resize_mode=str(reconstruction_resize_mode),
-            reconstruction_target_width=int(width if workflow_mode == 'reconstruct' else 0),
-            reconstruction_target_height=int(height if workflow_mode == 'reconstruct' else 0),
+            reconstruction_target_width=int(width if (workflow_mode == 'reconstruct' or windowed_video_ref_edit) else 0),
+            reconstruction_target_height=int(height if (workflow_mode == 'reconstruct' or windowed_video_ref_edit) else 0),
             loop_closure_enabled=bool(loop_closure_enabled),
             loop_closure_frames=max(2, int(loop_closure_frames)),
             loop_closure_strength=max(0.0, min(1.0, float(loop_closure_strength))),
@@ -20323,6 +22592,22 @@ class MiniMaxH3LatentLabLongMediaSetup:
                 'video_decode=single_continuous',
                 flush=True,
             )
+        if (
+            reconstruction_cfg is None
+            and h3_mode == 'video_ref_edit'
+            and timeline_mode in ('segmented', 'multiclip')
+            and video_1 is not None
+        ):
+            source_frames_on_target_clock = int(
+                math.floor(float(video_1.shape[0]) * float(FPS) / max(float(video_fps), 1e-6))
+            )
+            if int(plan.output_frames) > source_frames_on_target_clock + 1:
+                raise ValueError(
+                    'Windowed video_ref_edit cannot extend beyond the source video. '
+                    f'Timeline requests {int(plan.output_frames)} H3 frames, but video_1 provides '
+                    f'{source_frames_on_target_clock} frames at {float(video_fps):.3f} fps. '
+                    'Trim the timeline to the source duration or use the Video Reconstructor for continuation.'
+                )
         if h3_mode == 'video_ref_edit' and reconstruction_cfg is None and video_1 is not None:
             _source_video_seconds = float(video_1.shape[0]) / max(float(video_fps), 1e-6)
             _target_seconds = float(plan.total_duration)
@@ -20407,6 +22692,12 @@ class MiniMaxH3LatentLabLongMediaSetup:
         # future events (for example a 07 sec kiss inside a 5 sec segment), while
         # pass 1 saw shifted local events and therefore replayed the action.
         segment0_prompt = _v57_build_segment_prompt(effective_prompt, plan, 0)
+        segment0_prompt = _lm_append_positive_prompt_guidance(
+            segment0_prompt,
+            _lm_director_refmod_concept_hint(
+                director_plan_cfg, director_clip_plan, plan, 0,
+            ),
+        )
 
         if conditioning_mode == 'multiclip_ref2va':
             # Extender parity: all image/video/audio references are shared native
@@ -20689,7 +22980,7 @@ class MiniMaxH3LatentLabLongMediaSetup:
                 first_frame_latent_injected=(False if lip_sync_enabled else first_frame_latent_injected),
                 audio_vae=audio_vae, video_vae=vae,
             )
-        elif h3_mode == 'video_ref_edit' and reconstruction_cfg is None:
+        elif h3_mode == 'video_ref_edit' and reconstruction_cfg is None and timeline_mode == 'single':
             # v0.5.35: true source-AV edit ownership.  The previous single-pass
             # implementation fell through to the generic video_to_video target
             # path.  That path could preserve coarse source motion, but it did not
@@ -20705,6 +22996,13 @@ class MiniMaxH3LatentLabLongMediaSetup:
             # locked target audio provides the absolute generation clock.
             edit_ref_images = [img for img in safe_images if img is not None]
             edit_ref_videos = [vid for vid in videos if vid is not None]
+            # Transfer ownership of the bounded source batches to this local list.
+            # The helper drops each entry immediately after its VAE encode, before
+            # the large H3 text encoder is brought into residency.
+            videos.clear()
+            for _video_slot in range(len(safe_video_slots)):
+                safe_video_slots[_video_slot] = None
+            video_1 = video_2 = video_3 = None
 
             # Only source-preservation modes assert that Audio 1 is the original
             # soundtrack belonging to Video 1. lip_sync intentionally keeps Audio 1
@@ -20741,7 +23039,11 @@ class MiniMaxH3LatentLabLongMediaSetup:
                 ref_images=edit_ref_images, ref_videos=edit_ref_videos,
                 ref_video_audios=edit_ref_video_audios, ref_audios=edit_ref_audios,
                 first_latent_override=None, last_latent_override=None,
+                release_video_inputs=True,
             )
+            # The diagnostic artifacts contain sampled RGB frames; the active
+            # conditioning and latent already own the tensors needed downstream.
+            del _edit_artifacts
             setup_memory_events.append(
                 _setup_memory_isolation('after_video_ref_edit_paired_conditioning_release', unload_models=True)
             )
@@ -20783,6 +23085,144 @@ class MiniMaxH3LatentLabLongMediaSetup:
                 f'Video1+Audio1_paired={bool(pair_source_audio)}; '
                 f'standalone_audio_refs={len(edit_ref_audios)}; '
                 f'Audio1_role={hybrid_info.get("audio1_role")}; target=fresh_ref2va',
+                flush=True,
+            )
+
+        elif (
+            h3_mode == 'video_ref_edit'
+            and reconstruction_cfg is None
+            and timeline_mode in ('segmented', 'multiclip')
+        ):
+            # Windowed source-video edit for Director Segmented/MultiClip.  The
+            # first native conditioning payload is bounded to pass 0; runtime
+            # continuation replaces its Video latent with the matching global
+            # source window for every later pass.  Source pixels never become the
+            # target x0, so requested Picture replacements remain generative.
+            if video_1 is None or not videos:
+                raise ValueError(
+                    "h3_mode='video_ref_edit' requires video_1 as the source clip."
+                )
+            source_start = int(plan.segment_starts[0])
+            source_length = int(plan.segment_lengths[0])
+            source_frames = slice_video_segment(
+                video_1, source_start, source_length, video_fps,
+            )
+            source_reference_scale = _lm_director_video_reference_scale(director_clip_plan, 0)
+            source_reference_width, source_reference_height = _lm_video_reference_canvas_geometry(
+                int(width), int(height), source_reference_scale,
+            )
+            source_frames = _reconstruction_fit_source_frames(
+                source_frames, source_reference_width, source_reference_height, 'center_crop',
+            )
+            _lm_print(
+                '[MiniMaxH3 LongMedia][DIRECTOR VIDEO REF SCALE] '
+                f'clip=1; scale={source_reference_scale:.2f}; '
+                f'output={int(width)}x{int(height)}; '
+                f'reference={source_reference_width}x{source_reference_height}',
+                flush=True,
+            )
+            edit_ref_images = [img for img in safe_images if img is not None]
+            # Audio1 is locked into the generated AV target per source window and
+            # preserved as the final waveform.  It is deliberately not attached
+            # as a stale pass-0 Audio reference on later clips.
+            lock_source_audio = bool(
+                audio_1 is not None
+                and audio_mode in ('auto', 'preserve', 'preserve_reference')
+            )
+            source_audio_window = None
+            if lock_source_audio:
+                source_waveform_window, _ = _slice_source_audio_for_segment(
+                    audio_1, source_start, source_length,
+                )
+                source_audio_window = {
+                    'waveform': source_waveform_window,
+                    'sample_rate': int(audio_1['sample_rate']),
+                }
+            if lock_source_audio:
+                _windowed_audio_guidance = (
+                    'Preserve the source choreography, body movement, action timing and camera motion '
+                    'from the matching source-video window. Keep the rendered action synchronized '
+                    'with the original soundtrack, which remains unchanged in the target timeline.'
+                )
+                effective_prompt = _lm_append_before_trailing_h3_embeddings(
+                    effective_prompt, _windowed_audio_guidance,
+                )
+                segment0_prompt = _lm_append_before_trailing_h3_embeddings(
+                    segment0_prompt, _windowed_audio_guidance,
+                )
+                if multiclip_clips:
+                    multiclip_clips = tuple({
+                        **dict(clip_spec),
+                        'prompt': _lm_append_before_trailing_h3_embeddings(
+                            clip_spec.get('prompt') or '', _windowed_audio_guidance,
+                        ),
+                    } for clip_spec in multiclip_clips)
+            setup_memory_events.append(
+                _setup_memory_isolation('before_windowed_video_ref_edit_conditioning', unload_models=True)
+            )
+            positive, target_av, hybrid_info, _edit_artifacts = _build_longmedia_hybrid_conditioning(
+                clip=clip, vae=vae, audio_vae=audio_vae,
+                prompt=segment0_prompt, width=width, height=height,
+                length=source_length, resolution_mode=resolution_mode,
+                first_frame=None, last_frame=None,
+                ref_images=edit_ref_images, ref_videos=[source_frames],
+                ref_video_audios=[source_audio_window], ref_audios=[],
+                first_latent_override=None, last_latent_override=None,
+            )
+            # Continuation prompt encoding needs the sparse Qwen video frames
+            # from each source window as well as the VAE latent block. Retain
+            # both presentation items and reference blocks until per-clip
+            # conditioning is pre-encoded below.
+            hybrid_artifacts = _edit_artifacts
+            if lock_source_audio:
+                source_audio_latent, _ = _hybrid_encode_ref_audio(
+                    audio_vae, source_audio_window,
+                )
+                target_video, target_audio = unpack_av_samples(target_av)
+                target_audio = _fit_stream(
+                    source_audio_latent, target_audio, 'audio', 'crop_pad', 'start',
+                )
+                target_av['samples'] = NestedTensor((target_video, target_audio))
+                target_av['noise_mask'] = NestedTensor((
+                    torch.ones((1, 1, target_video.shape[2], 1, 1), dtype=torch.float32),
+                    torch.zeros((1, 1, 1, target_audio.shape[-1]), dtype=torch.float32),
+                ))
+            setup_memory_events.append(
+                _setup_memory_isolation('after_windowed_video_ref_edit_conditioning_release', unload_models=True)
+            )
+            plan = _dc_replace(
+                plan,
+                mode='multiclip',
+                source_video=video_1,
+                source_audio=(audio_1 if lock_source_audio else None),
+                reference_audio=None,
+                final_audio_override=(audio_1 if lock_source_audio else None),
+                final_audio_track_count=(1 if lock_source_audio else 0),
+                reconstruction_active=True,
+                reconstruction_strength=float(reconstruction_strength),
+                reconstruction_profile=str(reconstruction_profile),
+                reconstruction_resize_mode='center_crop',
+                reconstruction_target_width=int(width),
+                reconstruction_target_height=int(height),
+                reconstruction_audio_locked=bool(lock_source_audio),
+                audio_vae=audio_vae,
+                video_vae=vae,
+            )
+            hybrid_info.update({
+                'video_ref_edit_windowed': True,
+                'timeline_mode': str(timeline_mode),
+                'source_window_start_frame': source_start,
+                'source_window_length_frames': source_length,
+                'picture_replacement_refs': len(edit_ref_images),
+                'source_audio_locked_per_window': lock_source_audio,
+                'target_video_policy': 'fresh_latent_native_source_window_ref',
+            })
+            _lm_print(
+                '[MiniMaxH3 LongMedia][VIDEO EDIT WINDOWED TIMELINE] '
+                f'timeline={timeline_mode}; passes={int(plan.passes)}; '
+                f'source_frames={int(video_1.shape[0])}; first_window={source_start}..'
+                f'{source_start + source_length}; Pictures={len(edit_ref_images)}; '
+                f'Audio1_locked={lock_source_audio}; each_pass_gets_its_source_window=True',
                 flush=True,
             )
 
@@ -21117,9 +23557,11 @@ class MiniMaxH3LatentLabLongMediaSetup:
         # for each pass while the native Ref2VA metadata originated globally.
         positive = _v041_normalize_minimax_audio_ref_geometry(positive)
         v329_native_refs = None
+        v329_segment_native_refs = None
         if (
             (conditioning_mode in ('hybrid_first_frame', 'hybrid_first_last', 'multiclip_ref2va')
-             or workflow_mode == 'reconstruct')
+             or workflow_mode == 'reconstruct'
+             or windowed_video_ref_edit)
             and hybrid_artifacts is not None
             and (hybrid_artifacts.get('ref_items') is not None)
         ):
@@ -21130,11 +23572,41 @@ class MiniMaxH3LatentLabLongMediaSetup:
                 hybrid_artifacts['ref_items'],
                 hybrid_artifacts['ref_blocks'],
             )
+            if windowed_video_ref_edit and getattr(plan, 'mode', None) == 'multiclip':
+                base_items, base_blocks = v329_native_refs
+                video_item_index = next(
+                    (i for i, item in enumerate(base_items)
+                     if isinstance(item, dict) and str(item.get('type') or '') == 'video'),
+                    None,
+                )
+                if video_item_index is None:
+                    raise RuntimeError(
+                        'Windowed video_ref_edit conditioning is missing its native Video presentation item.'
+                    )
+                per_segment = []
+                for segment_index, (segment_start, segment_length) in enumerate(
+                    zip(plan.segment_starts, plan.segment_lengths)
+                ):
+                    window = slice_video_segment(
+                        video_1, int(segment_start), int(segment_length), video_fps,
+                    )
+                    window = _reconstruction_fit_source_frames(
+                        window, int(width), int(height), 'center_crop',
+                    )
+                    window_item = _lm_video_ref_presentation_item(window, int(segment_length))
+                    items = [dict(item) for item in base_items]
+                    items[video_item_index] = window_item
+                    per_segment.append((tuple(items), base_blocks))
+                v329_segment_native_refs = tuple(per_segment)
+                _lm_print(
+                    '[MiniMaxH3 LongMedia][VIDEO EDIT WINDOWED PRESENTATION] '
+                    f'clip_windows={len(v329_segment_native_refs)}; '
+                    'Qwen video frames and VAE video/audio latents share the same source window per clip',
+                    flush=True,
+                )
 
-        # v0.6.15: compile Director EMBEDDING clips to single-pass temporal
-        # attention routing.  No hidden sub-clips are created: one MAIN clip remains
-        # one H3 sampling pass.  The native embedding tokens stay at the prompt tail
-        # and are gated to video-query rows by local frame range inside the DiT.
+        # Resolve the selective-conditioning scope before RefMod source loading.
+        # This keeps cached prefix/suffix TAKEs free of redundant RefMod I/O/VAE.
         _director_required_conditioning_indices = None
         if getattr(plan, 'mode', None) == 'multiclip' and multiclip_clips and director_cfg is not None:
             _regen_mode = str((director_regeneration_cfg or {}).get('mode') or 'none').strip().lower()
@@ -21152,13 +23624,101 @@ class MiniMaxH3LatentLabLongMediaSetup:
                     _director_required_conditioning_indices = _selected
             if _director_required_conditioning_indices is not None and bool(getattr(plan, 'loop_closure_enabled', False)):
                 _director_required_conditioning_indices.add(max(0, len(multiclip_clips) - 1))
-            if _director_required_conditioning_indices is not None:
+
+        # Director RefMods are independent unlabelled native minimax_refs blocks.
+        # They do not alter text tokens and they never replace TAKE continuation.
+        _segment_refmod_blocks = tuple(() for _ in range(int(getattr(plan, 'passes', 1))))
+        _segment_refmod_specs = tuple(() for _ in range(int(getattr(plan, 'passes', 1))))
+        if director_cfg is not None:
+            _director_document = (
+                (director_plan_cfg or {}).get('document')
+                if isinstance((director_plan_cfg or {}).get('document'), dict) else {}
+            )
+            _record_by_id = {
+                str(item.get('refmod_id') or ''): item
+                for item in (_director_document.get('refmods') or []) if isinstance(item, dict)
+            }
+            if _record_by_id:
+                _positive_meta_for_refmods = _conditioning_meta(positive[0]) if positive else {}
+                _base_ref_count = len((_positive_meta_for_refmods or {}).get('minimax_refs') or [])
+                if v329_native_refs is not None:
+                    _base_ref_count = max(_base_ref_count, len(v329_native_refs[1]))
+                _block_rows = []
+                _spec_rows = []
+                _direct_clips_for_refmods = list((director_clip_plan or {}).get('clips') or [])
+                for _seg_idx in range(int(getattr(plan, 'passes', 1))):
+                    if (_director_required_conditioning_indices is not None
+                            and int(_seg_idx) not in _director_required_conditioning_indices):
+                        # Selective regeneration must not load or VAE-encode RefMods
+                        # for cached clips whose conditioning is intentionally reused.
+                        _block_rows.append(tuple())
+                        _spec_rows.append(tuple())
+                        continue
+                    if workflow_mode == 'multiclip' and _seg_idx < len(multiclip_clips):
+                        _clip_for_refmod = multiclip_clips[_seg_idx]
+                        _raw_spans = list(_clip_for_refmod.get('director_refmod_spans') or [])
+                        _authored_duration = float(_clip_for_refmod.get('duration') or 0.0)
+                    else:
+                        _clip_for_refmod = _direct_clips_for_refmods[0] if _direct_clips_for_refmods else {}
+                        _global_spans = list(_clip_for_refmod.get('director_refmod_spans') or [])
+                        _context_start = int(plan.segment_starts[_seg_idx])
+                        _context_stop = _context_start + int(plan.segment_lengths[_seg_idx])
+                        _raw_spans = []
+                        for _span in _global_spans:
+                            if not isinstance(_span, dict):
+                                continue
+                            _a = int(math.floor(float(_span.get('start_seconds') or 0.0) * FPS))
+                            _b = int(math.ceil(float(_span.get('end_seconds') or 0.0) * FPS))
+                            _la, _lb = max(_context_start, _a), min(_context_stop, _b)
+                            if _lb <= _la:
+                                continue
+                            _localized = dict(_span)
+                            _localized['start_seconds'] = float(_la - _context_start) / float(FPS)
+                            _localized['end_seconds'] = float(_lb - _context_start) / float(FPS)
+                            _raw_spans.append(_localized)
+                        _authored_duration = float(plan.segment_lengths[_seg_idx]) / float(FPS)
+                    _blocks, _raw_specs = _lm_refmod_blocks_for_segment(
+                        _record_by_id, _raw_spans, _director_document,
+                        director_media_cfg or {}, director_project_id, vae, audio_vae,
+                    ) if _raw_spans else ([], [])
+                    _localized_specs = _lm_localize_refmod_specs(
+                        _raw_specs, plan=plan, segment_index=_seg_idx,
+                        authored_duration=_authored_duration,
+                        native_ref_count=_base_ref_count,
+                    )
+                    _block_rows.append(tuple(_blocks))
+                    _spec_rows.append(tuple(_localized_specs))
+                _segment_refmod_blocks = tuple(_block_rows)
+                _segment_refmod_specs = tuple(_spec_rows)
+                _refmod_windows = [
+                    [
+                        f"{str(spec.get('refmod_id') or '')}:"
+                        f"{int(spec.get('start_frame', 0) or 0)}-"
+                        f"{int(spec.get('end_frame', 0) or 0)}"
+                        for spec in row
+                    ]
+                    for row in _segment_refmod_specs
+                ]
                 _lm_print(
-                    '[MiniMaxH3 LongMedia][DIRECTOR SETUP CONDITIONING SCOPE] '
-                    f'mode={_regen_mode}; required_clips={[i + 1 for i in sorted(_director_required_conditioning_indices)]}; '
-                    'cached_clips_skip_TE_encode=True',
+                    '[MiniMaxH3 LongMedia][DIRECTOR REFMOD PLAN] '
+                    f'workflow={workflow_mode}; passes={len(_segment_refmod_blocks)}; '
+                    f'blocks={[len(v) for v in _segment_refmod_blocks]}; '
+                    f'windows={_refmod_windows}; '
+                    'native_minimax_refs=True; text_tokens_unchanged=True; TAKE_continuity_unchanged=True',
                     flush=True,
                 )
+
+        # v0.6.15: compile Director EMBEDDING clips to single-pass temporal
+        # attention routing.  No hidden sub-clips are created: one MAIN clip remains
+        # one H3 sampling pass.  The native embedding tokens stay at the prompt tail
+        # and are gated to video-query rows by local frame range inside the DiT.
+        if _director_required_conditioning_indices is not None:
+            _lm_print(
+                '[MiniMaxH3 LongMedia][DIRECTOR SETUP CONDITIONING SCOPE] '
+                f'mode={_regen_mode}; required_clips={[i + 1 for i in sorted(_director_required_conditioning_indices)]}; '
+                'cached_clips_skip_TE_and_RefMod_encode=True',
+                flush=True,
+            )
 
         if getattr(plan, 'mode', None) == 'multiclip' and multiclip_clips:
             _temporal_embedding_specs = []
@@ -21214,13 +23774,23 @@ class MiniMaxH3LatentLabLongMediaSetup:
                     clip, positive, plan, mc_prompts, v329_native_refs=v329_native_refs,
                     lip_sync_audio=None, audio_vae=audio_vae, director_clips=multiclip_clips,
                     required_indices=_director_required_conditioning_indices,
+                    segment_refmod_blocks=_segment_refmod_blocks,
+                    segment_refmod_specs=_segment_refmod_specs,
+                    segment_native_refs=v329_segment_native_refs,
                 )
-                plan = _dc_replace(plan, segment_temporal_embeddings=regional_specs)
+                plan = _dc_replace(
+                    plan,
+                    segment_temporal_embeddings=regional_specs,
+                    segment_refmods=_segment_refmod_specs,
+                )
             else:
                 segment_positive_conditionings, segment_prompt_summaries = _v57_preencode_segment_conditionings(
                     clip, effective_prompt, positive, plan, v329_native_refs=v329_native_refs,
                     lip_sync_audio=None, audio_vae=audio_vae,
+                    segment_refmod_blocks=_segment_refmod_blocks,
+                    segment_refmod_specs=_segment_refmod_specs,
                 )
+                plan = _dc_replace(plan, segment_refmods=_segment_refmod_specs)
             plan = _dc_replace(
                 plan,
                 segment_positive_conditionings=segment_positive_conditionings,
@@ -21235,6 +23805,7 @@ class MiniMaxH3LatentLabLongMediaSetup:
                 'duration': float(item.get('duration') or 0.0),
                 'source_in': float(item.get('director_source_in_seconds') or 0.0),
                 'source_out': float(item.get('director_source_out_seconds') or 0.0),
+                'video_reference_scale': _lm_video_reference_scale(item.get('video_reference_scale', 1.0)),
                 'subject_ids': tuple(str(v) for v in (item.get('director_subject_ids') or [])),
                 'cast_subject_id': (str(item.get('director_cast_subject_id') or '').strip() or None),
                 'camera': dict(item.get('camera') or {}),
@@ -21243,6 +23814,7 @@ class MiniMaxH3LatentLabLongMediaSetup:
                 'conditioning_regions': [dict(r) for r in (item.get('director_conditioning_regions') or [])],
                 'temporal_controls': [dict(r) for r in (item.get('director_temporal_controls') or [])],
                 'embedding_spans': [dict(r) for r in (item.get('director_embedding_spans') or [])],
+                'refmod_spans': [dict(r) for r in (item.get('director_refmod_spans') or [])],
                 'base_kind': str(item.get('director_base_kind') or 'generated'),
                 'media_subject_id': (str(item.get('director_media_subject_id') or '').strip() or None),
                 'audio_continuation': str(item.get('director_audio_continuation') or 'AUTO').upper(),
@@ -21395,7 +23967,8 @@ class MiniMaxH3LatentLabLongMediaSetup:
             'source_audio_target_locked': bool(getattr(plan, 'lip_sync_target_audio_locked', False)),
             'audio_output_bypass': bool(getattr(plan, 'final_audio_override', None) is not None),
             'workflow_mode': workflow_mode,
-            'reconstruction_active': bool(workflow_mode == 'reconstruct'),
+            'reconstruction_active': bool(getattr(plan, 'reconstruction_active', workflow_mode == 'reconstruct')),
+            'video_ref_edit_windowed': bool(windowed_video_ref_edit),
             'reconstruction_profile': (reconstruction_profile if workflow_mode == 'reconstruct' else None),
             'reconstruction_strength': (float(reconstruction_strength) if workflow_mode == 'reconstruct' else None),
             'conditioning_mode': conditioning_mode,
@@ -23385,7 +25958,7 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
     def _run_windowed_refine(
         self, *, guider, segment_guider, model_patcher, device, sampler, refine_sigmas,
         source_native, effective_seed, plan, segment_index, latent_preview,
-        geometry_changed=False, windowed_refine=True,
+        geometry_changed=False, windowed_refine=True, frozen_video_prefix_tokens=0,
     ):
         """Execute internal video Sampler #2; audio remains exact Stage-1 context.
 
@@ -23444,6 +26017,13 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
         frozen_audio_noise = torch.zeros_like(full_noise_audio)
 
         latent_t = int(source_video.shape[2])
+        frozen_video_prefix_tokens = int(frozen_video_prefix_tokens)
+        if frozen_video_prefix_tokens < 0 or frozen_video_prefix_tokens >= latent_t:
+            if frozen_video_prefix_tokens != 0:
+                raise ValueError(
+                    'Internal Sampler #2 frozen MultiClip prefix must be shorter than the video latent: '
+                    f'prefix={frozen_video_prefix_tokens}, latent_t={latent_t}.'
+                )
         lat_h = int(source_video.shape[3])
         lat_w = int(source_video.shape[4])
         packed_video_rows = int(latent_t * ((lat_h + 1) // 2) * ((lat_w + 1) // 2))
@@ -23497,6 +26077,10 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
         per_segment_specs = getattr(plan, 'segment_temporal_embeddings', None)
         if per_segment_specs and int(segment_index) < len(per_segment_specs):
             segment_specs = tuple(dict(item) for item in (per_segment_specs[int(segment_index)] or ()))
+        segment_refmod_specs = ()
+        per_segment_refmods = getattr(plan, 'segment_refmods', None)
+        if per_segment_refmods and int(segment_index) < len(per_segment_refmods):
+            segment_refmod_specs = tuple(dict(item) for item in (per_segment_refmods[int(segment_index)] or ()))
         timeline = _segment_timeline_contract(plan, int(segment_index))
         context_start = int(timeline['context_start'])
 
@@ -23513,19 +26097,25 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                     '[MiniMaxH3 LongMedia][INTERNAL SAMPLER2 EXACT] '
                     f'unit={int(segment_index)+1}; rows={packed_video_rows}; budget={int(full_row_budget)}; '
                     f'steps={int(refine_sigmas.numel())-1}; noise=video_only_stock_noise; mask=audio_frozen; '
+                    f'frozen_refined_prefix_tokens={frozen_video_prefix_tokens}; '
                     f'dropped_geometry_video_keyframes={int(dropped_video_keyframes)}; '
                     'input=stage1_final_av; sigmas=Refine_Sigmas; audio_passthrough=stage1_exact; post_geometry_merge=False',
                     flush=True,
                 )
                 # Preserve Stage-1 audio as a frozen AV context stream.  The model
                 # can still attend to it while only video receives Refine-Sigma noise.
+                if frozen_video_prefix_tokens:
+                    full_noise_video[:, :, :frozen_video_prefix_tokens] = 0
                 exact_noise = comfy.nested_tensor.NestedTensor((full_noise_video, frozen_audio_noise))
                 self._validate_native_stream_devices(
                     exact_noise.unbind(), context='internal_sampler2_exact_noise'
                 )
+                exact_video_mask = torch.ones_like(source_video, dtype=torch.float32)
+                _hires_freeze_video_prefix_mask(
+                    exact_video_mask, frozen_tokens=frozen_video_prefix_tokens,
+                )
                 exact_mask = comfy.nested_tensor.NestedTensor((
-                    torch.ones_like(source_video, dtype=torch.float32),
-                    torch.zeros_like(source_audio, dtype=torch.float32),
+                    exact_video_mask, torch.zeros_like(source_audio, dtype=torch.float32),
                 ))
                 refined = self._run_stock_sample_with_reused_lifecycle(
                     guider, device, exact_noise, source_native, sampler, refine_sigmas_device,
@@ -23564,6 +26154,11 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                     refined_video = refined_video.to(
                         device=source_video.device, dtype=source_video.dtype
                     )
+                if frozen_video_prefix_tokens:
+                    with torch.no_grad():
+                        refined_video[:, :, :frozen_video_prefix_tokens].copy_(
+                            source_video[:, :, :frozen_video_prefix_tokens]
+                        )
                 result = comfy.nested_tensor.NestedTensor((refined_video, source_audio))
                 self._validate_native_stream_devices(
                     result.unbind(), context='internal_sampler2_exact_return'
@@ -23625,6 +26220,7 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                     f'unit={int(segment_index)+1}; rows={packed_video_rows}; budget={int(full_row_budget)}; '
                     f'video_t={latent_t}; windows={len(windows)}; chunk_tokens={int(chunk_tokens)}; '
                     f'overlap_tokens={int(overlap_tokens)}; steps={int(refine_sigmas.numel())-1}; '
+                    f'frozen_refined_prefix_tokens={frozen_video_prefix_tokens}; '
                     f'noise=video_only_stock_noise_sliced; mask=bidirectional_context_guard_audio_frozen; input=stage1_final_av; '
                     f'dropped_geometry_video_keyframes={int(dropped_video_keyframes)}; post_geometry_merge=False; '
                     'audio_passthrough=stage1_exact; window_merge=overlap_save_core_only',
@@ -23709,6 +26305,11 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                     local_video_mask = torch.zeros_like(local_video, dtype=torch.float32)
                     if owner_stop > owner_start:
                         local_video_mask[:, :, prefix_video_tokens:int(local_video.shape[2]) - suffix_video_tokens if suffix_video_tokens else int(local_video.shape[2])] = 1.0
+                    _hires_freeze_video_prefix_mask(
+                        local_video_mask,
+                        frozen_tokens=frozen_video_prefix_tokens,
+                        global_start_token=v0,
+                    )
                     # Audio is frozen for the entire local solve. It remains visible
                     # to H3 as context but is never part of the denoised owner core.
                     local_audio_mask = torch.zeros_like(local_audio, dtype=torch.float32)
@@ -23729,6 +26330,17 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                         window_frame_count=int(window.frame_count),
                     )
                     _lm_apply_temporal_specs_runtime_option(guider, local_specs)
+                    local_refmod_specs = _lm_slice_refmod_specs_for_hires_refine(
+                        segment_refmod_specs, window_start_frame=int(window.frame_start),
+                        window_frame_count=int(window.frame_count),
+                    )
+                    local_to = guider.model_options.setdefault('transformer_options', {})
+                    if local_refmod_specs:
+                        local_to['latentlab_h3_refmod_specs'] = local_refmod_specs
+                        local_to['latentlab_h3_refmod_single_pass'] = True
+                    else:
+                        local_to.pop('latentlab_h3_refmod_specs', None)
+                        local_to.pop('latentlab_h3_refmod_single_pass', None)
 
                     callback_state = {}
                     callback = latent_preview.prepare_callback(
@@ -23776,6 +26388,11 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                         comfy.model_management.soft_empty_cache()
                     except Exception:
                         pass
+                if frozen_video_prefix_tokens:
+                    with torch.no_grad():
+                        video_accumulator[:, :, :frozen_video_prefix_tokens].copy_(
+                            source_video[:, :, :frozen_video_prefix_tokens].to(video_accumulator)
+                        )
                 result = comfy.nested_tensor.NestedTensor((video_accumulator, audio_accumulator))
                 _restore_guider_state()
                 return result
@@ -23823,6 +26440,46 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
         passes = max(1, int(getattr(plan, 'passes', 1) or 1))
         segmentation_active = bool(getattr(plan, 'segmentation_active', False))
         workflow_mode = str(getattr(plan, 'workflow_mode', '') or '')
+        director_clip_ids = tuple(getattr(plan, 'director_clip_ids', None) or ())
+        director_media_indices = {i for i in range(passes) if _lm_director_is_media(plan, i)}
+        if len(director_clip_ids) == passes and director_media_indices == set(range(passes)):
+            segment_lengths = tuple(getattr(plan, 'segment_lengths', None) or ())
+            if len(segment_lengths) != passes:
+                raise RuntimeError(
+                    'Director MEDIA-only timeline has no matching per-clip frame lengths: '
+                    f'passes={passes}, lengths={len(segment_lengths)}.'
+                )
+            for index in range(passes):
+                media = _lm_director_external_media(plan, index)
+                if not isinstance(media, dict):
+                    raise RuntimeError(f'Director MEDIA block {index + 1} is missing runtime media.')
+                _lm_director_media_visible_window(media)
+            media_only_output = dict(initial_av)
+            media_only_output.pop('noise_mask', None)
+            media_only_output['_lm_per_clip_native_video_decode'] = True
+            media_only_output['_lm_segment_latents'] = [
+                {'_lm_external_media_segment': True, '_lm_media_index': index}
+                for index in range(passes)
+            ]
+            media_only_output['_lm_segment_lengths'] = [int(value) for value in segment_lengths]
+            media_only_output['_lm_segment_hidden_overlaps'] = [0] * passes
+            media_only_output['_lm_segment_workflow'] = workflow_mode
+            _lm_print(
+                '[MiniMaxH3 LongMedia][DIRECTOR MEDIA-ONLY BYPASS] '
+                f'clips={passes}; diffusion_calls=0; sampler_model_lifecycle=0; '
+                'immutable_media_direct_to_final_assembly=True',
+                flush=True,
+            )
+            return media_only_output, json.dumps({
+                'runtime': 'director_media_only_passthrough',
+                'passes': passes,
+                'completed_segments': passes,
+                'sampled_segments': 0,
+                'prepare_sampling_calls': 0,
+                'pre_run_calls': 0,
+                'cleanup_calls': 0,
+                'immutable_media_passthrough': True,
+            }, sort_keys=True)
         motion_repair_mode = _normalize_motion_repair_mode(getattr(plan, 'motion_repair_mode', 'off'))
         motion_repair_reports = []
 
@@ -25146,6 +27803,7 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                     else:
                         base_continuation_output = self._unpack_segment_output(local, sampled_packed, latent_shapes)
 
+                    frozen_refined_prefix_tokens = 0
                     if bool(latent_hires_enabled):
                         streams = list(lowres_x0.unbind())
                         if len(streams) != 2:
@@ -25169,6 +27827,45 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                             hires_video, str(latent_hires_model), float(latent_hires_scale),
                             str(latent_hires_precision), device, int(latent_hires_align),
                         )
+                        if (
+                            bool(refine_enabled)
+                            and int(refine_steps_effective) > 0
+                            and getattr(plan, 'mode', None) == 'multiclip'
+                            and int(segment_index) > 0
+                            and int(segment_index) - 1 not in director_media_indices
+                        ):
+                            overlap_frames = int(getattr(plan, 'overlap_frames', 0) or 0)
+                            frozen_refined_prefix_tokens = (
+                                int(video_latent_t(overlap_frames)) if overlap_frames > 0 else 0
+                            )
+                            if frozen_refined_prefix_tokens:
+                                if previous_segment is None:
+                                    raise RuntimeError(
+                                        'MultiClip Latent Hi-Res Refine lost the preceding display latent '
+                                        f'for clip {int(segment_index) + 1} boundary context.'
+                                    )
+                                previous_refined_video, _previous_refined_audio = unpack_av_samples(previous_segment)
+                                try:
+                                    frozen_refined_prefix_tokens = _hires_inherit_refined_video_prefix(
+                                        hires_video,
+                                        previous_refined_video,
+                                        frozen_refined_prefix_tokens,
+                                    )
+                                except (TypeError, ValueError) as exc:
+                                    raise RuntimeError(
+                                        'MultiClip Latent Hi-Res Refine cannot inherit the preceding '
+                                        f'clip boundary context for clip {int(segment_index) + 1}: {exc}'
+                                    ) from exc
+                                _lm_print(
+                                    '[MiniMaxH3 LongMedia][MULTICLIP HIRES REFINER CONTEXT] '
+                                    f'unit={int(segment_index) + 1}/{int(passes)}; '
+                                    f'overlap_frames={overlap_frames}; '
+                                    f'frozen_refined_prefix_tokens={frozen_refined_prefix_tokens}; '
+                                    f'previous_device={previous_refined_video.device}; '
+                                    f'target_device={hires_video.device}; '
+                                    'source=previous_refined_display_tail; audio=unchanged',
+                                    flush=True,
+                                )
                         sampled_native = comfy.nested_tensor.NestedTensor((hires_video, hires_audio))
                         latent_shapes = [x.shape for x in sampled_native.unbind()]
                         sampled_packed, _ = self._pack_native_streams(sampled_native.unbind(), context='latent_hires_stage2_input')
@@ -25203,6 +27900,7 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                             latent_preview=latent_preview,
                             geometry_changed=bool(latent_hires_enabled),
                             windowed_refine=bool(windowed_refine),
+                            frozen_video_prefix_tokens=int(frozen_refined_prefix_tokens),
                         )
                         sampled_packed, _ = self._pack_native_streams(sampled_native.unbind(), context='internal_sampler2_output')
                         latent_shapes = [x.shape for x in sampled_native.unbind()]
@@ -25477,6 +28175,8 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                                             _mr_transformer_options = None
                                             _mr_prev_temporal_specs = None
                                             _mr_prev_single_pass = None
+                                            _mr_prev_refmod_specs = None
+                                            _mr_prev_refmod_single_pass = None
                                             if isinstance(getattr(guider, 'model_options', None), dict):
                                                 _mr_transformer_options = guider.model_options.setdefault('transformer_options', {})
                                                 _mr_prev_temporal_specs = _mr_transformer_options.get('latentlab_h3_temporal_embeddings')
@@ -25491,6 +28191,18 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                                                 else:
                                                     _mr_transformer_options.pop('latentlab_h3_temporal_embeddings', None)
                                                     _mr_transformer_options.pop('latentlab_h3_temporal_embedding_single_pass', None)
+                                                _mr_prev_refmod_specs = _mr_transformer_options.get('latentlab_h3_refmod_specs')
+                                                _mr_prev_refmod_single_pass = _mr_transformer_options.get('latentlab_h3_refmod_single_pass')
+                                                _mr_local_refmod_specs = _lm_slice_refmod_specs_for_motion_repair(
+                                                    _mr_prev_refmod_specs, _mr_dilation,
+                                                    source_frame_offset=int(_mr_source_frame_offset),
+                                                )
+                                                if _mr_local_refmod_specs:
+                                                    _mr_transformer_options['latentlab_h3_refmod_specs'] = _mr_local_refmod_specs
+                                                    _mr_transformer_options['latentlab_h3_refmod_single_pass'] = True
+                                                else:
+                                                    _mr_transformer_options.pop('latentlab_h3_refmod_specs', None)
+                                                    _mr_transformer_options.pop('latentlab_h3_refmod_single_pass', None)
                                             _mr_x0 = {}
                                             _mr_callback = latent_preview.prepare_callback(
                                                 model_patcher,
@@ -25532,6 +28244,14 @@ class MiniMaxH3LatentLabUnifiedRuntimeSampler:
                                                         _mr_transformer_options['latentlab_h3_temporal_embedding_single_pass'] = _mr_prev_single_pass
                                                     else:
                                                         _mr_transformer_options.pop('latentlab_h3_temporal_embedding_single_pass', None)
+                                                    if _mr_prev_refmod_specs is not None:
+                                                        _mr_transformer_options['latentlab_h3_refmod_specs'] = _mr_prev_refmod_specs
+                                                    else:
+                                                        _mr_transformer_options.pop('latentlab_h3_refmod_specs', None)
+                                                    if _mr_prev_refmod_single_pass is not None:
+                                                        _mr_transformer_options['latentlab_h3_refmod_single_pass'] = _mr_prev_refmod_single_pass
+                                                    else:
+                                                        _mr_transformer_options.pop('latentlab_h3_refmod_single_pass', None)
                                                 if _mr_original_runtime_conds is _mr_runtime_conds_missing:
                                                     # Preserve the exact caller-visible attribute contract:
                                                     # if ComfyUI removed scratch conds after pass 1, leave
@@ -27119,12 +29839,17 @@ class MiniMaxH3LatentLabLongMediaDecode:
         video, audio = unpack_av_samples(final_av)
         video_vae = plan.video_vae
         audio_vae = plan.audio_vae
-        use_per_clip_native_video_decode = (
-            str(getattr(plan, 'workflow_mode', '') or '') == 'multiclip'
-            and bool(final_av.get('_lm_per_clip_native_video_decode'))
-            and bool(final_av.get('_lm_segment_latents'))
+        candidate_segment_latents = list(final_av.get('_lm_segment_latents') or [])
+        has_external_media_segments = any(
+            isinstance(item, dict) and bool(item.get('_lm_external_media_segment'))
+            for item in candidate_segment_latents
         )
-        segment_latents = list(final_av.get('_lm_segment_latents') or []) if use_per_clip_native_video_decode else []
+        use_per_clip_native_video_decode = bool(
+            final_av.get('_lm_per_clip_native_video_decode')
+            and candidate_segment_latents
+            and (str(getattr(plan, 'workflow_mode', '') or '') == 'multiclip' or has_external_media_segments)
+        )
+        segment_latents = candidate_segment_latents if use_per_clip_native_video_decode else []
         segment_lengths = list(final_av.get('_lm_segment_lengths') or []) if use_per_clip_native_video_decode else []
         segment_hidden_overlaps = list(final_av.get('_lm_segment_hidden_overlaps') or []) if use_per_clip_native_video_decode else []
         multiclip_seam_indices = [0 for _ in segment_latents]
@@ -27735,6 +30460,7 @@ class MiniMaxH3LatentLabLongMediaDecode:
             else ('disabled' if not loop_closure_enabled else 'missing_runtime_report')
         )
         report_data['loop_closure_runtime'] = loop_closure_runtime if isinstance(loop_closure_runtime, dict) else None
+        audio = _lm_materialize_comfy_audio(audio, context='LongMedia Decode output')
         report = json.dumps(report_data, indent=2)
         return (images, audio, plan.total_duration, report)
 

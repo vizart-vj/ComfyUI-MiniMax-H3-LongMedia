@@ -29,8 +29,19 @@ except Exception:  # pragma: no cover - ComfyUI ships safetensors
     _safe_load_file = None
     _safe_save_file = None
 
+try:
+    from .director_mctx import SIDECAR_NAME as _MCTX_SIDECAR_NAME
+    from .director_mctx import load_sidecar as _load_mctx_sidecar
+    from .director_mctx import sidecar_header as _mctx_sidecar_header
+    from .director_mctx import write_sidecar as _write_mctx_sidecar
+except ImportError:
+    from director_mctx import SIDECAR_NAME as _MCTX_SIDECAR_NAME
+    from director_mctx import load_sidecar as _load_mctx_sidecar
+    from director_mctx import sidecar_header as _mctx_sidecar_header
+    from director_mctx import write_sidecar as _write_mctx_sidecar
 
-CACHE_VERSION = 2
+
+CACHE_VERSION = 3
 BOUNDARY_HASH_VERSION = 2
 SEAM_LINEAGE_VERSION = 1
 H3_FPS = 24
@@ -368,7 +379,10 @@ class DirectorClipCache:
         tdir = self._take_workspace_dir(revision_s, create=False)
         if tdir:
             clip_dir = os.path.join(tdir, "clips", _safe_name(clip_id, "clip"))
-            return os.path.join(clip_dir, "latent.safetensors"), os.path.join(tdir, "take.json")
+            legacy_path = os.path.join(clip_dir, "latent.safetensors")
+            mctx_path = os.path.join(clip_dir, _MCTX_SIDECAR_NAME)
+            tensor_path = legacy_path if os.path.isfile(legacy_path) else mctx_path
+            return tensor_path, os.path.join(tdir, "take.json")
         # Legacy compatibility: old revisions remain readable until migrated.
         take_dir = os.path.join(self._legacy_clip_dir(clip_id), "takes")
         return os.path.join(take_dir, f"{revision_s}.safetensors"), os.path.join(take_dir, f"{revision_s}.json")
@@ -378,7 +392,7 @@ class DirectorClipCache:
         assert tdir is not None
         clip_dir = os.path.join(tdir, "clips", _safe_name(clip_id, "clip"))
         os.makedirs(clip_dir, exist_ok=True)
-        return os.path.join(clip_dir, "latent.safetensors"), os.path.join(tdir, "take.json")
+        return os.path.join(clip_dir, _MCTX_SIDECAR_NAME), os.path.join(tdir, "take.json")
 
     def _write_snapshot_sidecars(self, meta_path: str, record: dict[str, Any]) -> None:
         tdir = os.path.dirname(meta_path)
@@ -430,6 +444,9 @@ class DirectorClipCache:
                 label = str(record.get("label") or record.get("take_name") or "").strip() or self._next_take_name(self.default_collection)
                 _tensor_old = os.path.join(old_takes, f"{revision}.safetensors")
                 tensor_new, meta_new = self._new_take_paths(clip_name, revision, label=label, collection=self.default_collection)
+                # Preserve the old bundle name and payload; it is not an MCTX file
+                # and must remain on the legacy read path until explicitly migrated.
+                tensor_new = os.path.join(os.path.dirname(tensor_new), "latent.safetensors")
                 record["take_name"] = label
                 record["label"] = label
                 record["library_folder"] = self.default_collection
@@ -665,23 +682,36 @@ class DirectorClipCache:
         metadata = _read_json(meta_path)
         if not metadata or not os.path.isfile(tensor_path):
             return None
-        tensors = _safe_load_file(tensor_path, device="cpu")
-        required = {"display_video", "display_audio"}
-        if not required <= set(tensors):
-            return None
-        continuation_is_display = bool(metadata.get("continuation_is_display", False))
-        if continuation_is_display:
-            cont_video = tensors["display_video"]
-            cont_audio = tensors["display_audio"]
-        else:
-            if "continuation_video" not in tensors or "continuation_audio" not in tensors:
+        if str(metadata.get("storage_layout") or "") == "mctx_v1":
+            try:
+                tensors, _header = _load_mctx_sidecar(tensor_path)
+            except (OSError, ValueError, RuntimeError):
                 return None
-            cont_video = tensors["continuation_video"]
-            cont_audio = tensors["continuation_audio"]
+            display_video = tensors["display_video"]
+            display_audio = tensors["display_audio"]
+            cont_video = tensors["video"]
+            cont_audio = tensors["audio"]
+        else:
+            # Legacy take_centric_v1 bundles stay readable in place.
+            tensors = _safe_load_file(tensor_path, device="cpu")
+            required = {"display_video", "display_audio"}
+            if not required <= set(tensors):
+                return None
+            continuation_is_display = bool(metadata.get("continuation_is_display", False))
+            if continuation_is_display:
+                cont_video = tensors["display_video"]
+                cont_audio = tensors["display_audio"]
+            else:
+                if "continuation_video" not in tensors or "continuation_audio" not in tensors:
+                    return None
+                cont_video = tensors["continuation_video"]
+                cont_audio = tensors["continuation_audio"]
+            display_video = tensors["display_video"]
+            display_audio = tensors["display_audio"]
         return {
             "metadata": dict(metadata),
-            "display_video": tensors["display_video"],
-            "display_audio": tensors["display_audio"],
+            "display_video": display_video,
+            "display_audio": display_audio,
             "continuation_video": cont_video,
             "continuation_audio": cont_audio,
         }
@@ -838,6 +868,8 @@ class DirectorClipCache:
         clip_order: list[Any] | tuple[Any, ...],
         clip_id: Any,
         revision: Any,
+        *,
+        allow_partial: bool = False,
     ) -> dict[str, Any]:
         """Plan restoration of a take plus the cached downstream branch it belongs to.
 
@@ -887,7 +919,10 @@ class DirectorClipCache:
         # DFS is deliberately over cached metadata, not tensors.  Exact tensor/hash
         # comparison is still available inside seam_compatible for old lineage only.
         # Takes are few in normal editorial use, and memoization prevents branch blowup.
-        memo: dict[tuple[int, str], tuple[list[dict[str, Any]], list[dict[str, Any]]] | None] = {}
+        memo: dict[
+            tuple[int, str],
+            tuple[list[dict[str, Any]], list[dict[str, Any]], bool, str | None] | None,
+        ] = {}
 
         def _candidate_revisions(right_clip_id: str, left_revision: str, left_clip_id: str) -> list[dict[str, Any]]:
             takes = [
@@ -910,12 +945,13 @@ class DirectorClipCache:
 
         def _walk(pos: int, left_clip_id: str, left_revision: str):
             if pos >= len(order):
-                return [], []
+                return [], [], True, None
             key = (pos, left_revision)
             if key in memo:
                 return memo[key]
             right_clip_id = order[pos]
             attempts: list[dict[str, Any]] = []
+            best_partial = None
             for right_meta in _candidate_revisions(right_clip_id, left_revision, left_clip_id):
                 right_revision = str(right_meta.get("revision") or "").strip()
                 if not right_revision:
@@ -934,7 +970,7 @@ class DirectorClipCache:
                 tail = _walk(pos + 1, right_clip_id, right_revision)
                 if tail is None:
                     continue
-                tail_path, tail_reports = tail
+                tail_path, tail_reports, complete, failed_clip_id = tail
                 result = (
                     [{"clip_id": right_clip_id, "revision": right_revision}] + tail_path,
                     [{
@@ -944,9 +980,18 @@ class DirectorClipCache:
                         "right_revision": right_revision,
                         "report": report,
                     }] + tail_reports,
+                    complete,
+                    failed_clip_id,
                 )
-                memo[key] = result
-                return result
+                if complete:
+                    memo[key] = result
+                    return result
+                if allow_partial and (best_partial is None or len(result[0]) > len(best_partial[0])):
+                    best_partial = result
+            if allow_partial:
+                partial = best_partial or ([], [], False, right_clip_id)
+                memo[key] = partial
+                return partial
             memo[key] = None
             return None
 
@@ -958,11 +1003,13 @@ class DirectorClipCache:
                 "compatibility": compatibility,
                 "failed_clip_id": order[index + 1] if index + 1 < len(order) else None,
             }
-        suffix_path, transition_reports = suffix
+        suffix_path, transition_reports, complete, failed_clip_id = suffix
         compatibility["suffix"] = transition_reports
         return {
             "ok": True,
-            "reason": "cached_branch_found",
+            "reason": "cached_branch_found" if complete else "partial_cached_branch",
+            "partial": not complete,
+            "failed_clip_id": failed_clip_id,
             "clip_id": clip_id_s,
             "revision": revision_s,
             "path": [{"clip_id": clip_id_s, "revision": revision_s}] + suffix_path,
@@ -974,6 +1021,8 @@ class DirectorClipCache:
         clip_order: list[Any] | tuple[Any, ...],
         clip_id: Any,
         revision: Any,
+        *,
+        allow_partial: bool = False,
     ) -> dict[str, Any]:
         """Atomically-ish activate a historical take and its compatible suffix.
 
@@ -981,20 +1030,35 @@ class DirectorClipCache:
         complete path before touching pointers and roll back every changed pointer if a
         filesystem write fails, so a partial branch activation cannot leak into the UI.
         """
-        plan = self.plan_restore_branch(clip_order, clip_id, revision)
+        plan = self.plan_restore_branch(
+            clip_order, clip_id, revision, allow_partial=allow_partial
+        )
         if not bool(plan.get("ok")):
             return plan
 
         path = list(plan.get("path") or [])
         previous: dict[str, str | None] = {}
+        previous_editor: dict[str, str | None] = {}
         changed: list[dict[str, Any]] = []
+        order = [str(value) for value in clip_order if str(value)]
+        restored_clip_ids = {str(item.get("clip_id") or "") for item in path}
+        selected_index = order.index(str(clip_id)) if str(clip_id) in order else -1
+        invalidated_clip_ids = (
+            [value for value in order[selected_index + 1:] if value not in restored_clip_ids]
+            if bool(plan.get("partial")) and selected_index >= 0 else []
+        )
+        affected_clip_ids = list(dict.fromkeys(
+            [str(item.get("clip_id") or "") for item in path] + invalidated_clip_ids
+        ))
+        for current_clip_id in affected_clip_ids:
+            active = self.active_metadata(current_clip_id)
+            previous[current_clip_id] = str((active or {}).get("revision") or "").strip() or None
+            previous_editor[current_clip_id] = self.editor_active_revision(current_clip_id)
         try:
             for item in path:
                 current_clip_id = str(item.get("clip_id") or "")
                 current_revision = str(item.get("revision") or "")
-                active = self.active_metadata(current_clip_id)
-                old_revision = str((active or {}).get("revision") or "").strip() or None
-                previous[current_clip_id] = old_revision
+                old_revision = previous.get(current_clip_id)
                 if old_revision == current_revision:
                     changed.append({
                         "clip_id": current_clip_id,
@@ -1009,19 +1073,31 @@ class DirectorClipCache:
                     "changed": True,
                     "previous_revision": old_revision,
                 })
-        except Exception:
-            for item in reversed(changed):
-                if not bool(item.get("changed")):
+            for current_clip_id in invalidated_clip_ids:
+                old_revision = previous.get(current_clip_id)
+                old_editor_revision = previous_editor.get(current_clip_id)
+                if old_revision is None and old_editor_revision is None:
                     continue
-                current_clip_id = str(item.get("clip_id") or "")
+                self._clear_active_revision(current_clip_id)
+                self._set_editor_active(current_clip_id, None)
+                changed.append({
+                    "clip_id": current_clip_id,
+                    "revision": None,
+                    "changed": True,
+                    "previous_revision": old_revision,
+                    "invalidated": True,
+                })
+        except Exception:
+            for current_clip_id in reversed(affected_clip_ids):
                 old_revision = previous.get(current_clip_id)
                 try:
                     if old_revision:
                         self.activate_revision(current_clip_id, old_revision)
                     else:
-                        os.unlink(self._active_path(current_clip_id))
-                except FileNotFoundError:
-                    pass
+                        self._clear_active_revision(current_clip_id)
+                    self._set_editor_active(
+                        current_clip_id, previous_editor.get(current_clip_id)
+                    )
                 except Exception:
                     pass
             raise
@@ -1035,8 +1111,17 @@ class DirectorClipCache:
             "take": selected,
             "activated": changed,
             "changed_clips": [item["clip_id"] for item in changed if bool(item.get("changed"))],
+            "invalidated_clips": invalidated_clip_ids,
             "lineage": lineage,
         }
+
+    def _clear_active_revision(self, clip_id: Any) -> None:
+        """Clear both current and legacy active pointers for one clip."""
+        for path in (self._active_path(clip_id), self._legacy_active_path(clip_id)):
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
 
     def boundary_compatible(
         self,
@@ -1134,24 +1219,6 @@ class DirectorClipCache:
             _same_storage(display_video, continuation_video)
             and _same_storage(display_audio, continuation_audio)
         )
-        tensors: dict[str, torch.Tensor] = {
-            "display_video": _cpu_contiguous(display_video),
-            "display_audio": _cpu_contiguous(display_audio),
-        }
-        if not continuation_is_display:
-            tensors["continuation_video"] = _cpu_contiguous(continuation_video)
-            tensors["continuation_audio"] = _cpu_contiguous(continuation_audio)
-
-        temporary = f"{tensor_path}.write.{uuid.uuid4().hex}.tmp"
-        try:
-            _safe_save_file(tensors, temporary)
-            os.replace(temporary, tensor_path)
-        finally:
-            try:
-                os.unlink(temporary)
-            except FileNotFoundError:
-                pass
-
         metadata_in.pop("draft", None)
         metadata_in.pop("state", None)
         preserve_seams_from_revision = str(
@@ -1191,6 +1258,24 @@ class DirectorClipCache:
         if outgoing_seam_id is None and has_next_clip:
             outgoing_seam_id = self._new_seam_id()
 
+        segment_length_frames = int(metadata_in.get("segment_length_frames") or 0)
+        mctx_header = _mctx_sidecar_header(
+            continuation_video,
+            continuation_audio,
+            project_id=self.project_id,
+            clip_id=str(clip_id),
+            revision=revision,
+            metadata={**metadata_in, "delivered_frames": segment_length_frames},
+        )
+        _write_mctx_sidecar(
+            tensor_path,
+            video=continuation_video,
+            audio=continuation_audio,
+            display_video=None if continuation_is_display else display_video,
+            display_audio=None if continuation_is_display else display_audio,
+            header=mctx_header,
+        )
+
         record = {
             **metadata_in,
             # Cache-owned identity/compatibility fields are authoritative and cannot
@@ -1206,7 +1291,7 @@ class DirectorClipCache:
             "take_name": resolved_label,
             "label": resolved_label,
             "library_folder": _safe_name(requested_folder, self.default_collection),
-            "storage_layout": "take_centric_v1",
+            "storage_layout": "mctx_v1",
             "tensor_file": os.path.relpath(tensor_path, self.output_root),
             "continuation_is_display": bool(continuation_is_display),
             "display_shapes": [list(display_video.shape), list(display_audio.shape)],
@@ -1435,8 +1520,13 @@ class DirectorClipCache:
 
     def _refresh_workspace_record_paths(self, record: dict[str, Any], take_dir: str, clip_id: Any) -> dict[str, Any]:
         record = dict(record)
-        latent = os.path.join(take_dir, "clips", _safe_name(clip_id, "clip"), "latent.safetensors")
-        record["tensor_file"] = os.path.relpath(latent, self.output_root) if os.path.isfile(latent) else None
+        clip_dir = os.path.join(take_dir, "clips", _safe_name(clip_id, "clip"))
+        candidates = (
+            os.path.join(clip_dir, _MCTX_SIDECAR_NAME),
+            os.path.join(clip_dir, "latent.safetensors"),
+        )
+        tensor_path = next((path for path in candidates if os.path.isfile(path)), None)
+        record["tensor_file"] = os.path.relpath(tensor_path, self.output_root) if tensor_path else None
         preview_map = {
             "preview_file": os.path.join(take_dir, "previews", "poster.png"),
             "preview_sprite_file": os.path.join(take_dir, "previews", "sprite.jpg"),
@@ -1783,5 +1873,34 @@ class DirectorClipCache:
                     record.setdefault("library_folder", "Legacy")
                     record["active_editor"] = bool(editor_active and revision == editor_active)
                     out.append(record)
+        out.sort(key=lambda item: float(item.get("created_at_unix") or 0.0), reverse=True)
+        return out
+
+    def list_all_take_metadata(self) -> list[dict[str, Any]]:
+        """Return project-wide TAKE manifests for the Director library gallery."""
+        out: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        editor_revisions: dict[str, str | None] = {}
+        render_revisions: dict[str, str | None] = {}
+        for tdir, raw in self._scan_take_workspaces():
+            record = dict(raw)
+            clip_id = str(record.get("clip_id") or "").strip()
+            revision = str(record.get("revision") or "").strip()
+            key = (clip_id, revision)
+            if not clip_id or not revision or key in seen:
+                continue
+            seen.add(key)
+            record["take_name"] = str(record.get("take_name") or record.get("label") or "Take")
+            record["label"] = record["take_name"]
+            record["library_folder"] = os.path.basename(os.path.dirname(tdir))
+            record["workspace_folder"] = os.path.basename(tdir)
+            if clip_id not in editor_revisions:
+                editor_revisions[clip_id] = self.editor_active_revision(clip_id)
+            if clip_id not in render_revisions:
+                active = self.active_metadata(clip_id)
+                render_revisions[clip_id] = str(active.get("revision") or "") if active else None
+            record["active"] = bool(editor_revisions[clip_id] and revision == editor_revisions[clip_id])
+            record["render_active"] = bool(render_revisions[clip_id] and revision == render_revisions[clip_id])
+            out.append(record)
         out.sort(key=lambda item: float(item.get("created_at_unix") or 0.0), reverse=True)
         return out

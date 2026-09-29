@@ -1,6 +1,6 @@
 # Sampler, VRAM и производительность
 
-Рекомендации для текущей ветки LongMedia 0.6.54.
+Рекомендации для текущей ветки LongMedia 0.6.60.
 
 ## Production default
 
@@ -28,7 +28,7 @@ LongMedia рассчитывает на coordinated dynamic residency больш
 Рекомендуется. Выбирает профиль по quantization/backend, VRAM, реальному packed storage модели, activation headroom и packed sequence geometry. Quantized H3 не маршрутизируется только по BF16-equivalent logical `model_size`.
 
 ### `normal`
-Используйте, если model + activation workspace уверенно помещаются. В 0.6.54 это **user-authoritative high-VRAM профиль**: значения chunk/reserve/guard из Sampler сохраняются и больше не подменяются low-VRAM floors. `mlp_chunk_tokens=0` реально отключает LongMedia MLP chunking. При `attention_mode=existing`, `vram_activation_reserve_mb=0` и отключённых block/step guards resident-модель может идти через stock ComfyUI H3 DiT block path.
+Используйте, если model + activation workspace уверенно помещаются. В 0.6.60 это **user-authoritative high-VRAM профиль**: значения chunk/reserve/guard из Sampler сохраняются и больше не подменяются low-VRAM floors. `mlp_chunk_tokens=0` реально отключает LongMedia MLP chunking. При `attention_mode=existing`, `vram_activation_reserve_mb=0` и отключённых block/step guards resident-модель может идти через stock ComfyUI H3 DiT block path.
 
 ### `low_vram`
 Более жёсткие activation/residency limits и агрессивнее chunking.

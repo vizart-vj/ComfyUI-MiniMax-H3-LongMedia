@@ -748,6 +748,9 @@ function ensureEditor(node) {
     });
 
     const editor = node.addDOMWidget("clip_editor", "clip_editor", root, { serialize: false, hideOnZoom: true, getValue: () => null, setValue: () => {} });
+    editor.__lmPresentationOnly = true;
+    editor.serialize = false;
+    editor.serializeValue = () => undefined;
     node.__lmPlannerViewportHeight = Number(node.__lmPlannerViewportHeight) || 340;
     editor.computeSize = function(width) {
         const w = Math.max(180, Number(width) || Number(node.size?.[0]) || 650);

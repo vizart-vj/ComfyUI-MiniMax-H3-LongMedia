@@ -4,7 +4,7 @@ Production-oriented ComfyUI nodes для **MiniMax H3**: long-form video/audio g
 
 ![screenshot](ex.png)
 
-**Текущий релиз: 0.6.54.**
+**Текущий релиз: 0.6.60.**
 
 ## Что изменилось после публичного v0.6.50
 
@@ -15,8 +15,14 @@ Production-oriented ComfyUI nodes для **MiniMax H3**: long-form video/audio g
 - **Quantized AUTO routing:** INT8/W4A8/NVFP4 policy использует реальный packed storage и activation headroom вместо BF16-equivalent logical size.
 - **Windows/AIMDO:** большие checkpoints остаются file-backed через ComfyUI `ModelMMAP` / `TensorFileSlice`; eager full-model RAM load не используется.
 - **Mixed AV assembly:** исходный MEDIA остаётся вне VideoVAE; mono/stereo timeline audio собирается по явному channel contract.
+- **RefMod с настоящими параметрами извлечения:** resolution до VAE, лимит visual tokens, grid, кадры видео, voice seconds и Compressed refinement применяются в encoder path.
+- **Мультиклипный Refine без холодного шва:** Stage 2 наследует refined overlap предыдущего клипа; аудио Stage 1 остаётся неизменным.
+- **Более предсказуемый Director:** маркеры cut внутри клипа, отдельные trim/cut действия, gap controls и Fit при любом смещении таймлайна.
+- **Меньше удерживаемых preview-ресурсов:** Director освобождает старые video strips и TAKE thumbnails и ограничивает кэш decoded previews.
+- **Пресеты Sampler:** можно создавать, перезаписывать и удалять профили, сохранённые в workflow; строка состояния показывает изменения после выбора. Seed остаётся независимым.
+- **Надёжнее рендеры:** Character RefMod сохраняет приоритет идентичности через MultiClip, а motion_repair сохраняется в workflow.
 
-См. [Release Notes 0.6.54](docs/RELEASE_NOTES_0.6.54_RU.md).
+См. [Release Notes 0.6.60](docs/RELEASE_NOTES_0.6.60_RU.md).
 
 ## Документация
 
@@ -27,6 +33,7 @@ Production-oriented ComfyUI nodes для **MiniMax H3**: long-form video/audio g
 - [Режимы аудио и `video_ref_edit`](docs/AUDIO_MODES_GUIDE_RU.md)
 - [Integrated Refine и Latent Hi-Res](docs/TWO_PASS_LATENT_HIRES_REFINER_GUIDE_RU.md)
 - [Sampler, VRAM и производительность](docs/SAMPLER_OPTIMIZATION_RU.md)
+- [Полный справочник параметров узлов и Director](docs/PARAMETER_REFERENCE_RU.md)
 
 ## Основные ноды
 
@@ -102,7 +109,7 @@ longest_input
 
 См. [Режимы LongMedia](docs/MODES_GUIDE_RU.md).
 
-## LongMedia Director 0.6.54
+## LongMedia Director 0.6.60
 
 Director — unified authoring surface для MAIN timing, prompts, WHO & WHAT media, ролей REF/FIRST/LAST, cameras, temporal embeddings, audio policy, resolution policy, Program Monitor и TAKE management.
 
@@ -115,6 +122,8 @@ Long Media Setup  (control_mode=director)
 Текущее хранилище TAKE — TAKE-centric. CREATE создаёт активный пустой workspace; следующий успешный render заполняет тот же TAKE. Restore атомарно возвращает полный saved Director state.
 
 Начиная с 0.6.54 продолжение формально разделяет `GENERATED` и `MEDIA`: `GENERATED → GENERATED` использует сохранённый native TAKE latent, а `MEDIA → GENERATED` строит свежий H3 target и закрепляет только VAE-encoded tail внешнего видео как native frame-0 `minimax_keyframes` guide. Полный импортированный ролик не становится diffusion target и не проходит full-video VAE roundtrip.
+
+В 0.6.55 добавлены интегрированные в Director RefMods: переиспользуемые native H3 visual/audio references из Director media, выбранного timeline clip или TAKE. RefMods независимы от learned text embeddings и физического TAKE continuation; авторские интервалы управляют видимостью native reference keys на target frame lattice. Audio RefMod — это Audio Reference, без гарантии voice cloning.
 
 См. [полное руководство Director](docs/DIRECTOR_GUIDE_RU.md).
 

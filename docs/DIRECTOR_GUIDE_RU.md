@@ -1,4 +1,4 @@
-# LongMedia Director 0.6.54 — полное руководство
+# LongMedia Director 0.6.60 — полное руководство
 
 LongMedia Director — таймлайн-ориентированная среда авторинга для **MiniMax H3 • LongMedia**. В одном документе Director объединяет длительности шотов, семантические референсы, якоря FIRST/LAST, камеры, временные H3-эмбеддинги, политику аудио, предпросмотр и систему TAKE.
 
@@ -142,6 +142,22 @@ Camera control H3 — это learned language conditioning, а не матема
 Нажмите `✦`, чтобы добавить EMBEDDING track и выбрать установленный H3 embedding. Переместите/обрежьте block для выбора временного диапазона; `↔` растягивает его на весь timeline.
 
 Пересекающиеся embedding layers комбинируются. Disabled/muted слои неактивны. Camera и embedding boundaries независимы: embedding transition не перезапускает camera presentation, а camera boundary не клонирует полный scene prompt.
+
+## RefMods
+
+Сворачиваемая панель `REFMODS` создаёт и хранит переиспользуемые native H3 visual/audio references. Источником может быть Character/Reference subject, импортированный Image/Video/Audio, выбранный timeline clip или TAKE. Для TAKE приоритетен cached native latent без decode/re-encode.
+
+Добавьте RefMod layer кнопкой `⬡`, выберите запись библиотеки и переместите/обрежьте block для задания активного интервала. `strength = 1.0` означает точный native H3 reference path; меньшие значения добавляют attention bias. FULL хранит native VAE latent. COMPRESSED выполняет pooling latent и может опционально уточнять его через Adam/MSE; дополнительные модели не загружаются.
+
+`Concept Type` добавляет стандартное положительное текстовое указание, пока RefMod активен; `Description` остаётся метаданными библиотеки. Тип задаёт общее назначение (например, `style` просит H3 переносить в сцену визуальный язык, палитру, текстуру и характерные эффекты), а конкретные признаки всё равно указывайте в Global Prompt или prompt кадра. В панели Global Prompt появились общесценовые селекторы визуального стиля, атмосферы, палитры, освещения, текстуры и эпохи. Пользовательские указания можно сохранить в workflow и повторно использовать в сценах. Для усиления визуального reference используйте FULL или увеличьте spatial grid и повторно нажмите ENCODE после изменения настроек артефакта. Native reference latents всё ещё могут переносить и другие видимые свойства источника.
+
+RefMods специально независимы от EMBEDDING и TAKE continuity:
+
+- EMBEDDING — learned semantic/motion/camera control;
+- RefMod — переиспользуемый native `minimax_refs` visual/audio conditioning;
+- TAKE/continuation — физическая temporal continuity.
+
+Авторский интервал управляет доступом target queries к reference keys и никогда не выводится из native reference RoPE positions. Audio RefMod является Audio Reference и не гарантирует voice cloning. Catalog/bindings RefMod сохраняются в `director_json` и восстанавливаются вместе со snapshot TAKE.
 
 ## AUDIO selector
 

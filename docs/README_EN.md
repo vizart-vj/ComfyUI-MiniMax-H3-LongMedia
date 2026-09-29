@@ -9,6 +9,7 @@ This release ships only current user-facing documentation. Every topic has an En
 - [Audio Modes and `video_ref_edit`](AUDIO_MODES_GUIDE_EN.md)
 - [Integrated Refine and Latent Hi-Res](TWO_PASS_LATENT_HIRES_REFINER_GUIDE_EN.md)
 - [Sampler, VRAM and Performance](SAMPLER_OPTIMIZATION_EN.md)
+- [Complete node and Director parameter reference](PARAMETER_REFERENCE_EN.md)
 - [Architecture](ARCHITECTURE_EN.md)
 
 ## Director
@@ -26,6 +27,7 @@ This release ships only current user-facing documentation. Every topic has an En
 
 ## Release
 
+- [0.6.60 Release Notes](RELEASE_NOTES_0.6.60_EN.md)
 - [0.6.54 Release Notes](RELEASE_NOTES_0.6.54_EN.md)
 - [0.6.40 Release Notes](RELEASE_NOTES_0.6.40_EN.md)
 
