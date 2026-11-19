@@ -12,13 +12,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import os
 import re
 import shutil
+import tempfile
+import threading
 import time
 import uuid
-from typing import Any
+from functools import wraps
+from typing import Any, Callable, TypeVar, cast
 
 import torch
 
@@ -40,10 +44,98 @@ except ImportError:
     from director_mctx import sidecar_header as _mctx_sidecar_header
     from director_mctx import write_sidecar as _write_mctx_sidecar
 
+try:
+    from .director_plan import normalize_document
+except ImportError:
+    from director_plan import normalize_document
+
+_LOG = logging.getLogger(__name__)
+_CACHE_LOCKS_GUARD = threading.Lock()
+_CACHE_PROJECT_LOCKS: dict[tuple[str, str], Any] = {}
+_CACHE_MUTATION_RESULT = TypeVar("_CACHE_MUTATION_RESULT")
+
+
+def _serialize_cache_mutation(
+    method: Callable[..., _CACHE_MUTATION_RESULT],
+) -> Callable[..., _CACHE_MUTATION_RESULT]:
+    """Serialize mutating operations across cache instances for one project."""
+    @wraps(method)
+    def wrapped(self: Any, *args: Any, **kwargs: Any) -> _CACHE_MUTATION_RESULT:
+        with self._mutation_lock:
+            return method(self, *args, **kwargs)
+
+    return cast(Callable[..., _CACHE_MUTATION_RESULT], wrapped)
+
 
 CACHE_VERSION = 3
 BOUNDARY_HASH_VERSION = 2
 SEAM_LINEAGE_VERSION = 1
+
+
+def validate_take_tensor_contract(
+    take: dict[str, Any] | None,
+    *,
+    continuation_shapes: tuple[tuple[int, ...], tuple[int, ...]],
+    display_shapes: tuple[tuple[int, ...], tuple[int, ...]],
+    video_dtype: torch.dtype,
+    audio_dtype: torch.dtype,
+) -> tuple[bool, dict[str, Any]]:
+    """Validate loaded AV tensors against both their TAKE metadata and render contract.
+
+    Device placement is intentionally unrestricted: active TAKE tensors may live on
+    CPU under the cache/offload policy and are copied to the render device only for
+    the pinned boundary window.
+    """
+    if not isinstance(take, dict):
+        return False, {"reason": "take_missing"}
+    metadata = take.get("metadata")
+    if not isinstance(metadata, dict):
+        return False, {"reason": "metadata_missing"}
+
+    specs = (
+        ("continuation", ("continuation_video", "continuation_audio"), continuation_shapes),
+        ("display", ("display_video", "display_audio"), display_shapes),
+    )
+    checked: dict[str, Any] = {}
+    for prefix, keys, expected_pair in specs:
+        shape_field = f"{prefix}_shapes"
+        raw_shapes = metadata.get(shape_field)
+        if not isinstance(raw_shapes, (list, tuple)) or len(raw_shapes) != 2:
+            return False, {"reason": f"{shape_field}_missing"}
+        try:
+            saved_pair = tuple(tuple(int(v) for v in shape) for shape in raw_shapes)
+            expected = tuple(tuple(int(v) for v in shape) for shape in expected_pair)
+        except (TypeError, ValueError):
+            return False, {"reason": f"{shape_field}_malformed"}
+        if saved_pair != expected:
+            return False, {
+                "reason": f"{shape_field}_contract_mismatch",
+                "saved": saved_pair,
+                "expected": expected,
+            }
+        actual_shapes: list[tuple[int, ...]] = []
+        for key, expected_shape, expected_dtype in zip(
+            keys, expected, (video_dtype, audio_dtype), strict=True,
+        ):
+            tensor = take.get(key)
+            if not torch.is_tensor(tensor):
+                return False, {"reason": f"{key}_missing"}
+            actual_shape = tuple(int(v) for v in tensor.shape)
+            if actual_shape != expected_shape:
+                return False, {
+                    "reason": f"{key}_shape_mismatch",
+                    "actual": actual_shape,
+                    "expected": expected_shape,
+                }
+            if tensor.dtype != expected_dtype:
+                return False, {
+                    "reason": f"{key}_dtype_mismatch",
+                    "actual": str(tensor.dtype),
+                    "expected": str(expected_dtype),
+                }
+            actual_shapes.append(actual_shape)
+        checked[prefix] = tuple(actual_shapes)
+    return True, {"reason": "tensor_contract_match", **checked}
 H3_FPS = 24
 H3_AUDIO_LATENT_FPS = 40
 
@@ -56,6 +148,18 @@ def _safe_name(value: Any, fallback: str = "item") -> str:
 def canonical_hash(value: Any) -> str:
     payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _bridge_authored_state(timeline: dict[str, Any], global_prompt: str) -> str:
+    # Normalize both workflow generations with the compiler's schema. The one-shot
+    # request and preset libraries do not affect the already authored render.
+    doc = normalize_document({**timeline, "regeneration": {"mode": "none"}})
+    for key in ("regeneration", "camera_preset_library", "scene_guidance_library"):
+        doc.pop(key, None)
+    for block in doc["camera_blocks"]:
+        # Older documents synthesize default camera blocks with fresh ids.
+        block.pop("block_id", None)
+    return canonical_hash({"timeline": doc, "global_prompt": global_prompt})
 
 
 def _atomic_json(path: str, value: Any) -> None:
@@ -236,11 +340,14 @@ def _boundary_tensors_equal(
 class DirectorClipCache:
     """Immutable take store plus active pointers for one Director project."""
 
-    def __init__(self, output_root: str, project_id: Any):
+    def __init__(self, output_root: str, project_id: Any, *, read_only: bool = False):
         root = os.path.realpath(os.path.abspath(output_root))
         project = _safe_name(project_id, "director")
         self.output_root = root
         self.project_id = project
+        lock_key = (root, project)
+        with _CACHE_LOCKS_GUARD:
+            self._mutation_lock = _CACHE_PROJECT_LOCKS.setdefault(lock_key, threading.RLock())
         # 0.6.40 take-centric storage. User-visible TAKE folders live directly
         # under longmedia_director/<collection>/<take-folder>. Runtime pointers are
         # hidden under _runtime and no longer own take data.
@@ -255,8 +362,12 @@ class DirectorClipCache:
         self.requests_root = os.path.join(self.runtime_root, "requests")
         self.editor_active_root = os.path.join(self.runtime_root, "editor_active")
         self._take_dir_cache: dict[str, str] = {}
-        os.makedirs(os.path.join(self.library_root, self.default_collection), exist_ok=True)
-        self._migrate_legacy_layout_best_effort()
+        self._workspace_index_complete = False
+        self._workspace_folder_counts: dict[str, int] = {}
+        if not read_only:
+            os.makedirs(os.path.join(self.library_root, self.default_collection), exist_ok=True)
+            with self._mutation_lock:
+                self._migrate_legacy_layout_best_effort()
 
     def _clip_dir(self, clip_id: Any) -> str:
         return os.path.join(self.clips_root, _safe_name(clip_id, "clip"))
@@ -273,6 +384,7 @@ class DirectorClipCache:
     def _editor_active_path(self, clip_id: Any) -> str:
         return os.path.join(self.editor_active_root, f"{_safe_name(clip_id, 'clip')}.json")
 
+    @_serialize_cache_mutation
     def _set_editor_active(self, clip_id: Any, revision: Any | None) -> None:
         path = self._editor_active_path(clip_id)
         revision_s = _safe_name(revision, "")
@@ -314,21 +426,33 @@ class DirectorClipCache:
 
     def _scan_take_workspaces(self) -> list[tuple[str, dict[str, Any]]]:
         out: list[tuple[str, dict[str, Any]]] = []
-        if not os.path.isdir(self.library_root):
+        folder_counts: dict[str, int] = {}
+        self._workspace_folder_counts = folder_counts
+        try:
+            collections = os.listdir(self.library_root)
+        except FileNotFoundError:
             return out
-        for collection in os.listdir(self.library_root):
+        for collection in collections:
             if collection == "_runtime":
                 continue
             cdir = os.path.join(self.library_root, collection)
             if not os.path.isdir(cdir):
                 continue
-            for child in os.listdir(cdir):
+            try:
+                children = os.listdir(cdir)
+            except FileNotFoundError:
+                continue  # renamed by another TAKE operation during this read
+            if collection != self.project_id or not os.path.isdir(os.path.join(cdir, "clips")):
+                folder_counts[collection] = 0
+            for child in children:
                 tdir = os.path.join(cdir, child)
                 if not os.path.isdir(tdir):
                     continue
                 record = self._workspace_manifest(tdir)
                 if not isinstance(record, dict):
                     continue
+                if collection in folder_counts:
+                    folder_counts[collection] += 1
                 if str(record.get("project_id") or "") != self.project_id:
                     continue
                 revision = str(record.get("revision") or "").strip()
@@ -344,10 +468,11 @@ class DirectorClipCache:
         cached = self._take_dir_cache.get(revision_s)
         if cached and os.path.isdir(cached):
             return cached
-        for tdir, record in self._scan_take_workspaces():
-            if str(record.get("revision") or "") == revision_s:
-                self._take_dir_cache[revision_s] = tdir
-                return tdir
+        if not self._workspace_index_complete:
+            for tdir, record in self._scan_take_workspaces():
+                if str(record.get("revision") or "") == revision_s:
+                    self._take_dir_cache[revision_s] = tdir
+                    return tdir
         if not create:
             return None
         cdir = self._collection_dir(collection)
@@ -519,6 +644,33 @@ class DirectorClipCache:
         metadata = _read_json(meta_path)
         return dict(metadata) if isinstance(metadata, dict) else None
 
+    def metadata_for_revision(self, clip_id: Any, revision: Any) -> dict[str, Any] | None:
+        """Read one TAKE manifest without making it active or loading its tensors."""
+        return self._take_metadata(clip_id, revision)
+
+    @_serialize_cache_mutation
+    def set_pending_bridge_metadata(
+        self,
+        clip_id: Any,
+        revision: Any,
+        payload: dict[str, Any],
+        *,
+        merge: bool = True,
+    ) -> dict[str, Any]:
+        """Attach validated bridge lineage to an inert candidate TAKE."""
+        revision_s = _safe_name(revision, "")
+        metadata = self._take_metadata(clip_id, revision_s)
+        if not metadata:
+            raise FileNotFoundError(f"Pending Director bridge {revision_s!r} was not found.")
+        if not bool(metadata.get("pending_acceptance")) or str(metadata.get("state") or "") != "pending_acceptance":
+            raise ValueError("Bridge metadata can only be attached to a pending TAKE.")
+        previous = metadata.get("pending_bridge") if merge else None
+        bridge = {**(dict(previous) if isinstance(previous, dict) else {}), **dict(payload or {})}
+        metadata["pending_bridge"] = bridge
+        self._write_take_metadata(clip_id, revision_s, metadata)
+        return metadata
+
+    @_serialize_cache_mutation
     def _write_take_metadata(self, clip_id: Any, revision: Any, metadata: dict[str, Any]) -> None:
         revision = _safe_name(revision, "")
         if not revision:
@@ -530,6 +682,7 @@ class DirectorClipCache:
     def _new_seam_id() -> str:
         return uuid.uuid4().hex
 
+    @_serialize_cache_mutation
     def _bind_seam_lineage(
         self,
         left_clip_id: Any,
@@ -576,6 +729,7 @@ class DirectorClipCache:
         self._write_take_metadata(right_clip_id, right_revision, right_meta)
         return chosen
 
+    @_serialize_cache_mutation
     def ensure_active_chain_lineage(self, clip_order: list[Any] | tuple[Any, ...]) -> dict[str, Any]:
         """Repair missing lineage only when compatibility is actually provable.
 
@@ -747,14 +901,16 @@ class DirectorClipCache:
         take["metadata"] = dict(metadata)
         return metadata
 
+    @_serialize_cache_mutation
     def promote_active_take_for_append(
         self,
         clip_id: Any,
         *,
-        geometry_fingerprint: str,
+        geometry_fingerprint: str | None,
         semantic_fingerprint: str,
         outgoing_contract_fingerprint: str,
         overlap_frames: int,
+        clip_index: int | None = None,
     ) -> dict[str, Any] | None:
         """Upgrade a reused prefix TAKE before a new dependent child is rendered.
 
@@ -778,10 +934,16 @@ class DirectorClipCache:
             return None
 
         overlap = max(0, int(overlap_frames))
-        metadata["geometry_fingerprint"] = str(geometry_fingerprint or "")
+        # A shape-compatible frozen prefix may be replayed even though its exact
+        # render fingerprint is stale (for example, a different upscaler precision).
+        # Preserve that provenance instead of relabeling old pixels as a new render.
+        if geometry_fingerprint is not None:
+            metadata["geometry_fingerprint"] = str(geometry_fingerprint or "")
         metadata["semantic_fingerprint"] = str(semantic_fingerprint or "")
         metadata["outgoing_contract_fingerprint"] = str(outgoing_contract_fingerprint or "")
         metadata["overlap_frames"] = overlap
+        if clip_index is not None:
+            metadata["clip_index"] = int(clip_index)
         metadata["boundary_hash_version"] = BOUNDARY_HASH_VERSION
         metadata["incoming_boundary_hash"] = _av_boundary_hash(video, audio, overlap, edge="head")
         metadata["outgoing_boundary_hash"] = _av_boundary_hash(video, audio, overlap, edge="tail")
@@ -792,6 +954,259 @@ class DirectorClipCache:
         metadata["incremental_append_promoted_at_unix"] = time.time()
         self._write_take_metadata(clip_id, revision, metadata)
         return dict(metadata)
+
+    def _promote_bridge_manifest_take(
+        self,
+        clip_id: str,
+        revision: str,
+        *,
+        geometry_fingerprint: str | None,
+        semantic_fingerprint: str,
+        outgoing_contract_fingerprint: str,
+        overlap_frames: int,
+        clip_index: int,
+    ) -> dict[str, Any]:
+        """Update timeline contracts without loading or rewriting cached AV tensors.
+
+        Inserting a bridge changes a clip's timeline index and semantic contract, but
+        does not alter the frozen clip pixels or its H3 overlap. Recomputing boundary
+        hashes would require loading every take into host memory and is unnecessary.
+        We therefore require the original overlap/hash contract to match exactly and
+        only update editorial metadata.
+        """
+        revision_s = _safe_name(revision, "")
+        metadata = self._take_metadata(clip_id, revision_s)
+        if not metadata:
+            raise FileNotFoundError(f"Director bridge manifest TAKE {clip_id!r}/{revision_s!r} is missing.")
+        if str((self.active_metadata(clip_id) or {}).get("revision") or "") != revision_s:
+            raise RuntimeError(f"Director bridge source TAKE changed while pending: {clip_id!r}.")
+        tensor_path, _meta_path = self._take_paths(clip_id, revision_s)
+        if not os.path.isfile(tensor_path):
+            raise FileNotFoundError(f"Director bridge source tensor {clip_id!r}/{revision_s!r} is missing.")
+        if int(metadata.get("overlap_frames") or 0) != max(0, int(overlap_frames)):
+            raise RuntimeError(f"Director bridge source overlap changed for {clip_id!r}; re-render it before accepting.")
+        if (not str(metadata.get("incoming_boundary_hash") or "")
+                or not str(metadata.get("outgoing_boundary_hash") or "")):
+            raise RuntimeError(f"Director bridge source {clip_id!r} has no reusable native boundary proof.")
+
+        updated = dict(metadata)
+        if geometry_fingerprint is not None:
+            updated["geometry_fingerprint"] = str(geometry_fingerprint or "")
+        updated["semantic_fingerprint"] = str(semantic_fingerprint or "")
+        updated["outgoing_contract_fingerprint"] = str(outgoing_contract_fingerprint or "")
+        updated["clip_index"] = int(clip_index)
+        updated["incremental_bridge_rebased"] = True
+        updated["incremental_bridge_rebased_at_unix"] = time.time()
+        self._write_take_metadata(clip_id, revision_s, updated)
+        return updated
+
+    @_serialize_cache_mutation
+    def accept_pending_bridge(
+        self,
+        clip_id: Any,
+        revision: Any,
+        *,
+        clip_order: list[Any] | tuple[Any, ...],
+        director_timeline: dict[str, Any] | None = None,
+        global_prompt: str = "",
+    ) -> dict[str, Any]:
+        """Atomically accept a two-sided bridge after rechecking frozen sources.
+
+        Pending renders are inert until this method validates the timeline, both
+        source revisions, both AV boundaries, and every source TAKE being rebased.
+        Metadata, active pointers, and editor pointers are rolled back on any failure.
+        """
+        target_id = str(clip_id or "").strip()
+        revision_s = _safe_name(revision, "")
+        order = [str(value) for value in clip_order if str(value)]
+        if not target_id or not revision_s or len(order) < 3:
+            raise ValueError("Bridge acceptance needs its clip id, revision, and complete clip order.")
+        if len(set(order)) != len(order):
+            raise ValueError("Bridge acceptance requires unique clip identities in the timeline.")
+        if order.count(target_id) != 1:
+            raise ValueError("Bridge target must appear exactly once in the current timeline.")
+        index = order.index(target_id)
+        if index <= 0 or index >= len(order) - 1:
+            raise ValueError("Bridge target must remain between its two source clips.")
+
+        candidate = self._take_metadata(target_id, revision_s)
+        if not isinstance(candidate, dict) or not os.path.isfile(self._take_paths(target_id, revision_s)[0]):
+            raise FileNotFoundError(f"Pending Director bridge {target_id!r}/{revision_s!r} was not found.")
+        if not bool(candidate.get("pending_acceptance")) or str(candidate.get("state") or "") != "pending_acceptance":
+            raise ValueError("This TAKE is not a pending bridge result.")
+        if str(candidate.get("request_mode") or "") != "bridge":
+            raise ValueError("Pending TAKE was not rendered by a Director bridge operation.")
+        if director_timeline is not None:
+            snapshot = candidate.get("director_timeline_snapshot")
+            if not isinstance(snapshot, dict) or not snapshot or not snapshot.get("shots"):
+                raise RuntimeError("This pending bridge has no authored timeline snapshot. Render it again.")
+            saved_prompt = str(candidate.get("director_global_prompt_snapshot", snapshot.get("_global_prompt")) or "")
+            if _bridge_authored_state(snapshot, saved_prompt) != _bridge_authored_state(director_timeline, global_prompt):
+                raise RuntimeError("The authored Director timeline changed while the bridge was pending. Render it again.")
+        pending = candidate.get("pending_bridge")
+        if not isinstance(pending, dict):
+            raise ValueError("Pending bridge metadata is missing; this render cannot be accepted safely.")
+        left_id, right_id = order[index - 1], order[index + 1]
+        if str(pending.get("left_clip_id") or "") != left_id or str(pending.get("right_clip_id") or "") != right_id:
+            raise RuntimeError("Timeline neighbors changed since this bridge was rendered. Discard it and render again.")
+        frozen_left = str(pending.get("left_revision") or "")
+        frozen_right = str(pending.get("right_revision") or "")
+        left_active = self.active_metadata(left_id) or {}
+        right_active = self.active_metadata(right_id) or {}
+        if str(left_active.get("revision") or "") != frozen_left:
+            raise RuntimeError("The active left source TAKE changed while the bridge was pending.")
+        if str(right_active.get("revision") or "") != frozen_right:
+            raise RuntimeError("The active right source TAKE changed while the bridge was pending.")
+
+        manifest = pending.get("rebase_manifest")
+        if not isinstance(manifest, list) or not manifest:
+            raise ValueError("Pending bridge has no frozen rebase manifest.")
+        manifest_by_clip: dict[str, dict[str, Any]] = {}
+        for entry in manifest:
+            if not isinstance(entry, dict):
+                raise ValueError("Pending bridge rebase manifest is malformed.")
+            source_id = str(entry.get("clip_id") or "").strip()
+            source_revision = str(entry.get("revision") or "").strip()
+            if not source_id or not source_revision or source_id in manifest_by_clip:
+                raise ValueError("Pending bridge rebase manifest has a missing or duplicate source.")
+            if source_id == target_id or source_id not in order:
+                raise RuntimeError("Pending bridge rebase manifest no longer matches the timeline.")
+            source_active = self.active_metadata(source_id) or {}
+            if str(source_active.get("revision") or "") != source_revision:
+                raise RuntimeError(f"Active source TAKE changed while bridge was pending: {source_id!r}.")
+            manifest_by_clip[source_id] = entry
+        saved_order = [str(value) for value in (pending.get("timeline_clip_order") or []) if str(value)]
+        if saved_order and saved_order != order:
+            raise RuntimeError("Timeline clip order changed since the bridge was rendered.")
+        generated_ids = {
+            str(value) for value in (pending.get("generated_clip_ids") or []) if str(value)
+        }
+        expected_sources = generated_ids or set(manifest_by_clip)
+        if set(manifest_by_clip) != expected_sources:
+            raise RuntimeError("Generated source clip set changed since the bridge was rendered.")
+        if left_id not in expected_sources or right_id not in expected_sources:
+            raise RuntimeError("Bridge boundary source clips are absent from the generated TAKE manifest.")
+
+        overlap_frames = int(candidate.get("overlap_frames") or 0)
+        old_target = self.active_metadata(target_id)
+        if old_target and str(old_target.get("revision") or "") == revision_s:
+            raise RuntimeError("A pending bridge cannot already be the active render.")
+
+        # Save exact metadata and pointer manifests so failures leave every approved
+        # revision and active/editor selection unchanged.
+        changed_ids = [*manifest_by_clip.keys(), target_id]
+        metadata_before: dict[tuple[str, str], dict[str, Any]] = {}
+        for source_id, entry in manifest_by_clip.items():
+            source_revision = str(entry["revision"])
+            metadata = self._take_metadata(source_id, source_revision)
+            if not metadata:
+                raise FileNotFoundError(f"Bridge source metadata disappeared: {source_id!r}/{source_revision!r}.")
+            metadata_before[(source_id, source_revision)] = metadata
+        metadata_before[(target_id, revision_s)] = dict(candidate)
+
+        pointer_before: dict[tuple[str, str], dict[str, Any] | None] = {}
+        for changed_id in changed_ids:
+            pointer_before[(changed_id, "active")] = _read_json(self._active_path(changed_id))
+            pointer_before[(changed_id, "legacy_active")] = _read_json(self._legacy_active_path(changed_id))
+            pointer_before[(changed_id, "editor_active")] = _read_json(self._editor_active_path(changed_id))
+
+        try:
+            for source_id, entry in manifest_by_clip.items():
+                self._promote_bridge_manifest_take(
+                    source_id,
+                    str(entry["revision"]),
+                    geometry_fingerprint=entry.get("geometry_fingerprint"),
+                    semantic_fingerprint=str(entry.get("semantic_fingerprint") or ""),
+                    outgoing_contract_fingerprint=str(entry.get("outgoing_contract_fingerprint") or ""),
+                    overlap_frames=overlap_frames,
+                    clip_index=int(entry.get("clip_index", order.index(source_id))),
+                )
+
+            left_ok, left_proof = self.boundary_compatible(left_id, frozen_left, target_id, revision_s)
+            if not left_ok:
+                raise RuntimeError(f"Left bridge boundary proof failed: {left_proof}.")
+            right_ok, right_proof = self.boundary_compatible(target_id, revision_s, right_id, frozen_right)
+            if not right_ok:
+                raise RuntimeError(f"Right bridge boundary proof failed: {right_proof}.")
+            left_seam = self.bind_active_seam_proven(
+                left_id, frozen_left, target_id, revision_s,
+                reason="accepted_two_sided_bridge_left_boundary_proven",
+            )
+            right_seam = self.bind_active_seam_proven(
+                target_id, revision_s, right_id, frozen_right,
+                reason="accepted_two_sided_bridge_right_boundary_proven",
+            )
+
+            accepted = dict(self._take_metadata(target_id, revision_s) or candidate)
+            accepted["state"] = "ready"
+            accepted["pending_acceptance"] = False
+            accepted["accepted_at_unix"] = time.time()
+            accepted["accepted_bridge"] = {
+                **dict(pending),
+                "left_boundary_proof": left_proof,
+                "right_boundary_proof": right_proof,
+                "left_seam_lineage": left_seam,
+                "right_seam_lineage": right_seam,
+            }
+            accepted.pop("pending_bridge", None)
+            self._write_take_metadata(target_id, revision_s, accepted)
+            active_record = self.activate_revision(target_id, revision_s)
+            return {
+                "ok": True,
+                "take": active_record,
+                "activated": [{"clip_id": target_id, "revision": revision_s, "changed": True}],
+                "rebased_clips": [source_id for source_id in manifest_by_clip],
+                "left_boundary_proof": left_proof,
+                "right_boundary_proof": right_proof,
+                "left_seam_lineage": left_seam,
+                "right_seam_lineage": right_seam,
+            }
+        except Exception:
+            for (source_id, source_revision), old_metadata in metadata_before.items():
+                self._write_take_metadata(source_id, source_revision, old_metadata)
+            for (pointer_id, pointer_kind), old_pointer in pointer_before.items():
+                path = {
+                    "active": self._active_path(pointer_id),
+                    "legacy_active": self._legacy_active_path(pointer_id),
+                    "editor_active": self._editor_active_path(pointer_id),
+                }[pointer_kind]
+                if old_pointer is None:
+                    try:
+                        os.unlink(path)
+                    except FileNotFoundError:
+                        pass
+                else:
+                    _atomic_json(path, old_pointer)
+            raise
+
+    def bind_active_seam_proven(
+        self,
+        left_clip_id: Any,
+        left_revision: Any,
+        right_clip_id: Any,
+        right_revision: Any,
+        *,
+        reason: str,
+    ) -> dict[str, Any]:
+        """Assign a fresh seam identity only after exact cached AV proof succeeds."""
+        compatible, report = self.boundary_compatible(
+            left_clip_id, left_revision, right_clip_id, right_revision,
+        )
+        if not compatible:
+            raise RuntimeError(
+                "Director cannot bind seam lineage without exact AV boundary proof: "
+                f"{left_clip_id!r}->{right_clip_id!r}; report={report}."
+            )
+        seam_id = self._new_seam_id()
+        self._bind_seam_lineage(
+            left_clip_id,
+            left_revision,
+            right_clip_id,
+            right_revision,
+            seam_id=seam_id,
+            reason=str(reason or "verified_native_boundary"),
+        )
+        return {"seam_id": seam_id, "proof": report}
 
     def seam_compatible(
         self,
@@ -892,6 +1307,8 @@ class DirectorClipCache:
         candidate = self._take_metadata(clip_id_s, revision_s)
         if not isinstance(candidate, dict):
             return {"ok": False, "reason": "take_revision_not_found"}
+        if bool(candidate.get("pending_acceptance")) or str(candidate.get("state") or "") == "pending_acceptance":
+            return {"ok": False, "reason": "take_pending_acceptance"}
 
         compatibility: dict[str, Any] = {}
         if index > 0:
@@ -927,7 +1344,10 @@ class DirectorClipCache:
         def _candidate_revisions(right_clip_id: str, left_revision: str, left_clip_id: str) -> list[dict[str, Any]]:
             takes = [
                 item for item in self.list_take_metadata(right_clip_id)
-                if not bool(item.get("draft")) and str(item.get("tensor_file") or "")
+                if not bool(item.get("draft"))
+                and not bool(item.get("pending_acceptance"))
+                and str(item.get("state") or "") != "pending_acceptance"
+                and str(item.get("tensor_file") or "")
             ]
             active = self.active_metadata(right_clip_id)
             active_revision = str((active or {}).get("revision") or "").strip()
@@ -1016,6 +1436,7 @@ class DirectorClipCache:
             "compatibility": compatibility,
         }
 
+    @_serialize_cache_mutation
     def restore_take_branch(
         self,
         clip_order: list[Any] | tuple[Any, ...],
@@ -1115,6 +1536,7 @@ class DirectorClipCache:
             "lineage": lineage,
         }
 
+    @_serialize_cache_mutation
     def _clear_active_revision(self, clip_id: Any) -> None:
         """Clear both current and legacy active pointers for one clip."""
         for path in (self._active_path(clip_id), self._legacy_active_path(clip_id)):
@@ -1123,6 +1545,7 @@ class DirectorClipCache:
             except FileNotFoundError:
                 pass
 
+    @_serialize_cache_mutation
     def boundary_compatible(
         self,
         left_clip_id: Any,
@@ -1198,22 +1621,22 @@ class DirectorClipCache:
         continuation_video: torch.Tensor,
         continuation_audio: torch.Tensor,
         metadata: dict[str, Any],
+        activate: bool = True,
     ) -> dict[str, Any]:
         if _safe_save_file is None:
             raise RuntimeError("safetensors is unavailable; Director selective regeneration cannot save takes.")
+        save_started = time.perf_counter()
         metadata_in = dict(metadata or {})
-        # CREATE TAKE owns the next render. If the editor-active TAKE is an empty
-        # draft, render directly into that workspace instead of spawning a second
-        # unrelated revision/card.
-        editor_revision = str(self.editor_active_revision(clip_id) or "").strip()
-        editor_meta = self._take_metadata(clip_id, editor_revision) if editor_revision else None
-        fill_active_draft = bool(editor_meta and (editor_meta.get("draft") or str(editor_meta.get("state") or "") == "draft"))
-        revision = editor_revision if fill_active_draft else uuid.uuid4().hex
-        requested_label = str(metadata_in.get("label") or metadata_in.get("take_name") or (editor_meta or {}).get("take_name") or (editor_meta or {}).get("label") or "").strip() or None
-        requested_folder = str(metadata_in.get("library_folder") or (editor_meta or {}).get("library_folder") or self.default_collection).strip() or self.default_collection
-        resolved_label = requested_label or self._next_take_name(requested_folder)
-        tensor_path, meta_path = self._new_take_paths(clip_id, revision, label=resolved_label, collection=requested_folder)
-        os.makedirs(os.path.dirname(tensor_path), exist_ok=True)
+        # Select a draft under the lock, then stage the immutable tensor file
+        # separately. Status and editor operations need not wait for GPU copies
+        # or large safetensors writes.
+        with self._mutation_lock:
+            editor_revision = str(self.editor_active_revision(clip_id) or "").strip()
+            editor_meta = self._take_metadata(clip_id, editor_revision) if editor_revision else None
+            fill_active_draft = bool(activate and editor_meta and (
+                editor_meta.get("draft") or str(editor_meta.get("state") or "") == "draft"
+            ))
+            revision = editor_revision if fill_active_draft else uuid.uuid4().hex
 
         continuation_is_display = (
             _same_storage(display_video, continuation_video)
@@ -1221,6 +1644,7 @@ class DirectorClipCache:
         )
         metadata_in.pop("draft", None)
         metadata_in.pop("state", None)
+        metadata_in.pop("pending_acceptance", None)
         preserve_seams_from_revision = str(
             metadata_in.pop("_preserve_seams_from_revision", "") or ""
         ).strip()
@@ -1233,31 +1657,6 @@ class DirectorClipCache:
         outgoing_boundary_hash = _av_boundary_hash(
             continuation_video, continuation_audio, overlap_frames, edge="tail"
         )
-        parent_boundary_hash = None
-        parent_clip_id = str(metadata_in.get("parent_clip_id") or "").strip()
-        if parent_clip_id:
-            parent_meta = self.active_metadata(parent_clip_id)
-            if isinstance(parent_meta, dict):
-                parent_boundary_hash = str(parent_meta.get("outgoing_boundary_hash") or "") or None
-
-        incoming_seam_id = None
-        outgoing_seam_id = None
-        seam_source_revision = None
-        if preserve_seams_from_revision:
-            source_meta = self._take_metadata(clip_id, preserve_seams_from_revision)
-            if isinstance(source_meta, dict):
-                incoming_seam_id = str(source_meta.get("incoming_seam_id") or "").strip() or None
-                outgoing_seam_id = str(source_meta.get("outgoing_seam_id") or "").strip() or None
-                seam_source_revision = preserve_seams_from_revision
-
-        if incoming_seam_id is None and parent_clip_id:
-            parent_meta = self.active_metadata(parent_clip_id)
-            if isinstance(parent_meta, dict):
-                incoming_seam_id = str(parent_meta.get("outgoing_seam_id") or "").strip() or None
-
-        if outgoing_seam_id is None and has_next_clip:
-            outgoing_seam_id = self._new_seam_id()
-
         segment_length_frames = int(metadata_in.get("segment_length_frames") or 0)
         mctx_header = _mctx_sidecar_header(
             continuation_video,
@@ -1267,56 +1666,104 @@ class DirectorClipCache:
             revision=revision,
             metadata={**metadata_in, "delivered_frames": segment_length_frames},
         )
-        _write_mctx_sidecar(
-            tensor_path,
-            video=continuation_video,
-            audio=continuation_audio,
-            display_video=None if continuation_is_display else display_video,
-            display_audio=None if continuation_is_display else display_audio,
-            header=mctx_header,
-        )
+        os.makedirs(self.runtime_root, exist_ok=True)
+        _LOG.info("LongMedia phase TAKE save start for clip %s", clip_id)
+        with tempfile.TemporaryDirectory(prefix="take-write-", dir=self.runtime_root) as staging:
+            staged_tensor = os.path.join(staging, _MCTX_SIDECAR_NAME)
+            _write_mctx_sidecar(
+                staged_tensor,
+                video=continuation_video,
+                audio=continuation_audio,
+                display_video=None if continuation_is_display else display_video,
+                display_audio=None if continuation_is_display else display_audio,
+                header=mctx_header,
+            )
+            with self._mutation_lock:
+                if activate and str(self.editor_active_revision(clip_id) or "") != editor_revision:
+                    raise RuntimeError("Director editor TAKE changed while the render was being saved.")
+                if fill_active_draft:
+                    editor_meta = self._take_metadata(clip_id, editor_revision)
+                    if not editor_meta or not (editor_meta.get("draft") or str(editor_meta.get("state") or "") == "draft"):
+                        raise RuntimeError("Director draft TAKE changed while the render was being saved.")
+                requested_label = str(metadata_in.get("label") or metadata_in.get("take_name") or (editor_meta or {}).get("take_name") or (editor_meta or {}).get("label") or "").strip() or None
+                requested_folder = str(metadata_in.get("library_folder") or (editor_meta or {}).get("library_folder") or self.default_collection).strip() or self.default_collection
+                resolved_label = requested_label or self._next_take_name(requested_folder)
+                tensor_path, meta_path = self._new_take_paths(clip_id, revision, label=resolved_label, collection=requested_folder)
+                os.replace(staged_tensor, tensor_path)
+                parent_boundary_hash = None
+                parent_clip_id = str(metadata_in.get("parent_clip_id") or "").strip()
+                parent_revision = str(metadata_in.get("parent_revision") or "").strip()
+                parent_meta = None
+                if parent_clip_id:
+                    parent_meta = (
+                        self._take_metadata(parent_clip_id, parent_revision) if parent_revision
+                        else self.active_metadata(parent_clip_id)
+                    )
+                    if parent_meta:
+                        parent_boundary_hash = str(parent_meta.get("outgoing_boundary_hash") or "") or None
 
-        record = {
-            **metadata_in,
-            # Cache-owned identity/compatibility fields are authoritative and cannot
-            # be shadowed by caller metadata. This keeps the restore contract stable
-            # across DTO/call-site changes.
-            "version": CACHE_VERSION,
-            "kind": "h3_longmedia_director_take",
-            "project_id": self.project_id,
-            "clip_id": str(clip_id),
-            "clip_index": int(clip_index),
-            "revision": revision,
-            "created_at_unix": time.time(),
-            "take_name": resolved_label,
-            "label": resolved_label,
-            "library_folder": _safe_name(requested_folder, self.default_collection),
-            "storage_layout": "mctx_v1",
-            "tensor_file": os.path.relpath(tensor_path, self.output_root),
-            "continuation_is_display": bool(continuation_is_display),
-            "display_shapes": [list(display_video.shape), list(display_audio.shape)],
-            "continuation_shapes": [list(continuation_video.shape), list(continuation_audio.shape)],
-            "boundary_hash_version": BOUNDARY_HASH_VERSION,
-            "incoming_boundary_hash": incoming_boundary_hash,
-            "outgoing_boundary_hash": outgoing_boundary_hash,
-            "parent_boundary_hash": parent_boundary_hash,
-            "seam_lineage_version": SEAM_LINEAGE_VERSION,
-            "incoming_seam_id": incoming_seam_id,
-            "outgoing_seam_id": outgoing_seam_id,
-            "seam_source_revision": seam_source_revision,
-        }
-        _atomic_json(meta_path, record)
-        self._write_snapshot_sidecars(meta_path, record)
-        _atomic_json(self._active_path(clip_id), {
-            "version": CACHE_VERSION,
-            "clip_id": str(clip_id),
-            "revision": revision,
-            "metadata_file": os.path.relpath(meta_path, self.output_root),
-        })
-        self._set_editor_active(clip_id, revision)
+                incoming_seam_id = None
+                outgoing_seam_id = None
+                seam_source_revision = None
+                if preserve_seams_from_revision:
+                    source_meta = self._take_metadata(clip_id, preserve_seams_from_revision)
+                    if isinstance(source_meta, dict):
+                        incoming_seam_id = str(source_meta.get("incoming_seam_id") or "").strip() or None
+                        outgoing_seam_id = str(source_meta.get("outgoing_seam_id") or "").strip() or None
+                        seam_source_revision = preserve_seams_from_revision
+
+                if incoming_seam_id is None and parent_meta:
+                    incoming_seam_id = str(parent_meta.get("outgoing_seam_id") or "").strip() or None
+
+                if outgoing_seam_id is None and has_next_clip:
+                    outgoing_seam_id = self._new_seam_id()
+                record = {
+                    **metadata_in,
+                    # Cache-owned identity/compatibility fields are authoritative and cannot
+                    # be shadowed by caller metadata. This keeps the restore contract stable
+                    # across DTO/call-site changes.
+                    "version": CACHE_VERSION,
+                    "kind": "h3_longmedia_director_take",
+                    "project_id": self.project_id,
+                    "clip_id": str(clip_id),
+                    "clip_index": int(clip_index),
+                    "revision": revision,
+                    "created_at_unix": time.time(),
+                    "take_name": resolved_label,
+                    "label": resolved_label,
+                    "library_folder": _safe_name(requested_folder, self.default_collection),
+                    "storage_layout": "mctx_v1",
+                    "tensor_file": os.path.relpath(tensor_path, self.output_root),
+                    "continuation_is_display": bool(continuation_is_display),
+                    "display_shapes": [list(display_video.shape), list(display_audio.shape)],
+                    "continuation_shapes": [list(continuation_video.shape), list(continuation_audio.shape)],
+                    "boundary_hash_version": BOUNDARY_HASH_VERSION,
+                    "incoming_boundary_hash": incoming_boundary_hash,
+                    "outgoing_boundary_hash": outgoing_boundary_hash,
+                    "parent_boundary_hash": parent_boundary_hash,
+                    "seam_lineage_version": SEAM_LINEAGE_VERSION,
+                    "incoming_seam_id": incoming_seam_id,
+                    "outgoing_seam_id": outgoing_seam_id,
+                    "seam_source_revision": seam_source_revision,
+                    "state": "ready" if bool(activate) else "pending_acceptance",
+                    "pending_acceptance": not bool(activate),
+                }
+                _atomic_json(meta_path, record)
+                self._write_snapshot_sidecars(meta_path, record)
+                if activate:
+                    _atomic_json(self._active_path(clip_id), {
+                        "version": CACHE_VERSION,
+                        "clip_id": str(clip_id),
+                        "revision": revision,
+                        "metadata_file": os.path.relpath(meta_path, self.output_root),
+                    })
+                    self._set_editor_active(clip_id, revision)
+        elapsed = time.perf_counter() - save_started
+        _LOG.info("LongMedia phase TAKE save done in %.2fs for clip %s", elapsed, clip_id)
         return record
 
 
+    @_serialize_cache_mutation
     def create_draft_take(
         self,
         *,
@@ -1364,11 +1811,14 @@ class DirectorClipCache:
         self._set_editor_active(clip_id, revision)
         return record
 
+    @_serialize_cache_mutation
     def duplicate_revision(self, clip_id: Any, revision: Any) -> dict[str, Any]:
         """Duplicate a TAKE. Drafts duplicate metadata only; rendered takes keep AV."""
         source_meta = self._take_metadata(clip_id, revision)
         if not isinstance(source_meta, dict):
             raise FileNotFoundError(f"Director take {revision!r} was not found.")
+        if bool(source_meta.get("pending_acceptance")) or str(source_meta.get("state") or "") == "pending_acceptance":
+            raise ValueError("A pending bridge candidate must be accepted or discarded before duplication.")
         source_revision = str(source_meta.get("revision") or revision or "").strip()
         if bool(source_meta.get("draft")) or str(source_meta.get("state") or "") == "draft":
             metadata = dict(source_meta)
@@ -1405,6 +1855,7 @@ class DirectorClipCache:
             metadata=metadata,
         )
 
+    @_serialize_cache_mutation
     def delete_revision(self, clip_id: Any, revision: Any) -> dict[str, Any]:
         """Delete one TAKE entry, including metadata-only drafts."""
         revision_s = _safe_name(revision, "")
@@ -1438,6 +1889,8 @@ class DirectorClipCache:
             remaining = [
                 item for item in self.list_take_metadata(clip_id)
                 if not bool(item.get("draft")) and str(item.get("tensor_file") or "")
+                and not bool(item.get("pending_acceptance"))
+                and str(item.get("state") or "") != "pending_acceptance"
             ]
             if remaining:
                 activated_revision = str(remaining[0].get("revision") or "") or None
@@ -1450,7 +1903,11 @@ class DirectorClipCache:
                     pass
         editor_was_active = self.editor_active_revision(clip_id) == revision_s
         if editor_was_active:
-            remaining_editor = self.list_take_metadata(clip_id)
+            remaining_editor = [
+                item for item in self.list_take_metadata(clip_id)
+                if not bool(item.get("pending_acceptance"))
+                and str(item.get("state") or "") != "pending_acceptance"
+            ]
             fallback_editor = str((remaining_editor[0] if remaining_editor else {}).get("revision") or "").strip()
             self._set_editor_active(clip_id, fallback_editor or None)
         return {
@@ -1466,18 +1923,15 @@ class DirectorClipCache:
 
     def list_library_folders(self) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
-        os.makedirs(self._collection_dir(self.default_collection), exist_ok=True)
-        for name in sorted(os.listdir(self.library_root), key=str.lower):
-            if name == "_runtime":
-                continue
-            path = os.path.join(self.library_root, name)
-            if not os.path.isdir(path):
-                continue
-            # Old project-id cache roots are implementation leftovers, not user folders.
-            if name == self.project_id and os.path.isdir(os.path.join(path, "clips")):
-                continue
-            take_count = sum(1 for child in os.listdir(path) if os.path.isfile(os.path.join(path, child, "take.json")))
-            out.append({"name": name, "take_count": take_count, "default": name == self.default_collection})
+        default = {"name": self.default_collection, "take_count": 0, "default": True}
+        if not os.path.isdir(self.library_root):
+            return [default]
+        if not self._workspace_index_complete:
+            self._scan_take_workspaces()
+        for name, count in sorted(self._workspace_folder_counts.items(), key=lambda item: item[0].lower()):
+            out.append({"name": name, "take_count": count, "default": name == self.default_collection})
+        if not any(folder["default"] for folder in out):
+            out.insert(0, default)
         return out
 
     def create_library_folder(self, name: Any) -> dict[str, Any]:
@@ -1541,6 +1995,7 @@ class DirectorClipCache:
         record["library_folder"] = os.path.basename(os.path.dirname(take_dir))
         return record
 
+    @_serialize_cache_mutation
     def rename_take(self, clip_id: Any, revision: Any, name: Any) -> dict[str, Any]:
         revision_s = _safe_name(revision, "")
         desired = str(name or "").strip()
@@ -1564,6 +2019,7 @@ class DirectorClipCache:
             self._write_take_metadata(clip_id, revision_s, metadata)
         return {"ok": True, "take": metadata, "folder_rename_pending": bool(pending)}
 
+    @_serialize_cache_mutation
     def move_take_to_folder(self, clip_id: Any, revision: Any, folder: Any) -> dict[str, Any]:
         revision_s = _safe_name(revision, "")
         if not revision_s:
@@ -1608,6 +2064,7 @@ class DirectorClipCache:
         }
         _atomic_json(os.path.join(self.requests_root, f"{request}.json"), record)
 
+    @_serialize_cache_mutation
     def activate_revision(self, clip_id: Any, revision: Any) -> dict[str, Any]:
         revision = _safe_name(revision, "")
         if not revision:
@@ -1616,6 +2073,8 @@ class DirectorClipCache:
         metadata = _read_json(meta_path)
         if not metadata:
             raise FileNotFoundError(f"Director take {revision!r} was not found.")
+        if bool(metadata.get("pending_acceptance")) or str(metadata.get("state") or "") == "pending_acceptance":
+            raise ValueError("This TAKE is a pending render result. Accept its Director operation before activation.")
         tensor_path, _ = self._take_paths(clip_id, revision)
         if not os.path.isfile(tensor_path):
             raise FileNotFoundError(f"Director take tensor {revision!r} was not found.")
@@ -1667,6 +2126,7 @@ class DirectorClipCache:
             hwc = hwc[..., 0]
         return Image.fromarray(hwc).convert("RGB")
 
+    @_serialize_cache_mutation
     def _update_preview_metadata(self, clip_id: Any, metadata: dict[str, Any], fields: dict[str, Any]) -> dict[str, Any]:
         revision = str(metadata.get("revision") or "").strip()
         if not revision:
@@ -1679,8 +2139,14 @@ class DirectorClipCache:
         _atomic_json(meta_path, record)
         return record
 
-    def attach_active_preview(self, clip_id: Any, image: torch.Tensor) -> str | None:
-        metadata = self.active_metadata(clip_id)
+    def attach_active_preview(
+        self,
+        clip_id: Any,
+        image: torch.Tensor,
+        *,
+        revision: Any | None = None,
+    ) -> str | None:
+        metadata = self.metadata_for_revision(clip_id, revision) if revision else self.active_metadata(clip_id)
         if not metadata or not torch.is_tensor(image):
             return None
         frame = self._preview_pil_frame(image, max_width=512)
@@ -1707,6 +2173,7 @@ class DirectorClipCache:
         cell_width: int = 640,
         columns: int = 8,
         preview_fingerprint: str | None = None,
+        revision: Any | None = None,
     ) -> dict[str, Any] | None:
         """Attach a scrub/play preview sprite to the active immutable take.
 
@@ -1714,7 +2181,7 @@ class DirectorClipCache:
         Director real timeline scrubbing without encoding another full video or
         keeping decoded RGB tensors alive after the Decode node returns.
         """
-        metadata = self.active_metadata(clip_id)
+        metadata = self.metadata_for_revision(clip_id, revision) if revision else self.active_metadata(clip_id)
         if not metadata or not torch.is_tensor(frames):
             return None
         if frames.dim() == 5 and int(frames.shape[0]) == 1:
@@ -1779,6 +2246,7 @@ class DirectorClipCache:
         audio: dict[str, Any],
         *,
         preview_fingerprint: str | None = None,
+        revision: Any | None = None,
     ) -> dict[str, Any] | None:
         """Persist a lightweight WAV monitor track for the active immutable take.
 
@@ -1786,7 +2254,7 @@ class DirectorClipCache:
         never invokes AudioVAE and exists only so Director Play can monitor the
         rendered take; scrubbing remains silent in the browser.
         """
-        metadata = self.active_metadata(clip_id)
+        metadata = self.metadata_for_revision(clip_id, revision) if revision else self.active_metadata(clip_id)
         if not metadata or not isinstance(audio, dict):
             return None
         waveform = audio.get('waveform')
@@ -1841,11 +2309,18 @@ class DirectorClipCache:
         record = self._update_preview_metadata(clip_id, metadata, fields)
         return {key: record.get(key) for key in fields}
 
-    def list_take_metadata(self, clip_id: Any) -> list[dict[str, Any]]:
+    def index_status_workspaces(self) -> list[tuple[str, dict[str, Any]]]:
+        rows = self._scan_take_workspaces()
+        self._workspace_index_complete = True
+        return rows
+
+    def list_take_metadata(
+        self, clip_id: Any, *, workspace_rows: list[tuple[str, dict[str, Any]]] | None = None,
+    ) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         seen: set[str] = set()
         editor_active = self.editor_active_revision(clip_id)
-        for tdir, raw in self._scan_take_workspaces():
+        for tdir, raw in self._scan_take_workspaces() if workspace_rows is None else workspace_rows:
             record = dict(raw)
             if str(record.get("clip_id") or "") != str(clip_id):
                 continue
@@ -1876,13 +2351,15 @@ class DirectorClipCache:
         out.sort(key=lambda item: float(item.get("created_at_unix") or 0.0), reverse=True)
         return out
 
-    def list_all_take_metadata(self) -> list[dict[str, Any]]:
+    def list_all_take_metadata(
+        self, *, workspace_rows: list[tuple[str, dict[str, Any]]] | None = None,
+    ) -> list[dict[str, Any]]:
         """Return project-wide TAKE manifests for the Director library gallery."""
         out: list[dict[str, Any]] = []
         seen: set[tuple[str, str]] = set()
         editor_revisions: dict[str, str | None] = {}
         render_revisions: dict[str, str | None] = {}
-        for tdir, raw in self._scan_take_workspaces():
+        for tdir, raw in self._scan_take_workspaces() if workspace_rows is None else workspace_rows:
             record = dict(raw)
             clip_id = str(record.get("clip_id") or "").strip()
             revision = str(record.get("revision") or "").strip()

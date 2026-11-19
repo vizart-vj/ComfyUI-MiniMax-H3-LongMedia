@@ -1,4 +1,4 @@
-__version__ = "0.6.63"
+__version__ = "0.6.69"
 
 from . import windows_safetensors_compat as _windows_safetensors_compat  # noqa: F401
 from . import lora_compat as _lora_compat  # noqa: F401
@@ -7,6 +7,16 @@ from . import fastvideo_vsa_compat as _fastvideo_vsa_compat  # noqa: F401
 from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
 
 WEB_DIRECTORY = "./web"
+
+
+def _director_effective_seed_text(value):
+    """Return an exact JSON-safe decimal representation of a uint64 seed."""
+    if value is None:
+        return None
+    try:
+        return str(int(value) & 0xFFFFFFFFFFFFFFFF)
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 def _install_director_take_routes():
@@ -222,34 +232,38 @@ def _install_director_take_routes():
         revision = str(body.get('revision') or '').strip()
         if not project_id or not clip_id or not revision:
             return web.json_response({'error': 'project_id, clip_id and revision are required'}, status=400)
-        cache = DirectorClipCache(folder_paths.get_output_directory(), project_id)
-        take = cache.load_revision(clip_id, revision)
-        if not isinstance(take, dict):
-            return web.json_response({'error': 'take revision not found'}, status=404)
-        video = take.get('display_video')
-        audio = take.get('display_audio')
-        if video is None:
-            return web.json_response({'error': 'take has no native display latent'}, status=409)
-        take_meta = dict(take.get('metadata') or {})
-        refmod_id = uuid.uuid4().hex
-        label = str(take_meta.get('take_name') or take_meta.get('label') or f'TAKE {clip_id}')
-        refs = [RefMod(
-            name=label, kind='video' if int(video.shape[2]) > 1 else 'image',
-            latent=video.detach().to(device='cpu').contiguous(), mode='FULL',
-            source=f'take:{project_id}:{clip_id}:{revision}', concept_type='motion',
-            description='Native LongMedia TAKE visual latent; no decode/re-encode.',
-        )]
-        if audio is not None and int(audio.numel()) > 0 and int(audio.shape[-1]) > 0:
-            refs.append(RefMod(
-                name=f'{label} Audio Reference', kind='audio',
-                latent=audio.detach().to(device='cpu').contiguous(), mode='FULL',
-                source=f'take:{project_id}:{clip_id}:{revision}', concept_type='audio_reference',
-                description='Native LongMedia TAKE audio latent; reference conditioning, not voice cloning.',
-            ))
-        _, project = _refmod_root(project_id)
-        stem = os.path.join(project, f'{_refmod_safe(label)}__{_refmod_safe(refmod_id)}')
-        path = save_bundle(refs, label, stem) if len(refs) > 1 else save_refmod(refs[0], stem)
-        return web.json_response({'ok': True, 'refmod': _refmod_record(path, refmod_id=refmod_id, project_root=project)})
+        def action():
+            cache = DirectorClipCache(folder_paths.get_output_directory(), project_id, read_only=True)
+            take = cache.load_revision(clip_id, revision)
+            if not isinstance(take, dict):
+                return web.json_response({'error': 'take revision not found'}, status=404)
+            video = take.get('display_video')
+            audio = take.get('display_audio')
+            if video is None:
+                return web.json_response({'error': 'take has no native display latent'}, status=409)
+            take_meta = dict(take.get('metadata') or {})
+            refmod_id = uuid.uuid4().hex
+            label = str(take_meta.get('take_name') or take_meta.get('label') or f'TAKE {clip_id}')
+            refs = [RefMod(
+                name=label, kind='video' if int(video.shape[2]) > 1 else 'image',
+                latent=video.detach().to(device='cpu').contiguous(), mode='FULL',
+                source=f'take:{project_id}:{clip_id}:{revision}', concept_type='motion',
+                description='Native LongMedia TAKE visual latent; no decode/re-encode.',
+            )]
+            if audio is not None and int(audio.numel()) > 0 and int(audio.shape[-1]) > 0:
+                refs.append(RefMod(
+                    name=f'{label} Audio Reference', kind='audio',
+                    latent=audio.detach().to(device='cpu').contiguous(), mode='FULL',
+                    source=f'take:{project_id}:{clip_id}:{revision}', concept_type='audio_reference',
+                    description='Native LongMedia TAKE audio latent; reference conditioning, not voice cloning.',
+                ))
+            _, project = _refmod_root(project_id)
+            stem = os.path.join(project, f'{_refmod_safe(label)}__{_refmod_safe(refmod_id)}')
+            path = save_bundle(refs, label, stem) if len(refs) > 1 else save_refmod(refs[0], stem)
+            return web.json_response({'ok': True, 'refmod': _refmod_record(path, refmod_id=refmod_id, project_root=project)})
+
+        return await asyncio.to_thread(action)
+
 
     @routes.post('/longmedia/refmods/save')
     async def _refmod_save(request):
@@ -465,15 +479,19 @@ def _install_director_take_routes():
         clip_id = str(request.query.get('clip_id') or '').strip()
         if not project_id or not clip_id:
             return web.json_response({'error': 'project_id and clip_id are required'}, status=400)
-        cache = DirectorClipCache(folder_paths.get_output_directory(), project_id)
-        active = cache.active_metadata(clip_id)
-        takes = cache.list_take_metadata(clip_id)
-        active_revision = str((active or {}).get('revision') or '')
-        editor_active_revision = str(cache.editor_active_revision(clip_id) or '')
-        for take in takes:
-            take['active'] = str(take.get('revision') or '') == editor_active_revision
-            take['render_active'] = bool(active_revision and str(take.get('revision') or '') == active_revision)
-        return web.json_response({'project_id': project_id, 'clip_id': clip_id, 'active_revision': active_revision or None, 'editor_active_revision': editor_active_revision or None, 'takes': takes, 'folders': cache.list_library_folders()})
+        def action():
+            cache = DirectorClipCache(folder_paths.get_output_directory(), project_id, read_only=True)
+            active = cache.active_metadata(clip_id)
+            takes = cache.list_take_metadata(clip_id)
+            active_revision = str((active or {}).get('revision') or '')
+            editor_active_revision = str(cache.editor_active_revision(clip_id) or '')
+            for take in takes:
+                take['active'] = str(take.get('revision') or '') == editor_active_revision
+                take['render_active'] = bool(active_revision and str(take.get('revision') or '') == active_revision)
+            return web.json_response({'project_id': project_id, 'clip_id': clip_id, 'active_revision': active_revision or None, 'editor_active_revision': editor_active_revision or None, 'takes': takes, 'folders': cache.list_library_folders()})
+
+        return await asyncio.to_thread(action)
+
 
     @routes.post('/longmedia/director/activate_take')
     async def _director_activate_take(request):
@@ -485,74 +503,81 @@ def _install_director_take_routes():
         restore_timeline = bool(body.get('restore_timeline', True))
         if not project_id or not clip_id or not revision:
             return web.json_response({'error': 'project_id, clip_id and revision are required'}, status=400)
-        cache = DirectorClipCache(folder_paths.get_output_directory(), project_id)
-        candidate = next((x for x in cache.list_take_metadata(clip_id) if str(x.get('revision') or '') == revision), None)
-        if not candidate:
-            return web.json_response({'error': 'take revision not found'}, status=404)
-        is_draft = bool(candidate.get('draft')) or str(candidate.get('state') or '') == 'draft'
-        if is_draft:
-            if not restore_timeline:
-                return web.json_response({'error': 'draft TAKE has no rendered AV to activate'}, status=409)
-            cache._set_editor_active(clip_id, revision)
-            candidate['active'] = True
-            return web.json_response({
-                'ok': True, 'take': candidate, 'draft': True, 'activated': [],
-                'changed_clips': [], 'compatibility': {}, 'restore_reason': 'draft_settings_snapshot',
-            })
-        if restore_timeline:
-            snapshot = candidate.get('director_timeline_snapshot')
-            if isinstance(snapshot, dict):
-                snapshot_shots = snapshot.get('shots') if isinstance(snapshot.get('shots'), list) else []
-                snapshot_order = [
-                    str(item.get('clip_id') or '').strip()
-                    for item in snapshot_shots if isinstance(item, dict) and str(item.get('clip_id') or '').strip()
-                ]
-                if clip_id in snapshot_order:
-                    order = snapshot_order
+        def action():
+            cache = DirectorClipCache(folder_paths.get_output_directory(), project_id)
+            with cache._mutation_lock:
+                candidate = next((x for x in cache.list_take_metadata(clip_id) if str(x.get('revision') or '') == revision), None)
+                if not candidate:
+                    return web.json_response({'error': 'take revision not found'}, status=404)
+                is_draft = bool(candidate.get('draft')) or str(candidate.get('state') or '') == 'draft'
+                if is_draft:
+                    if not restore_timeline:
+                        return web.json_response({'error': 'draft TAKE has no rendered AV to activate'}, status=409)
+                    cache._set_editor_active(clip_id, revision)
+                    candidate['active'] = True
+                    return web.json_response({
+                        'ok': True, 'take': candidate, 'draft': True, 'activated': [],
+                        'changed_clips': [], 'compatibility': {}, 'restore_reason': 'draft_settings_snapshot',
+                    })
+                if restore_timeline:
+                    snapshot = candidate.get('director_timeline_snapshot')
+                    if isinstance(snapshot, dict):
+                        snapshot_shots = snapshot.get('shots') if isinstance(snapshot.get('shots'), list) else []
+                        snapshot_order = [
+                            str(item.get('clip_id') or '').strip()
+                            for item in snapshot_shots if isinstance(item, dict) and str(item.get('clip_id') or '').strip()
+                        ]
+                        if clip_id in snapshot_order:
+                            order = snapshot_order
 
-        # v0.5.57: a historical take owns a branch, not an obligation to splice
-        # into the currently active suffix. Recover the compatible cached suffix
-        # first, then move active pointers as one editorial operation.
-        if order:
-            cache.ensure_active_chain_lineage(order)
-            try:
-                result = cache.restore_take_branch(
-                    order, clip_id, revision, allow_partial=restore_timeline
-                )
-            except Exception as exc:
-                return web.json_response({
-                    'error': f'branch restore failed: {type(exc).__name__}: {exc}',
-                }, status=500)
-            if not bool(result.get('ok')):
-                reason = str(result.get('reason') or 'branch_restore_unavailable')
-                messages = {
-                    'active_previous_take_missing': 'the active previous clip take is missing',
-                    'incoming_branch_mismatch': 'this take belongs to a different upstream branch',
-                    'no_compatible_cached_suffix': 'no compatible cached downstream branch exists for this take',
-                    'clip_not_in_timeline': 'the clip is no longer present in the current timeline',
-                    'take_revision_not_found': 'take revision not found',
-                }
-                return web.json_response({
-                    'error': messages.get(reason, reason),
-                    'reason': reason,
-                    'compatibility': result.get('compatibility') or {},
-                    'failed_clip_id': result.get('failed_clip_id'),
-                }, status=409)
-            return web.json_response({
-                'ok': True,
-                'take': result.get('take'),
-                'activated': result.get('activated') or [],
-                'changed_clips': result.get('changed_clips') or [],
-                'partial_restore': bool(result.get('partial')),
-                'invalidated_clips': result.get('invalidated_clips') or [],
-                'failed_clip_id': result.get('failed_clip_id'),
-                'compatibility': result.get('compatibility') or {},
-                'restore_reason': result.get('reason'),
-            })
+                # v0.5.57: a historical take owns a branch, not an obligation to splice
+                # into the currently active suffix. Recover the compatible cached suffix
+                # first, then move active pointers as one editorial operation.
+                if order:
+                    cache.ensure_active_chain_lineage(order)
+                    try:
+                        result = cache.restore_take_branch(
+                            order, clip_id, revision, allow_partial=restore_timeline
+                        )
+                    except Exception as exc:
+                        return web.json_response({
+                            'error': f'branch restore failed: {type(exc).__name__}: {exc}',
+                        }, status=500)
+                    if not bool(result.get('ok')):
+                        reason = str(result.get('reason') or 'branch_restore_unavailable')
+                        messages = {
+                            'active_previous_take_missing': 'the active previous clip take is missing',
+                            'incoming_branch_mismatch': 'this take belongs to a different upstream branch',
+                            'no_compatible_cached_suffix': 'no compatible cached downstream branch exists for this take',
+                            'clip_not_in_timeline': 'the clip is no longer present in the current timeline',
+                            'take_revision_not_found': 'take revision not found',
+                        }
+                        return web.json_response({
+                            'error': messages.get(reason, reason),
+                            'reason': reason,
+                            'compatibility': result.get('compatibility') or {},
+                            'failed_clip_id': result.get('failed_clip_id'),
+                        }, status=409)
+                    return web.json_response({
+                        'ok': True,
+                        'take': result.get('take'),
+                        'activated': result.get('activated') or [],
+                        'changed_clips': result.get('changed_clips') or [],
+                        'partial_restore': bool(result.get('partial')),
+                        'invalidated_clips': result.get('invalidated_clips') or [],
+                        'failed_clip_id': result.get('failed_clip_id'),
+                        'compatibility': result.get('compatibility') or {},
+                        'restore_reason': result.get('reason'),
+                    })
 
-        # Legacy/API fallback when no timeline order is supplied.
-        record = cache.activate_revision(clip_id, revision)
-        return web.json_response({'ok': True, 'take': record, 'activated': [{'clip_id': clip_id, 'revision': revision, 'changed': True}]})
+                # Legacy/API fallback when no timeline order is supplied.
+                try:
+                    record = cache.activate_revision(clip_id, revision)
+                except ValueError as exc:
+                    return web.json_response({'error': str(exc)}, status=409)
+                return web.json_response({'ok': True, 'take': record, 'activated': [{'clip_id': clip_id, 'revision': revision, 'changed': True}]})
+
+        return await asyncio.to_thread(action)
 
 
     @routes.post('/longmedia/director/create_take')
@@ -565,21 +590,24 @@ def _install_director_take_routes():
         shot_snapshot = body.get('shot_snapshot')
         if not project_id or not clip_id:
             return web.json_response({'error': 'project_id and clip_id are required'}, status=400)
-        cache = DirectorClipCache(folder_paths.get_output_directory(), project_id)
-        metadata = {
-            'director_timeline_snapshot': snapshot if isinstance(snapshot, dict) else None,
-            'director_global_prompt_snapshot': str(body.get('director_global_prompt_snapshot') or (snapshot.get('_global_prompt') if isinstance(snapshot, dict) else '') or ''),
-            'shot_snapshot': shot_snapshot if isinstance(shot_snapshot, dict) else None,
-            'effective_seed': body.get('effective_seed'),
-            'label': str(body.get('label') or '').strip() or None,
-            'take_name': str(body.get('take_name') or body.get('label') or '').strip() or None,
-            'library_folder': str(body.get('library_folder') or 'Unsorted').strip() or 'Unsorted',
-        }
-        try:
-            record = cache.create_draft_take(clip_id=clip_id, clip_index=clip_index, metadata=metadata)
-        except Exception as exc:
-            return web.json_response({'error': f'{type(exc).__name__}: {exc}'}, status=500)
-        return web.json_response({'ok': True, 'take': record})
+        def action():
+            cache = DirectorClipCache(folder_paths.get_output_directory(), project_id)
+            metadata = {
+                'director_timeline_snapshot': snapshot if isinstance(snapshot, dict) else None,
+                'director_global_prompt_snapshot': str(body.get('director_global_prompt_snapshot') or (snapshot.get('_global_prompt') if isinstance(snapshot, dict) else '') or ''),
+                'shot_snapshot': shot_snapshot if isinstance(shot_snapshot, dict) else None,
+                'effective_seed': body.get('effective_seed'),
+                'label': str(body.get('label') or '').strip() or None,
+                'take_name': str(body.get('take_name') or body.get('label') or '').strip() or None,
+                'library_folder': str(body.get('library_folder') or 'Unsorted').strip() or 'Unsorted',
+            }
+            try:
+                record = cache.create_draft_take(clip_id=clip_id, clip_index=clip_index, metadata=metadata)
+            except Exception as exc:
+                return web.json_response({'error': f'{type(exc).__name__}: {exc}'}, status=500)
+            return web.json_response({'ok': True, 'take': record})
+
+        return await asyncio.to_thread(action)
 
 
     @routes.post('/longmedia/director/duplicate_take')
@@ -590,14 +618,54 @@ def _install_director_take_routes():
         revision = str(body.get('revision') or '').strip()
         if not project_id or not clip_id or not revision:
             return web.json_response({'error': 'project_id, clip_id and revision are required'}, status=400)
-        cache = DirectorClipCache(folder_paths.get_output_directory(), project_id)
-        try:
-            record = cache.duplicate_revision(clip_id, revision)
-        except FileNotFoundError as exc:
-            return web.json_response({'error': str(exc)}, status=404)
-        except Exception as exc:
-            return web.json_response({'error': f'{type(exc).__name__}: {exc}'}, status=500)
-        return web.json_response({'ok': True, 'take': record})
+        def action():
+            cache = DirectorClipCache(folder_paths.get_output_directory(), project_id)
+            try:
+                record = cache.duplicate_revision(clip_id, revision)
+            except FileNotFoundError as exc:
+                return web.json_response({'error': str(exc)}, status=404)
+            except ValueError as exc:
+                return web.json_response({'error': str(exc)}, status=409)
+            except Exception as exc:
+                return web.json_response({'error': f'{type(exc).__name__}: {exc}'}, status=500)
+            return web.json_response({'ok': True, 'take': record})
+
+        return await asyncio.to_thread(action)
+
+
+    @routes.post('/longmedia/director/accept_bridge')
+    async def _director_accept_bridge(request):
+        body = await request.json()
+        project_id = str(body.get('project_id') or '').strip()
+        clip_id = str(body.get('clip_id') or '').strip()
+        revision = str(body.get('revision') or '').strip()
+        order = [str(value) for value in (body.get('clip_order') or []) if str(value)]
+        if not project_id or not clip_id or not revision or not order:
+            return web.json_response(
+                {'error': 'project_id, clip_id, revision, and clip_order are required'}, status=400,
+            )
+        timeline = body.get('director_timeline')
+        global_prompt = body.get('global_prompt')
+        if not isinstance(timeline, dict) or not isinstance(global_prompt, str):
+            return web.json_response({'error': 'Current Director timeline and global prompt are required'}, status=409)
+
+        def action():
+            cache = DirectorClipCache(folder_paths.get_output_directory(), project_id)
+            try:
+                result = cache.accept_pending_bridge(
+                    clip_id, revision, clip_order=order,
+                    director_timeline=timeline, global_prompt=global_prompt,
+                )
+            except FileNotFoundError as exc:
+                return web.json_response({'error': str(exc)}, status=404)
+            except (ValueError, RuntimeError) as exc:
+                return web.json_response({'error': str(exc)}, status=409)
+            except Exception as exc:
+                return web.json_response({'error': f'{type(exc).__name__}: {exc}'}, status=500)
+            return web.json_response(result)
+
+        return await asyncio.to_thread(action)
+
 
     @routes.post('/longmedia/director/delete_take')
     async def _director_delete_take(request):
@@ -607,14 +675,18 @@ def _install_director_take_routes():
         revision = str(body.get('revision') or '').strip()
         if not project_id or not clip_id or not revision:
             return web.json_response({'error': 'project_id, clip_id and revision are required'}, status=400)
-        cache = DirectorClipCache(folder_paths.get_output_directory(), project_id)
-        try:
-            result = cache.delete_revision(clip_id, revision)
-        except FileNotFoundError as exc:
-            return web.json_response({'error': str(exc)}, status=404)
-        except Exception as exc:
-            return web.json_response({'error': f'{type(exc).__name__}: {exc}'}, status=500)
-        return web.json_response(result)
+        def action():
+            cache = DirectorClipCache(folder_paths.get_output_directory(), project_id)
+            try:
+                result = cache.delete_revision(clip_id, revision)
+            except FileNotFoundError as exc:
+                return web.json_response({'error': str(exc)}, status=404)
+            except Exception as exc:
+                return web.json_response({'error': f'{type(exc).__name__}: {exc}'}, status=500)
+            return web.json_response(result)
+
+        return await asyncio.to_thread(action)
+
 
     @routes.post('/longmedia/director/rename_take')
     async def _director_rename_take(request):
@@ -625,22 +697,30 @@ def _install_director_take_routes():
         name = str(body.get('name') or '').strip()
         if not project_id or not clip_id or not revision or not name:
             return web.json_response({'error': 'project_id, clip_id, revision and name are required'}, status=400)
-        cache = DirectorClipCache(folder_paths.get_output_directory(), project_id)
-        try:
-            result = cache.rename_take(clip_id, revision, name)
-        except FileNotFoundError as exc:
-            return web.json_response({'error': str(exc)}, status=404)
-        except Exception as exc:
-            return web.json_response({'error': f'{type(exc).__name__}: {exc}'}, status=500)
-        return web.json_response(result)
+        def action():
+            cache = DirectorClipCache(folder_paths.get_output_directory(), project_id)
+            try:
+                result = cache.rename_take(clip_id, revision, name)
+            except FileNotFoundError as exc:
+                return web.json_response({'error': str(exc)}, status=404)
+            except Exception as exc:
+                return web.json_response({'error': f'{type(exc).__name__}: {exc}'}, status=500)
+            return web.json_response(result)
+
+        return await asyncio.to_thread(action)
+
 
     @routes.get('/longmedia/director/take_folders')
     async def _director_take_folders(request):
         project_id = str(request.query.get('project_id') or '').strip()
         if not project_id:
             return web.json_response({'error': 'project_id is required'}, status=400)
-        cache = DirectorClipCache(folder_paths.get_output_directory(), project_id)
-        return web.json_response({'project_id': project_id, 'folders': cache.list_library_folders()})
+        def action():
+            cache = DirectorClipCache(folder_paths.get_output_directory(), project_id, read_only=True)
+            return web.json_response({'project_id': project_id, 'folders': cache.list_library_folders()})
+
+        return await asyncio.to_thread(action)
+
 
     @routes.post('/longmedia/director/create_take_folder')
     async def _director_create_take_folder(request):
@@ -649,14 +729,18 @@ def _install_director_take_routes():
         name = str(body.get('name') or '').strip()
         if not project_id or not name:
             return web.json_response({'error': 'project_id and name are required'}, status=400)
-        cache = DirectorClipCache(folder_paths.get_output_directory(), project_id)
-        try:
-            result = cache.create_library_folder(name)
-        except FileExistsError as exc:
-            return web.json_response({'error': str(exc)}, status=409)
-        except Exception as exc:
-            return web.json_response({'error': f'{type(exc).__name__}: {exc}'}, status=500)
-        return web.json_response(result)
+        def action():
+            cache = DirectorClipCache(folder_paths.get_output_directory(), project_id)
+            try:
+                result = cache.create_library_folder(name)
+            except FileExistsError as exc:
+                return web.json_response({'error': str(exc)}, status=409)
+            except Exception as exc:
+                return web.json_response({'error': f'{type(exc).__name__}: {exc}'}, status=500)
+            return web.json_response(result)
+
+        return await asyncio.to_thread(action)
+
 
     @routes.post('/longmedia/director/move_take')
     async def _director_move_take(request):
@@ -667,14 +751,18 @@ def _install_director_take_routes():
         folder = str(body.get('folder') or '').strip()
         if not project_id or not clip_id or not revision or not folder:
             return web.json_response({'error': 'project_id, clip_id, revision and folder are required'}, status=400)
-        cache = DirectorClipCache(folder_paths.get_output_directory(), project_id)
-        try:
-            result = cache.move_take_to_folder(clip_id, revision, folder)
-        except FileNotFoundError as exc:
-            return web.json_response({'error': str(exc)}, status=404)
-        except Exception as exc:
-            return web.json_response({'error': f'{type(exc).__name__}: {exc}'}, status=500)
-        return web.json_response(result)
+        def action():
+            cache = DirectorClipCache(folder_paths.get_output_directory(), project_id)
+            try:
+                result = cache.move_take_to_folder(clip_id, revision, folder)
+            except FileNotFoundError as exc:
+                return web.json_response({'error': str(exc)}, status=404)
+            except Exception as exc:
+                return web.json_response({'error': f'{type(exc).__name__}: {exc}'}, status=500)
+            return web.json_response(result)
+
+        return await asyncio.to_thread(action)
+
 
     @routes.get('/longmedia/embeddings')
     async def _longmedia_embeddings(request):
@@ -717,45 +805,62 @@ def _install_director_take_routes():
         clip_ids = [v for v in str(request.query.get('clip_ids') or '').split(',') if v]
         if not project_id:
             return web.json_response({'error': 'project_id is required'}, status=400)
-        cache = DirectorClipCache(folder_paths.get_output_directory(), project_id)
-        if clip_ids:
-            cache.ensure_active_chain_lineage(clip_ids)
-        clips = {}
-        for clip_id in clip_ids:
-            active = cache.active_metadata(clip_id)
-            takes = cache.list_take_metadata(clip_id)
-            active_revision = str((active or {}).get('revision') or '')
-            editor_active_revision = str(cache.editor_active_revision(clip_id) or '')
-            for take in takes:
-                take['active'] = bool(editor_active_revision and str(take.get('revision') or '') == editor_active_revision)
-                take['render_active'] = bool(active_revision and str(take.get('revision') or '') == active_revision)
-            clips[clip_id] = {
-                'active': active,
-                'active_revision': active_revision or None,
-                'editor_active_revision': editor_active_revision or None,
-                'take_count': len(takes),
-                'takes': takes,
+        def action():
+            cache = DirectorClipCache(folder_paths.get_output_directory(), project_id, read_only=True)
+            workspace_rows = cache.index_status_workspaces()
+            workspace_by_clip = {}
+            for row in workspace_rows:
+                workspace_by_clip.setdefault(str(row[1].get('clip_id') or ''), []).append(row)
+            clips = {}
+            for clip_id in clip_ids:
+                active = cache.active_metadata(clip_id)
+                takes = cache.list_take_metadata(clip_id, workspace_rows=workspace_by_clip.get(clip_id, []))
+                if active is not None:
+                    seed_text = _director_effective_seed_text(active.get('effective_seed'))
+                    if seed_text is not None:
+                        active['effective_seed_text'] = seed_text
+                active_revision = str((active or {}).get('revision') or '')
+                editor_active_revision = str(cache.editor_active_revision(clip_id) or '')
+                for take in takes:
+                    seed_text = _director_effective_seed_text(take.get('effective_seed'))
+                    if seed_text is not None:
+                        take['effective_seed_text'] = seed_text
+                    take['active'] = bool(editor_active_revision and str(take.get('revision') or '') == editor_active_revision)
+                    take['render_active'] = bool(active_revision and str(take.get('revision') or '') == active_revision)
+                clips[clip_id] = {
+                    'active': active,
+                    'active_revision': active_revision or None,
+                    'editor_active_revision': editor_active_revision or None,
+                    'take_count': len(takes),
+                    'takes': takes,
+                }
+            known_clips = set(clip_ids)
+            all_takes = []
+            gallery_fields = {
+                'clip_id', 'revision', 'take_name', 'label', 'library_folder',
+                'workspace_folder', 'created_at_unix', 'effective_seed', 'effective_seed_text', 'draft',
+                'state', 'preview_file', 'preview_generated_at_unix', 'active',
+                'render_active',
             }
-        known_clips = set(clip_ids)
-        all_takes = []
-        gallery_fields = {
-            'clip_id', 'revision', 'take_name', 'label', 'library_folder',
-            'workspace_folder', 'created_at_unix', 'effective_seed', 'draft',
-            'state', 'preview_file', 'preview_generated_at_unix', 'active',
-            'render_active',
-        }
-        for take in cache.list_all_take_metadata():
-            # Current clips already include full manifests above. Keep the project-wide
-            # supplement limited to other clips, so snapshots are not duplicated.
-            if str(take.get('clip_id') or '') in known_clips:
-                continue
-            all_takes.append({key: value for key, value in take.items() if key in gallery_fields})
-        return web.json_response({
-            'project_id': project_id,
-            'clips': clips,
-            'all_takes': all_takes,
-            'folders': cache.list_library_folders(),
-        })
+            for take in cache.list_all_take_metadata(workspace_rows=workspace_rows):
+                # Current clips already include full manifests above. Keep the project-wide
+                # supplement limited to other clips, so snapshots are not duplicated.
+                if str(take.get('clip_id') or '') in known_clips:
+                    continue
+                compact = {key: value for key, value in take.items() if key in gallery_fields}
+                seed_text = _director_effective_seed_text(take.get('effective_seed'))
+                if seed_text is not None:
+                    compact['effective_seed_text'] = seed_text
+                all_takes.append(compact)
+            return web.json_response({
+                'project_id': project_id,
+                'clips': clips,
+                'all_takes': all_takes,
+                'folders': cache.list_library_folders(),
+            })
+
+        return await asyncio.to_thread(action)
+
 
 
 _install_director_take_routes()

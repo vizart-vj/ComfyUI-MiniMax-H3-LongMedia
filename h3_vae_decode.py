@@ -8,6 +8,7 @@ existing batch dimension to reduce Python/kernel-launch overhead.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from inspect import Parameter, signature
 from types import MethodType
 from typing import Any, Iterator
 
@@ -46,6 +47,18 @@ def choose_h3_tile_batch(requested: int, free_vram_bytes: int | None) -> int:
     if free >= 8 * _GIB:
         return 2
     return 1
+
+
+def uses_native_h3_tiling(stage: Any) -> bool:
+    """Frames-aware upstream VAE owns temporal slicing and tile blending."""
+    decode = getattr(stage, "tiled_decode", None)
+    if not callable(decode):
+        return True
+    try:
+        params = signature(decode).parameters.values()
+        return any(p.name == "frames" or p.kind in (Parameter.VAR_POSITIONAL, Parameter.VAR_KEYWORD) for p in params)
+    except (TypeError, ValueError):
+        return True
 
 
 def fallback_tile_batches(start: int) -> tuple[int, ...]:
@@ -172,7 +185,10 @@ def batched_h3_tiles(vae_wrapper: Any, tile_batch: int) -> Iterator[dict[str, in
         "temporal_calls": 0,
         "max_tiles_per_call": 0,
     }
-    if stage is None or not is_minimax_h3_video_vae(vae_wrapper) or int(tile_batch) <= 1:
+    if (
+        stage is None or not is_minimax_h3_video_vae(vae_wrapper)
+        or int(tile_batch) <= 1 or uses_native_h3_tiling(stage)
+    ):
         yield stats
         return
 

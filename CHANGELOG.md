@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.6.69
+
+- Replace the Sampler preset action menu with separate New preset, Overwrite preset, and Delete preset buttons. Overwrite and Delete become available when a preset is selected.
+- Refresh the bilingual guides and cumulative 0.6.69 release notes against the public 0.6.63 baseline, including Director Range/Bridge, current VAE Decode controls, verification limits and the Sampler interface.
+
+## 0.6.68
+
+- Pin Sampler View above its presets and inputs as a native ComfyUI combo. Restore its selected tier and position when widgets are recreated. Basic and Advanced hide empty sections.
+- Serialize Setup and Sampler in backend widget order without mutating the live node, so workflow saves and history snapshots keep the presentation controls attached.
+- Batch Director canvas panning by animation frame. Retain the final movement when releasing the middle button.
+- Use ComfyUI's lightweight Director placeholder at overview zoom and coalesce redundant Director and Setup updates when opening or rewiring workflows.
+
+## 0.6.67
+
+- Fix unified sampler cleanup after the stock ComfyUI guider removes its temporary conditions. Additional model cleanup now receives the control branches acquired when the models were prepared. Successful MultiClip runs can proceed from TAKE save to Decode, and render errors retain their original traceback.
+
+## 0.6.66
+
+### Runtime and compatibility
+
+- ComfyUI's frames-aware H3 VideoVAE keeps its native tiling, blending, and frame slicing. Older VAE implementations retain LongMedia's tile batch controls (#25, #26).
+- H3 final-head streaming runs only around the LongMedia forward that owns it. Supports the current ComfyUI per-stream PDD grids, and restores the model method after completion or interruption (#16, #21).
+- Sampler restores the original guider and hooks after preparation or sampling errors. Cleanup errors retain their stage and the original render error stays visible. The log identifies sampler preparation, cleanup, TAKE save and decode boundaries.
+- MultiClip Decode joins existing video latent views in one allocation where concatenation is needed. It preserves the native continuous VAE path.
+
+### Director
+
+- TAKE HTTP handlers move filesystem operations off the server loop. Status is read-only and indexes workspace manifests once. Large tensor writes are staged before the project lock is acquired to publish a TAKE.
+- Bridge acceptance checks the current Director timeline and global prompt against the render snapshot as well as frozen TAKE revisions and both AV seams. Older pending renders with a usable snapshot remain eligible.
+- Lip sync keeps the full Director Audio 1 soundtrack, including a silent opening, and slices it on the global timeline (#28).
+- Sampler preset selection and actions use native canvas widgets to avoid a floating DOM overlay over node controls (#30).
+
+## 0.6.65-DEV-director-range-bridge
+
+- Bridge context menus show the exact shorter and longer H3-grid durations and can resize the current clip while ripple-shifting the following MAIN timeline.
+- Silent VIDEO references no longer fail when VideoHelperSuite exposes its lazy audio output for a source file that has no audio stream. Actual audio decode failures remain visible.
+
+## 0.6.64
+
+### Approved-prefix append and selective TAKE reuse
+
+- New enabled GENERATED suffix clips no longer require a pre-existing TAKE. Partial RUN validates only replay/boundary dependencies and never samples disabled clips.
+- Historical tail locks are used only before frozen GENERATED successors, not between newly rendered adjacent clips.
+- Render semantic keys exclude editor-only name/run_enabled and the compiler-owned outgoing transition_to_next flag. Pre-0.6.64 hashes are revalidated against current prompt, seed, refs and audio policy before reuse.
+- A disabled approved single-shot TAKE remains frozen during single-to-MultiClip append even when the new queue randomizes the seed; native shape/timing checks remain strict and old tensors are not falsely certified with new semantics.
+- TAKE-cache initialization/read failures no longer silently trigger an implicit full render.
+- Cache-dependent clip/from_here regeneration prepares all potentially sampled conditionings even without RefMods, avoiding None-conditioning failures on range expansion.
+- Added offline production-preflight tests using real on-disk native AV TAKEs. See the 0.6.64 release notes for the scope, known baseline test failures and manual install steps.
+
 ## 0.6.63
 
 ### Director camera presets and conditioning safety

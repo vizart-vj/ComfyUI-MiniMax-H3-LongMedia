@@ -4,28 +4,17 @@ Production-oriented ComfyUI nodes для **MiniMax H3**: long-form video/audio g
 
 ![screenshot](ex.png)
 
-**Текущий релиз: 0.6.63.**
+**Текущий релиз: 0.6.69.**
 
-## Что изменилось после публичного v0.6.50
+## Что изменилось после публичной версии 0.6.63
 
-- **Настоящая selective regeneration:** clip-only rerender семплирует только выбранный GENERATED clip, когда cached seam contracts остаются валидными; From Here пересчитывает только зависимый suffix.
-- **Immutable MEDIA blocks:** импортированное видео может лежать прямо на BASE timeline и не участвовать в diffusion.
-- **Native continuation:** GENERATED parent использует сохранённый TAKE latent state; для MEDIA кодируется только нужный tail и прикрепляется как native frame-0 H3 keyframe.
-- **O(1)-style append:** добавление следующего клипа использует уже сохранённый TAKE/cache state и не пересобирает весь timeline.
-- **Quantized AUTO routing:** INT8/W4A8/NVFP4 policy использует реальный packed storage и activation headroom вместо BF16-equivalent logical size.
-- **Windows/AIMDO:** большие checkpoints остаются file-backed через ComfyUI `ModelMMAP` / `TensorFileSlice`; eager full-model RAM load не используется.
-- **Mixed AV assembly:** исходный MEDIA остаётся вне VideoVAE; mono/stereo timeline audio собирается по явному channel contract.
-- **RefMod с настоящими параметрами извлечения:** resolution до VAE, лимит visual tokens, grid, кадры видео, voice seconds и Compressed refinement применяются в encoder path.
-- **Мультиклипный Refine без холодного шва:** Stage 2 наследует refined overlap предыдущего клипа; аудио Stage 1 остаётся неизменным.
-- **Более предсказуемый Director:** маркеры cut внутри клипа, отдельные trim/cut действия, gap controls и Fit при любом смещении таймлайна.
-- **Меньше удерживаемых preview-ресурсов:** Director освобождает старые video strips и TAKE thumbnails и ограничивает кэш decoded previews.
-- **Пресеты Sampler:** можно создавать, перезаписывать и удалять профили, сохранённые в workflow; строка состояния показывает изменения после выбора. Seed остаётся независимым.
-- **Надёжнее рендеры:** Character RefMod сохраняет приоритет идентичности через MultiClip, а motion_repair сохраняется в workflow.
-- **Выбор клипов для RUN:** отключайте отдельные клипы и объединяйте соседние готовые клипы в обратимый блок таймлайна, сохраняя исходные TAKE.
-- **Общие пресеты Camera:** создавайте и редактируйте их прямо в настройках Camera-клипа. Библиотека сохраняется в Director workflow и доступна во всех Camera-клипах, включая созданные позже.
-- **Исправлено копирование conditioning:** пустая опциональная ветка больше не обрушает перегенерацию клипа после смены роли AUDIO.
+- **Частичный MultiClip RUN:** готовые клипы можно оставить замороженными и добавить новые без предварительного TAKE для новых целей. При ошибке чтения кеша запуск останавливается вместо неявного полного рендера.
+- **Range и Bridge:** перегенерация диапазона между CUT-маркерами и генерация моста между совместимыми GENERATED-клипами. Результат Bridge остаётся ожидающим до Accept или Discard.
+- **Совместимость с ComfyUI:** новая H3 VAE сохраняет собственную нарезку кадров и тайлов; после прохода LongMedia исходный output head модели восстанавливается.
+- **Аудио и очистка:** lip sync сохраняет полную шкалу Audio 1, включая тишину в начале. Sampler освобождает модели, подготовленные для запуска, и сохраняет исходную ошибку рендера.
+- **Sampler и интерфейс:** View расположен над параметрами, действия пресетов вынесены в отдельные кнопки New, Overwrite и Delete, а обновления Director сгруппированы для уменьшения нагрузки на интерфейс.
 
-См. [Release Notes 0.6.63](docs/RELEASE_NOTES_0.6.63_RU.md).
+Подробности и границы проверки — в общем [описании релиза 0.6.69](docs/RELEASE_NOTES_0.6.69_RU.md).
 
 ## Документация
 
@@ -112,7 +101,7 @@ longest_input
 
 См. [Режимы LongMedia](docs/MODES_GUIDE_RU.md).
 
-## LongMedia Director 0.6.63
+## LongMedia Director 0.6.69
 
 Director — unified authoring surface для MAIN timing, prompts, WHO & WHAT media, ролей REF/FIRST/LAST, cameras, temporal embeddings, audio policy, resolution policy, Program Monitor и TAKE management.
 

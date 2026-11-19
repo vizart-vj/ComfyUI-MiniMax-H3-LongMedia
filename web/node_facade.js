@@ -74,13 +74,14 @@ function lmSetWidgetVisible(widget, visible, visited = new WeakSet()) {
     // runtime can leave the Vue widget registry/render key stale until a page reload.
     // Replace the options object (rather than mutating it in place) so reactive
     // frontends can observe the visibility change immediately.
-    if (widget.__lmVisibleV328 !== nextVisible || widget.options?.hidden !== nextHidden) {
+    const presentationChanged = widget.__lmVisibleV328 !== nextVisible;
+    if (presentationChanged || widget.options?.hidden !== nextHidden) {
         widget.options = { ...(widget.options ?? {}), hidden: nextHidden };
     }
-    widget.hidden = nextHidden; // compatibility marker used by some legacy extensions
-    widget.__lmVisibleV328 = nextVisible;
+    if (widget.hidden !== nextHidden) widget.hidden = nextHidden;
+    if (presentationChanged) widget.__lmVisibleV328 = nextVisible;
 
-    if (nextVisible) {
+    if (nextVisible && presentationChanged) {
         lmRestoreWidgetProperty(
             widget, "computeSize", widget.__lmHadOwnComputeSizeV328,
             widget.__lmOrigComputeSizeV328,
@@ -89,10 +90,10 @@ function lmSetWidgetVisible(widget, visible, visited = new WeakSet()) {
             widget, "draw", widget.__lmHadOwnDrawV328,
             widget.__lmOrigDrawV328,
         );
-    } else {
+    } else if (nextHidden) {
         // Legacy LiteGraph fallback: collapse the widget without changing its type.
-        widget.computeSize = LM_COLLAPSED_WIDGET_SIZE;
-        widget.draw = LM_HIDDEN_WIDGET_DRAW;
+        if (widget.computeSize !== LM_COLLAPSED_WIDGET_SIZE) widget.computeSize = LM_COLLAPSED_WIDGET_SIZE;
+        if (widget.draw !== LM_HIDDEN_WIDGET_DRAW) widget.draw = LM_HIDDEN_WIDGET_DRAW;
     }
 
     if (widget.linkedWidgets) {
@@ -108,10 +109,12 @@ function lmWidget(node, name) {
         cache = new Map();
         node.__lmWidgetByNameV526 = cache;
     }
+    const widgets = node.widgets;
     const cached = cache.get(name);
-    if (cached) return cached;
-    const found = node.widgets?.find((w) => w?.name === name);
+    if (cached && widgets?.includes(cached)) return cached;
+    const found = widgets?.find((w) => w?.name === name);
     if (found) cache.set(name, found);
+    else cache.delete(name);
     return found;
 }
 
@@ -142,12 +145,8 @@ function lmWireSetupConnectionRefresh(node) {
     const original = node.onConnectionsChange;
     node.onConnectionsChange = function (...args) {
         const result = original?.apply(this, args);
-        // LiteGraph calls this before/after link bookkeeping depending on renderer.
-        // Defer refreshes so clip_plan.link/links reflects the final connection state.
-        queueMicrotask(() => lmRefreshSetup(node));
-        requestAnimationFrame(() => lmRefreshSetup(node));
-        setTimeout(() => lmRefreshSetup(node), 0);
-        setTimeout(() => lmRefreshSetup(node), 50);
+        // Layout reads links after LiteGraph finishes the connection transaction.
+        if (!lmConfiguringGraph) lmScheduleModeRefresh(this, lmRefreshSetup);
         return result;
     };
 }
@@ -229,7 +228,7 @@ function lmSetNumber(node, name, fallback, min, max, integer = false) {
     if (integer) value = Math.round(value);
     if (min != null) value = Math.max(min, value);
     if (max != null) value = Math.min(max, value);
-    w.value = value;
+    if (w.value !== value) w.value = value;
 }
 
 function lmSetBoolean(node, name, fallback) {
@@ -647,9 +646,13 @@ function lmSyncMulticlipEditorFromStorage(node) {
 
 const LM_NAMED_STATE_KEY = "__lm_named_widget_state_v040";
 
+function lmIsPresentationWidget(widget) {
+    return widget?.__lmGroupHeader || widget?.__lmMulticlipEditorV387 || widget?.__lmPresentationOnly;
+}
+
 function lmNamedSerializableWidgets(node) {
     return (node?.widgets ?? []).filter((w) =>
-        w && !w.__lmGroupHeader && !w.__lmMulticlipEditorV387 &&
+        w && !lmIsPresentationWidget(w) &&
         typeof w.name === "string" && !w.name.startsWith("__lm_")
     );
 }
@@ -664,8 +667,6 @@ function lmCaptureNamedWidgetState(node) {
             state[w.name] = v;
         } catch (_) {}
     }
-    node.properties ??= {};
-    node.properties[LM_NAMED_STATE_KEY] = state;
     return state;
 }
 
@@ -693,40 +694,35 @@ function lmInstallNamedWidgetPersistence(node) {
     const originalSerialize = node.serialize;
 
     node.serialize = function(...args) {
-        lmCaptureNamedWidgetState(this);
-
-        const allWidgets = this.widgets;
-        const serializableWidgets = Array.isArray(allWidgets)
-            ? allWidgets.filter((w) => !w?.__lmGroupHeader && !w?.__lmMulticlipEditorV387)
-            : (allWidgets ?? []);
-        const byName = new Map(
-            (serializableWidgets ?? [])
-                .filter((widget) => typeof widget?.name === "string")
-                .map((widget) => [widget.name, widget]),
-        );
-        const orderedWidgets = [];
-        const orderedSet = new Set();
-        for (const name of this.__lmWidgetSchemaOrderV060 ?? []) {
-            const widget = byName.get(name);
-            if (!widget || orderedSet.has(widget)) continue;
-            orderedWidgets.push(widget);
-            orderedSet.add(widget);
-        }
-        for (const widget of serializableWidgets ?? []) {
-            if (!orderedSet.has(widget)) {
-                orderedWidgets.push(widget);
-                orderedSet.add(widget);
+        const namedState = lmCaptureNamedWidgetState(this);
+        const widgets = this.widgets ?? [];
+        const data = originalSerialize.apply(this, args);
+        const values = data.widgets_values;
+        if (Array.isArray(values)) {
+            // Current LiteGraph emits compact arrays and a named map. Older
+            // versions leave holes at the original indices of skipped widgets.
+            // Reorder the result: assigning this.widgets mutates the live list
+            // in current ComfyUI, including references held by the renderer.
+            const source = data.widgets_values_named
+                ? widgets.filter((widget) => widget?.serialize !== false)
+                : widgets;
+            const entries = [];
+            const byName = new Map();
+            for (const [index, widget] of source.entries()) {
+                if (!widget || widget.serialize === false || lmIsPresentationWidget(widget) || !(index in values)) continue;
+                const entry = { value: values[index] };
+                entries.push(entry);
+                byName.set(widget.name, entry);
             }
+            const ordered = new Set();
+            for (const name of this.__lmWidgetSchemaOrderV060) {
+                if (byName.has(name)) ordered.add(byName.get(name));
+            }
+            for (const entry of entries) ordered.add(entry);
+            data.widgets_values = Array.from(ordered, (entry) => entry.value);
         }
-        this.widgets = orderedWidgets;
-        try {
-            const data = originalSerialize.apply(this, args);
-            data.properties ??= {};
-            data.properties[LM_NAMED_STATE_KEY] = { ...(this.properties?.[LM_NAMED_STATE_KEY] ?? {}) };
-            return data;
-        } finally {
-            this.widgets = allWidgets;
-        }
+        data.properties = { ...data.properties, [LM_NAMED_STATE_KEY]: namedState };
+        return data;
     };
 }
 
@@ -776,10 +772,9 @@ function lmMoveWidgetBefore(node, name, beforeName) {
     if (!Array.isArray(widgets)) return;
     const from = widgets.findIndex((w) => w?.name === name);
     const to = widgets.findIndex((w) => w?.name === beforeName);
-    if (from < 0 || to < 0 || from === to) return;
+    if (from < 0 || to < 0 || from === to || from === to - 1) return;
     const [w] = widgets.splice(from, 1);
-    const target = widgets.findIndex((x) => x?.name === beforeName);
-    widgets.splice(Math.max(0, target), 0, w);
+    widgets.splice(from < to ? to - 1 : to, 0, w);
 }
 
 function lmAddCanvasGroupHeader(node, name, title, beforeName) {
@@ -993,48 +988,31 @@ function lmRefreshSetup(node) {
 }
 
 
-function lmInstallPresentationSafeSerialize(node) {
-    if (!node || node.__lmPresentationSafeSerializeV457 || typeof node.serialize !== "function") return;
-    node.__lmPresentationSafeSerializeV457 = true;
-    const originalSerialize = node.serialize;
-    node.serialize = function(...args) {
-        const allWidgets = this.widgets;
-        if (!Array.isArray(allWidgets) || !allWidgets.some((w) => w?.__lmGroupHeader)) {
-            return originalSerialize.apply(this, args);
-        }
-        // LiteGraph widgets_values is positional. Temporarily remove decorative
-        // section headers so they cannot shift saved values across schema inputs.
-        this.widgets = allWidgets.filter((w) => !w?.__lmGroupHeader && !w?.__lmPresentationOnly);
-        try {
-            return originalSerialize.apply(this, args);
-        } finally {
-            this.widgets = allWidgets;
-        }
-    };
-}
+const LM_SAMPLER_VIEW = '__lm_sampler_ui_level';
+const LM_SAMPLER_VIEW_LABELS = new Map([
+    ['basic', 'Basic'], ['advanced', 'Advanced'], ['debug', 'Debug'],
+]);
 
 function lmInstallSamplerUiLevel(node) {
-    if (!node || node.__lmSamplerUiLevelInstalled) return;
-    node.__lmSamplerUiLevelInstalled = true;
-    node.properties = node.properties || {};
-    if (!['basic', 'advanced', 'debug'].includes(node.properties.lmSamplerUiLevel)) {
+    node.properties ??= {};
+    if (!LM_SAMPLER_VIEW_LABELS.has(node.properties.lmSamplerUiLevel)) {
         node.properties.lmSamplerUiLevel = 'basic';
     }
-    if (typeof node.addDOMWidget === 'function' && typeof document !== 'undefined') {
-        const wrap = document.createElement('div');
-        wrap.style.cssText = 'display:flex;align-items:center;gap:8px;width:100%;box-sizing:border-box;padding:3px 6px;font:11px system-ui;color:#b9c2ce';
-        const label = document.createElement('span'); label.textContent = 'VIEW'; label.style.cssText='font-weight:800;font-size:9px;letter-spacing:.06em';
-        const select = document.createElement('select');
-        select.style.cssText='flex:1;background:#171a20;color:#e7ebf0;border:1px solid #343a44;border-radius:4px;padding:4px';
-        for (const [value, text] of [['basic','Basic'],['advanced','Advanced'],['debug','Debug']]) {
-            const option = document.createElement('option'); option.value=value; option.textContent=text; option.selected=value===node.properties.lmSamplerUiLevel; select.append(option);
-        }
-        select.onpointerdown = (event) => event.stopPropagation();
-        select.onchange = () => { node.properties.lmSamplerUiLevel = select.value; lmRefreshSampler(node); };
-        wrap.append(label, select);
-        const w = node.addDOMWidget('__lm_sampler_ui_level', 'longmedia_sampler_level', wrap, { serialize:false, hideOnZoom:false, getMinHeight:()=>30, getMaxHeight:()=>30, getValue:()=>undefined, setValue:()=>{} });
-        if (w) { w.__lmPresentationOnly = true; w.serialize = false; w.serializeValue = () => undefined; }
+    if (typeof node.addWidget !== 'function') return;
+    const value = LM_SAMPLER_VIEW_LABELS.get(node.properties.lmSamplerUiLevel);
+    let view = lmWidget(node, LM_SAMPLER_VIEW);
+    if (!view) {
+        view = node.addWidget('combo', LM_SAMPLER_VIEW, value, (label) => {
+            node.properties.lmSamplerUiLevel = String(label).toLowerCase();
+            lmRefreshSampler(node);
+        }, { serialize: false, values: [...LM_SAMPLER_VIEW_LABELS.values()] });
+        view.label = 'View';
+        view.__lmPresentationOnly = true;
+        view.serialize = false;
+        view.serializeValue = () => undefined;
     }
+    if (view.value !== value) view.value = value;
+    lmMoveWidgetBefore(node, LM_SAMPLER_VIEW, node.widgets?.[0]?.name);
 }
 
 const LM_SAMPLER_BASIC = new Set([
@@ -1162,52 +1140,29 @@ function lmSamplerPresetById(node, id) {
     return lmSamplerPresetLibrary(node).find((preset) => preset.id === id) ?? null;
 }
 
+const LM_NO_SAMPLER_PRESET = 'Select preset…';
+
+function lmSamplerPresetLabel(preset) {
+    // The placeholder is reserved in the visible list. Preserve workflow
+    // names verbatim even if an older workflow used that exact name.
+    return preset.name === LM_NO_SAMPLER_PRESET ? ` ${preset.name}` : preset.name;
+}
+
 function lmUpdateSamplerPresetStatus(node) {
     const ui = node?.__lmSamplerPresetUiV060;
     if (!ui) return;
     const id = String(node.properties?.[LM_SAMPLER_PRESET_SELECTED_KEY] ?? '');
     const preset = lmSamplerPresetById(node, id);
-    if (!preset) {
-        if (node.properties?.[LM_SAMPLER_PRESET_SELECTED_KEY]) node.properties[LM_SAMPLER_PRESET_SELECTED_KEY] = '';
-        ui.select.value = '';
-        ui.status.textContent = 'No preset selected';
-        ui.status.style.color = '#9ca6b2';
-        ui.overwrite.disabled = true;
-        ui.remove.disabled = true;
-        ui.overwrite.style.opacity = '0.5';
-        ui.remove.style.opacity = '0.5';
-        return;
-    }
-    ui.select.value = preset.id;
-    const changed = lmSamplerPresetModifiedCount(node, preset);
-    ui.status.textContent = changed
-        ? `${preset.name} · Modified (${changed} ${changed === 1 ? 'setting' : 'settings'})`
-        : `${preset.name} · Saved`;
-    ui.status.style.color = changed ? '#e9aa59' : '#8ecca5';
-    ui.overwrite.disabled = false;
-    ui.remove.disabled = false;
-    ui.overwrite.style.opacity = '1';
-    ui.remove.style.opacity = '1';
-}
-
-function lmRenderSamplerPresetOptions(node) {
-    const ui = node?.__lmSamplerPresetUiV060;
-    if (!ui) return;
-    const selected = String(node.properties?.[LM_SAMPLER_PRESET_SELECTED_KEY] ?? '');
-    ui.select.replaceChildren();
-    const empty = document.createElement('option');
-    empty.value = '';
-    empty.textContent = 'Select preset…';
-    ui.select.append(empty);
-    for (const preset of lmSamplerPresetLibrary(node)) {
-        const option = document.createElement('option');
-        option.value = preset.id;
-        option.textContent = preset.name;
-        ui.select.append(option);
-    }
-    ui.select.value = selected;
-    if (ui.select.value !== selected && selected) node.properties[LM_SAMPLER_PRESET_SELECTED_KEY] = '';
-    lmUpdateSamplerPresetStatus(node);
+    if (!preset && id) node.properties[LM_SAMPLER_PRESET_SELECTED_KEY] = '';
+    ui.select.options.values = [LM_NO_SAMPLER_PRESET, ...lmSamplerPresetLibrary(node).map(lmSamplerPresetLabel)];
+    ui.select.value = preset ? lmSamplerPresetLabel(preset) : LM_NO_SAMPLER_PRESET;
+    const changed = preset ? lmSamplerPresetModifiedCount(node, preset) : 0;
+    ui.select.label = !preset ? 'Preset' : changed
+        ? `Preset · Modified (${changed} ${changed === 1 ? 'setting' : 'settings'})`
+        : 'Preset · Saved';
+    ui.overwrite.disabled = !preset;
+    ui.remove.disabled = !preset;
+    node.setDirtyCanvas?.(true, false);
 }
 
 function lmApplySamplerPreset(node, preset) {
@@ -1270,93 +1225,57 @@ function lmInstallSamplerPresets(node) {
     if (!Array.isArray(node.properties[LM_SAMPLER_PRESETS_KEY])) node.properties[LM_SAMPLER_PRESETS_KEY] = [];
     if (typeof node.properties[LM_SAMPLER_PRESET_SELECTED_KEY] !== 'string') node.properties[LM_SAMPLER_PRESET_SELECTED_KEY] = '';
     lmInstallSamplerPresetChangeWatcher(node);
-    if (node.__lmSamplerPresetUiV060 || typeof node.addDOMWidget !== 'function' || typeof document === 'undefined') {
-        lmUpdateSamplerPresetStatus(node);
-        return;
-    }
+    if (typeof node.addWidget !== 'function') return;
+    const existing = node.__lmSamplerPresetUiV060;
+    if (existing && [existing.select, existing.create, existing.overwrite, existing.remove]
+        .every((widget) => node.widgets?.includes(widget))) return;
 
-    const wrap = document.createElement('div');
-    wrap.style.cssText = 'display:flex;flex-direction:column;gap:4px;width:100%;box-sizing:border-box;padding:3px 5px 8px;font:11px system-ui;color:#dce2e9;border-bottom:1px solid #343a44;margin-bottom:2px';
-    const row = document.createElement('div');
-    row.style.cssText = 'display:flex;align-items:center;gap:4px;width:100%';
-    const select = document.createElement('select');
-    select.setAttribute('aria-label', 'LongMedia Sampler preset');
-    select.title = 'Preset values are saved with this workflow node.';
-    select.style.cssText = 'min-width:70px;flex:1;background:#171a20;color:#e7ebf0;border:1px solid #343a44;border-radius:4px;padding:4px';
-    const makeButton = (label, title) => {
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.textContent = label;
-        button.title = title;
-        button.style.cssText = 'flex:none;background:#252a32;color:#e7ebf0;border:1px solid #3b424d;border-radius:4px;padding:4px 7px;cursor:pointer;font:600 10px system-ui';
-        button.onpointerdown = (event) => event.stopPropagation();
-        return button;
-    };
-    const create = makeButton('New', 'Create a preset from the current Sampler settings');
-    const overwrite = makeButton('Overwrite', 'Replace the selected preset with the current settings');
-    const remove = makeButton('Delete', 'Delete the selected preset');
-    const status = document.createElement('div');
-    status.setAttribute('role', 'status');
-    status.setAttribute('aria-live', 'polite');
-    status.style.cssText = 'min-height:13px;line-height:13px;padding-left:2px;font:10px system-ui;color:#9ca6b2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
-    row.append(select, create, overwrite, remove);
-    wrap.append(row, status);
-
-    const widget = node.addDOMWidget('__lm_sampler_presets_v060', 'longmedia_sampler_presets', wrap, {
-        serialize: false,
-        hideOnZoom: false,
-        getMinHeight: () => 58,
-        getMaxHeight: () => 58,
-        getValue: () => undefined,
-        setValue: () => {},
-    });
-    if (widget) {
-        widget.__lmPresentationOnly = true;
-        widget.serialize = false;
-        widget.serializeValue = () => undefined;
-        node.__lmSamplerPresetUiV060 = { select, status, create, overwrite, remove };
-        lmMoveWidgetBefore(node, widget.name, 'seed');
-    }
-
-    select.onpointerdown = (event) => event.stopPropagation();
-    select.onchange = () => {
-        const id = String(select.value || '');
-        node.properties[LM_SAMPLER_PRESET_SELECTED_KEY] = id;
-        const preset = lmSamplerPresetById(node, id);
+    // Use native canvas widgets so ComfyUI computes position and hit testing
+    // in the same layout pass as inputs, group headers and hidden widgets.
+    const select = lmWidget(node, '__lm_sampler_presets_v060') ?? node.addWidget('combo', '__lm_sampler_presets_v060', LM_NO_SAMPLER_PRESET, (value) => {
+        const preset = lmSamplerPresetLibrary(node).find((item) => lmSamplerPresetLabel(item) === value);
         if (preset) lmApplySamplerPreset(node, preset);
-        else lmUpdateSamplerPresetStatus(node);
-    };
-    create.onclick = (event) => {
-        event?.stopPropagation?.();
+        else {
+            node.properties[LM_SAMPLER_PRESET_SELECTED_KEY] = '';
+            lmUpdateSamplerPresetStatus(node);
+        }
+    }, { serialize: false, values: [LM_NO_SAMPLER_PRESET] });
+    const create = lmWidget(node, '__lm_sampler_preset_new') ?? node.addWidget('button', '__lm_sampler_preset_new', null, () => {
         const name = globalThis.prompt?.('Name for the new Sampler preset:', 'New preset');
         if (name == null) return;
-        const preset = lmCreateSamplerPreset(node, name);
-        if (!preset) {
-            status.textContent = 'Preset name is empty or already used';
-            status.style.color = '#e9aa59';
+        if (!lmCreateSamplerPreset(node, name)) {
+            node.__lmSamplerPresetUiV060.select.label = 'Preset · empty or duplicate name';
+            node.setDirtyCanvas?.(true, false);
             return;
         }
-        lmRenderSamplerPresetOptions(node);
+        lmUpdateSamplerPresetStatus(node);
         node.graph?.setDirtyCanvas?.(true, true);
-    };
-    overwrite.onclick = (event) => {
-        event?.stopPropagation?.();
-        const preset = lmOverwriteSamplerPreset(node, String(select.value || ''));
-        if (!preset) return;
-        lmRenderSamplerPresetOptions(node);
+    }, { serialize: false });
+    const overwrite = lmWidget(node, '__lm_sampler_preset_overwrite') ?? node.addWidget('button', '__lm_sampler_preset_overwrite', null, () => {
+        const id = node.properties[LM_SAMPLER_PRESET_SELECTED_KEY];
+        if (!lmOverwriteSamplerPreset(node, id)) return;
+        lmUpdateSamplerPresetStatus(node);
         node.graph?.setDirtyCanvas?.(true, true);
-    };
-    remove.onclick = (event) => {
-        event?.stopPropagation?.();
-        const id = String(select.value || '');
+    }, { serialize: false });
+    const remove = lmWidget(node, '__lm_sampler_preset_delete') ?? node.addWidget('button', '__lm_sampler_preset_delete', null, () => {
+        const id = node.properties[LM_SAMPLER_PRESET_SELECTED_KEY];
         const preset = lmSamplerPresetById(node, id);
-        if (!preset) return;
-        if (typeof globalThis.confirm === 'function' && !globalThis.confirm(`Delete Sampler preset “${preset.name}”?`)) return;
+        if (!preset || (typeof globalThis.confirm === 'function' && !globalThis.confirm(`Delete Sampler preset “${preset.name}”?`))) return;
         lmDeleteSamplerPreset(node, id);
-        lmRenderSamplerPresetOptions(node);
+        lmUpdateSamplerPresetStatus(node);
         node.graph?.setDirtyCanvas?.(true, true);
-    };
-    lmRenderSamplerPresetOptions(node);
+    }, { serialize: false });
+    create.label = 'New preset';
+    overwrite.label = 'Overwrite preset';
+    remove.label = 'Delete preset';
+    for (const control of [select, create, overwrite, remove]) {
+        control.__lmPresentationOnly = true;
+        control.serialize = false;
+        control.serializeValue = () => undefined;
+        lmMoveWidgetBefore(node, control.name, 'seed');
+    }
+    node.__lmSamplerPresetUiV060 = { select, create, overwrite, remove };
+    lmUpdateSamplerPresetStatus(node);
 }
 
 function lmSamplerUiAllowed(node, widget) {
@@ -1369,11 +1288,9 @@ function lmSamplerUiAllowed(node, widget) {
 
 function lmInstallSamplerGroups(node) {
     lmInstallNamedWidgetPersistence(node);
-    lmInstallPresentationSafeSerialize(node);
-    lmInstallSamplerUiLevel(node);
     lmInstallSamplerPresets(node);
-    if (!node || node.__lmSamplerGroupsV526 || typeof node.addCustomWidget !== "function") return;
-    node.__lmSamplerGroupsV526 = true;
+    lmInstallSamplerUiLevel(node);
+    if (typeof node.addCustomWidget !== "function") return;
     const groups = [
         ["video_context_denoise", "CONTEXT / SEGMENTS"],
         ["mlp_chunk_tokens", "ATTENTION / COMPUTE"],
@@ -1383,7 +1300,9 @@ function lmInstallSamplerGroups(node) {
         ["memory_mode", "RUNTIME MODE"],
     ];
     for (const [beforeName, title] of groups) {
-        lmAddCanvasGroupHeader(node, `__lm_group_${beforeName}`, title, beforeName);
+        const name = `__lm_group_${beforeName}`;
+        if (lmWidget(node, name)) lmMoveWidgetBefore(node, name, beforeName);
+        else lmAddCanvasGroupHeader(node, name, title, beforeName);
     }
 }
 
@@ -1392,23 +1311,44 @@ function lmRefreshSampler(node) {
     lmSanitizeSampler(node);
     // v0.5.51 presentation tiers. Hidden widgets keep their serialized values exactly;
     // Basic/Advanced only change visibility, never reset tuning.
-    for (const w of node.widgets ?? []) lmSetWidgetVisible(w, lmSamplerUiAllowed(node, w));
     // v0.3.50 true-refine split: these serialized legacy controls stay in the
     // backend schema for old workflow compatibility but have no valid role in a
     // continuous two-stage diffusion trajectory. Keep them hidden in the UI.
-    lmSetWidgetVisible(lmWidget(node, "refine_add_noise"), false);
-    lmSetWidgetVisible(lmWidget(node, "refine_seed"), false);
-    lmSetWidgetVisible(lmWidget(node, "refine_steps"), false);
     lmSyncHiresModelState(node);
     const hiresEnabled = Boolean(lmWidget(node, "latent_hires_enabled")?.value);
-    for (const name of ["latent_hires_model", "latent_hires_scale", "latent_hires_precision", "latent_hires_align"])
-        lmSetWidgetVisible(lmWidget(node, name), hiresEnabled && lmSamplerUiAllowed(node, lmWidget(node, name)));
     const refineEnabled = Boolean(lmWidget(node, "refine_enabled")?.value);
-    const windowedRefine = lmWidget(node, "windowed_refine");
-    if (windowedRefine) {
-        windowedRefine.label = "windowed refine";
-        lmSetWidgetVisible(windowedRefine, refineEnabled && lmSamplerUiAllowed(node, windowedRefine));
+    let header;
+    let sectionVisible = false;
+    for (const w of node.widgets ?? []) {
+        if (!w) continue;
+        if (w.__lmGroupHeader) {
+            lmSetWidgetVisible(header, sectionVisible);
+            header = w;
+            sectionVisible = false;
+            continue;
+        }
+        let visible = lmSamplerUiAllowed(node, w);
+        switch (w.name) {
+            case "refine_add_noise":
+            case "refine_seed":
+            case "refine_steps":
+                visible = false;
+                break;
+            case "latent_hires_model":
+            case "latent_hires_scale":
+            case "latent_hires_precision":
+            case "latent_hires_align":
+                visible &&= hiresEnabled;
+                break;
+            case "windowed_refine":
+                w.label = "windowed refine";
+                visible &&= refineEnabled;
+                break;
+        }
+        sectionVisible ||= visible;
+        lmSetWidgetVisible(w, visible);
     }
+    lmSetWidgetVisible(header, sectionVisible);
     const refineInput = (node.inputs ?? []).find((input) => input?.name === "refine_sigmas");
     if (refineInput) refineInput.label = "Refine Sigmas";
     const targetWidth = Math.max(Number(node.size?.[0]) || 0, 420);
@@ -1418,8 +1358,8 @@ function lmRefreshSampler(node) {
          Math.abs((Number(node.size?.[1]) || 0) - targetHeight) > 0.5)) {
         node.setSize?.([targetWidth, targetHeight]);
     }
-    lmUpdateSamplerPresetStatus(node);
-    node.setDirtyCanvas?.(true, false);
+    if (node.__lmSamplerPresetUiV060) lmUpdateSamplerPresetStatus(node);
+    else node.setDirtyCanvas?.(true, false);
 }
 
 let lmConfiguringGraph = false;
@@ -1489,6 +1429,23 @@ function lmWireModeCallback(node, modeName, refresh, scheduleInitial = true) {
     if (scheduleInitial) lmScheduleModeRefresh(node, refresh);
 }
 
+function lmWireSamplerRefresh(node) {
+    for (const name of ["sampler_mode", "refine_enabled", "latent_hires_enabled"]) {
+        lmWireModeCallback(node, name, lmRefreshSampler, false);
+    }
+    if (node.__lmSamplerConfigureWrapped) return;
+    node.__lmSamplerConfigureWrapped = true;
+    const original = node.onConfigure;
+    node.onConfigure = function (...args) {
+        const result = original?.apply(this, args);
+        lmWireSamplerRefresh(this);
+        // A single node can be configured by reset, paste or undo without a
+        // graph-level hook. Let the frontend finish replacing widget objects.
+        if (!lmConfiguringGraph) lmScheduleModeRefresh(this, lmRefreshSampler);
+        return result;
+    };
+}
+
 function lmPruneLegacyDirectorInputs(node) {
     if (!node?.inputs) return false;
     const legacy = new Set(["director_media", "director_plan", "camera_plan"]);
@@ -1552,17 +1509,8 @@ app.registerExtension({
             if (!lmConfiguringGraph) setTimeout(() => lmRefreshSetup(node), 100);
         } else if (cls === "MiniMaxH3LatentLabLongMediaSampler") {
             lmInstallNamedWidgetPersistence(node);
-            lmWireModeCallback(node, "sampler_mode", lmRefreshSampler, !lmConfiguringGraph);
-            lmWireModeCallback(node, "refine_enabled", lmRefreshSampler, !lmConfiguringGraph);
-            lmWireModeCallback(node, "latent_hires_enabled", lmRefreshSampler, !lmConfiguringGraph);
-            // Some frontend builds install/replace combo callbacks after nodeCreated.
-            // The durable watcher above catches that; these immediate passes make the
-            // initial state correct without requiring a page reload.
-            if (!lmConfiguringGraph) {
-                queueMicrotask(() => lmRefreshSampler(node));
-                requestAnimationFrame(() => lmRefreshSampler(node));
-                setTimeout(() => lmRefreshSampler(node), 100);
-            }
+            lmWireSamplerRefresh(node);
+            if (!lmConfiguringGraph) lmScheduleModeRefresh(node, lmRefreshSampler);
         }
     },
     async afterConfigureGraph() {
@@ -1591,9 +1539,7 @@ app.registerExtension({
             if (cls === "MiniMaxH3LatentLabLongMediaSampler") {
                 lmInstallNamedWidgetPersistence(node);
                 lmRestoreNamedWidgetState(node);
-                lmWireModeCallback(node, "sampler_mode", lmRefreshSampler, false);
-                lmWireModeCallback(node, "refine_enabled", lmRefreshSampler, false);
-                lmWireModeCallback(node, "latent_hires_enabled", lmRefreshSampler, false);
+                lmWireSamplerRefresh(node);
                 lmRefreshSampler(node);
             }
         }

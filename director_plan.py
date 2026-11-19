@@ -30,6 +30,12 @@ MAX_AUDIO_BLOCKS = 64
 MAX_EXTRA_TRACKS = 24
 MAX_EXTRA_CLIPS = 256
 MAX_REFMODS = 256
+H3_OUTPUT_FPS = 24.0
+H3_OUTPUT_PERIOD_FRAMES = 17
+# Director durations are serialized to six decimal places, which can introduce
+# up to 0.000012 frames of error at 24 fps. This tolerance only covers that
+# wire-format rounding; authored off-grid durations remain invalid.
+H3_FRAME_ALIGNMENT_TOLERANCE = 1e-4
 SCENE_GUIDANCE_CATEGORIES = {"style", "atmosphere", "palette", "lighting", "texture", "era"}
 EXTRA_TRACK_TYPES = {"prompt", "embedding", "character", "reference", "video", "audio", "refmod"}
 PROMPT_GUIDANCE_MODES = {
@@ -49,6 +55,22 @@ PROMPT_GUIDANCE_MODES = {
         "substantially reshape actions, timing, and camera language."
     ),
 }
+
+
+def director_bridge_duration_frames(duration_seconds: float) -> int | None:
+    """Return a bridge duration's H3 frame count, allowing serialization noise only."""
+    try:
+        frame_count = float(duration_seconds) * H3_OUTPUT_FPS
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(frame_count):
+        return None
+    rounded_frames = int(round(frame_count))
+    if (rounded_frames <= 0
+            or abs(frame_count - rounded_frames) > H3_FRAME_ALIGNMENT_TOLERANCE
+            or rounded_frames % H3_OUTPUT_PERIOD_FRAMES):
+        return None
+    return rounded_frames
 
 
 def _normalize_prompt_guidance_mode(value: Any, *, allow_inherit: bool) -> str:
@@ -284,16 +306,28 @@ def director_validate_enabled_run_scope(
         index for index, kind in enumerate(base_kinds)
         if str(kind or "generated").strip().lower() != "media"
     )
-    stale = tuple(index for index in generated if cached_geometry_matches[index] is not True)
-    if stale:
-        labels = ", ".join(str(index + 1) for index in stale)
-        raise RuntimeError(
-            "Partial Director RUN requires geometry-compatible active TAKEs for every GENERATED clip; "
-            f"missing or outdated clip indices: {labels}. Restore/render the complete timeline first."
-        )
     enabled = director_enabled_render_indices(clip_enabled, base_kinds)
     if not enabled:
         raise RuntimeError("Enable at least one GENERATED MAIN clip before running the timeline.")
+    enabled_set = set(enabled)
+    # New enabled clips have no old TAKE by definition. Only replayed clips,
+    # plus a rerolled clip whose tail must feed a frozen GENERATED successor,
+    # need geometry-compatible cached tensors. Contiguous enabled suffixes use
+    # freshly generated continuation, not historical right-side locks.
+    required = {index for index in generated if index not in enabled_set}
+    required.update(
+        index for index in enabled
+        if index + 1 in generated and index + 1 not in enabled_set
+    )
+    stale = tuple(index for index in sorted(required) if cached_geometry_matches[index] is not True)
+    if stale:
+        labels = ", ".join(str(index + 1) for index in stale)
+        raise RuntimeError(
+            "Partial Director RUN requires geometry-compatible active TAKEs only for disabled "
+            "GENERATED clips and targets feeding a disabled GENERATED neighbor; "
+            f"missing or outdated clip indices: {labels}. Restore those TAKEs/clip durations "
+            "or enable the dependent clips. New enabled suffix clips do not require a TAKE."
+        )
     return enabled
 
 
@@ -583,14 +617,14 @@ def _stable_project_id(data: dict[str, Any], shots: list[dict[str, Any]]) -> str
 def _normalize_regeneration(value: Any, shots: list[dict[str, Any]]) -> dict[str, Any]:
     item = value if isinstance(value, dict) else {}
     mode = str(item.get("mode") or "none").strip().lower()
-    if mode not in {"none", "clip", "from_here", "recast", "recast_range"}:
+    if mode not in {"none", "clip", "from_here", "range", "bridge", "recast", "recast_range"}:
         mode = "none"
     valid_ids = {str(shot.get("clip_id") or "") for shot in shots}
     clip_id = str(item.get("clip_id") or "").strip() or None
     request_id = str(item.get("request_id") or "").strip() or None
     source_revision = str(item.get("source_revision") or "").strip() or None
     recast_subject_id = str(item.get("recast_subject_id") or "").strip() or None
-    preserve_audio = bool(item.get("preserve_audio", mode in {"recast", "recast_range"}))
+    preserve_audio = bool(item.get("preserve_audio", mode in {"range", "recast", "recast_range"}))
     recast_video_denoise = 1.0  # legacy compatibility field; native-reference Recast does not denoise source x0
     recast_reference_scale_raw = item.get("recast_reference_scale", "auto")
     recast_reference_scale = str(recast_reference_scale_raw or "auto").strip().lower()
@@ -599,7 +633,81 @@ def _normalize_regeneration(value: Any, shots: list[dict[str, Any]]) -> dict[str
     recast_clip_ids = [str(v).strip() for v in (item.get("recast_clip_ids") or []) if str(v).strip() in valid_ids]
     source_revisions_raw = item.get("source_revisions") if isinstance(item.get("source_revisions"), dict) else {}
     source_revisions = {str(k): str(v).strip() for k, v in source_revisions_raw.items() if str(k) in valid_ids and str(v).strip()}
+    range_bounds: dict[str, int] | None = None
+    bridge_sources: dict[str, str] | None = None
+    if mode == "range":
+        if clip_id not in valid_ids or request_id is None:
+            raise ValueError("Director range regeneration requires an existing clip_id and request_id.")
+        shot = next(shot for shot in shots if str(shot.get("clip_id") or "") == clip_id)
+        if str(shot.get("base_kind") or "generated") != "generated":
+            raise ValueError("Director range regeneration is available only for GENERATED MAIN clips.")
+        if source_revision is None:
+            raise ValueError("Director range regeneration requires the active source_revision.")
+        raw_range = item.get("range")
+        if not isinstance(raw_range, dict):
+            raise ValueError("Director range regeneration requires a range with start_frame and end_frame.")
+        parsed_bounds: dict[str, int] = {}
+        for key in ("start_frame", "end_frame"):
+            raw_value = raw_range.get(key)
+            if isinstance(raw_value, bool):
+                raise ValueError(f"Director range {key} must be an integer frame index.")
+            number = _finite_float(raw_value, math.nan)
+            if not math.isfinite(number) or not number.is_integer():
+                raise ValueError(f"Director range {key} must be an integer frame index.")
+            parsed_bounds[key] = int(number)
+        if parsed_bounds["start_frame"] < 0 or parsed_bounds["end_frame"] <= parsed_bounds["start_frame"]:
+            raise ValueError(
+                "Director range must satisfy 0 <= start_frame < end_frame (end is exclusive)."
+            )
+        range_bounds = parsed_bounds
+    if mode == "bridge":
+        if clip_id not in valid_ids or request_id is None:
+            raise ValueError("Director bridge regeneration requires an existing clip_id and request_id.")
+        target_index = next(i for i, shot in enumerate(shots) if str(shot.get("clip_id") or "") == clip_id)
+        if target_index <= 0 or target_index >= len(shots) - 1:
+            raise ValueError("Director bridge target must have adjacent MAIN clips on both sides.")
+        target = shots[target_index]
+        left, right = shots[target_index - 1], shots[target_index + 1]
+        if any(str(shot.get("base_kind") or "generated") != "generated" for shot in (left, target, right)):
+            raise ValueError("Generated TAKE bridges currently require GENERATED MAIN clips on both sides.")
+        def _shot_start(index: int) -> float:
+            explicit = shots[index].get("start")
+            if explicit is not None:
+                return max(0.0, float(explicit))
+            return max(
+                (_shot_start(previous) + float(shots[previous]["duration"])
+                 for previous in range(index)),
+                default=0.0,
+            )
+
+        left_end = _shot_start(target_index - 1) + float(left["duration"])
+        target_start = _shot_start(target_index)
+        target_end = target_start + float(target["duration"])
+        right_start = _shot_start(target_index + 1)
+        if abs(target_start - left_end) > 1e-3 or abs(right_start - target_end) > 1e-3:
+            raise ValueError(
+                "Director bridge must exactly fill the gap between two touching GENERATED MAIN clips."
+            )
+        if director_bridge_duration_frames(target["duration"]) is None:
+            raise ValueError(
+                "Bridge duration must contain a whole number of 17-frame H3 output periods "
+                "so cached downstream clips retain their native geometry."
+            )
+        raw_bridge = item.get("bridge") if isinstance(item.get("bridge"), dict) else {}
+        bridge_sources = {
+            "left_clip_id": str(raw_bridge.get("left_clip_id") or "").strip(),
+            "right_clip_id": str(raw_bridge.get("right_clip_id") or "").strip(),
+            "left_revision": str(raw_bridge.get("left_revision") or "").strip(),
+            "right_revision": str(raw_bridge.get("right_revision") or "").strip(),
+        }
+        if (bridge_sources["left_clip_id"] != str(left.get("clip_id") or "")
+                or bridge_sources["right_clip_id"] != str(right.get("clip_id") or "")):
+            raise ValueError("Director bridge source clip ids must match the target's immediate MAIN neighbors.")
+        if not bridge_sources["left_revision"] or not bridge_sources["right_revision"]:
+            raise ValueError("Director bridge regeneration requires active source revisions from both neighbors.")
     if mode != "none" and (clip_id not in valid_ids or request_id is None):
+        if mode == "range":
+            raise ValueError("Director range regeneration targets a clip that no longer exists on the MAIN timeline.")
         mode, clip_id, request_id = "none", None, None
     if mode == "recast" and source_revision is None:
         mode, clip_id, request_id = "none", None, None
@@ -617,7 +725,7 @@ def _normalize_regeneration(value: Any, shots: list[dict[str, Any]]) -> dict[str
         recast_clip_ids = []
         source_revisions = {}
         recast_reference_scale = "auto"
-    return {
+    result = {
         "mode": mode,
         "clip_id": clip_id,
         "request_id": request_id,
@@ -629,6 +737,11 @@ def _normalize_regeneration(value: Any, shots: list[dict[str, Any]]) -> dict[str
         "recast_clip_ids": recast_clip_ids,
         "source_revisions": source_revisions,
     }
+    if range_bounds is not None:
+        result["range"] = range_bounds
+    if bridge_sources is not None:
+        result["bridge"] = bridge_sources
+    return result
 
 
 def normalize_document(raw: Any) -> dict[str, Any]:

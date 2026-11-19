@@ -20,7 +20,7 @@ def copy_condition_branches(original_conds: Mapping[str, Any] | None) -> dict[st
             "ComfyUI original conditioning must be a mapping of branch names to lists; "
             f"received {type(original_conds).__name__}."
         )
-    if "positive" not in original_conds or original_conds["positive"] is None:
+    if "positive" not in original_conds:
         raise ValueError("Required positive conditioning is missing; refusing to sample without its prompt.")
 
     copied: dict[str, list[Any]] = {}

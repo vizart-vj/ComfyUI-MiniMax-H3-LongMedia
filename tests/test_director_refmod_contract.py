@@ -5,10 +5,10 @@ Validates the data model (normalization schema, backend route contracts,
 timeline-layer geometry) without requiring a live ComfyUI server.
 
 Run:
-    python -m pytest tests/test_director_refmod_contract.py -v
+    python -m unittest discover -s tests -p test_director_refmod_contract.py -v
 """
 
-import json, re, textwrap, pathlib, sys, types, pytest
+import json, re, textwrap, pathlib, sys, types, unittest
 
 # ---------------------------------------------------------------------------
 # Helpers – parse the JS file for constants / function signatures
@@ -63,7 +63,7 @@ def _js_source() -> str:
 # 1. EXTRA_TRACK_TYPES must include "refmod"
 # =========================================================================
 
-class TestExtraTrackTypesIncludeRefmod:
+class TestExtraTrackTypesIncludeRefmod(unittest.TestCase):
     def test_refmod_in_types(self):
         types = _extract_js_array("EXTRA_TRACK_TYPES")
         assert "refmod" in types, f"EXTRA_TRACK_TYPES={types} missing 'refmod'"
@@ -77,7 +77,7 @@ class TestExtraTrackTypesIncludeRefmod:
 # 2. EXTRA_TRACK_META must have a refmod entry
 # =========================================================================
 
-class TestExtraTrackMetaRefmod:
+class TestExtraTrackMetaRefmod(unittest.TestCase):
     def test_refmod_meta_exists(self):
         raw = _extract_js_object("EXTRA_TRACK_META")
         assert "refmod" in raw, "EXTRA_TRACK_META missing refmod key"
@@ -95,13 +95,13 @@ class TestExtraTrackMetaRefmod:
 # 3. RefMod record shape
 # =========================================================================
 
-class TestRefmodRecordShape:
+class TestRefmodRecordShape(unittest.TestCase):
     """A refmod record is a free-form object. The minimum shape required by
     the frontend library panel and backend routes is tested here."""
 
     REQUIRED_KEYS = {"refmod_id", "name", "mode", "concept_type", "description",
-                     "spatial_grid", "temporal_frames",
-                     "refinement_steps", "strength"}
+                     "resolution_short_edge", "max_tokens", "grid_long_edge",
+                     "clip_frames", "voice_seconds", "refinement_steps", "strength"}
 
     def test_sample_record_has_required_keys(self):
         sample = {
@@ -111,8 +111,10 @@ class TestRefmodRecordShape:
             "mode": "FULL",
             "concept_type": "scenery",
             "description": "Wide mountain vista",
-            "spatial_grid": "32x32",
-            "temporal_frames": 24,
+            "resolution_short_edge": 1024,
+            "grid_long_edge": 32,
+            "clip_frames": 24,
+            "voice_seconds": 30,
             "refinement_steps": 20,
             "max_tokens": 512,
             "strength": 1.0,
@@ -130,7 +132,7 @@ class TestRefmodRecordShape:
             assert m in valid
 
 
-class TestRefmodSourceComposerRefinementSteps:
+class TestRefmodSourceComposerRefinementSteps(unittest.TestCase):
     def test_creator_exposes_and_serializes_compressed_refinement_steps(self):
         start = JS_TEXT.index("function openRefmodCreator(")
         end = JS_TEXT.index("// ── RefMod inspector / panel", start)
@@ -147,34 +149,29 @@ class TestRefmodSourceComposerRefinementSteps:
         field the Library / Inspector panel and the backend routes rely on."""
         idx = JS_TEXT.find("function normalizeRefmod")
         assert idx >= 0, "normalizeRefmod not found"
-        body = JS_TEXT[idx:idx + 2500]
-        for key in self.REQUIRED_KEYS:
+        body = JS_TEXT.splitlines()[JS_TEXT[:idx].count("\n")]
+        for key in TestRefmodRecordShape.REQUIRED_KEYS:
             assert key in body, f"normalizeRefmod is missing {key}"
         assert JS_TEXT.find("function defaultRefmod") >= 0, "defaultRefmod not found"
 
-    def test_dead_refmod_fields_stay_removed(self):
-        """``resolution`` / ``max_tokens`` were normalised in three places and
-        consumed nowhere -- which is exactly what made them look meaningful in
-        the inspector. They stay out of the record shape for good."""
+    def test_refmod_uses_current_extraction_fields_and_not_the_old_generic_resolution(self):
         src = _js_source()
+        fields = ("resolution_short_edge", "max_tokens", "grid_long_edge", "clip_frames", "voice_seconds")
         for line in src.splitlines():
-            if (line.startswith("function defaultRefmod(")
-                    or line.startswith("function normalizeRefmod(")):
-                assert "resolution" not in line
-                assert "max_tokens" not in line
-        inspector = src[src.index("function renderRefmodInspector"):]
-        assert 'field("Resolution"' not in inspector[:6000]
-        assert 'field("Max tokens"' not in inspector[:6000]
-        plan = (JS_PATH.parent.parent / "director_plan.py").read_text(encoding="utf-8")
-        assert '"resolution": str(item.get("resolution")' not in plan
-        assert '"max_tokens": max(32, min(32768' not in plan
+            if line.startswith(("function defaultRefmod(", "function normalizeRefmod(")):
+                assert not re.search(r"\bresolution\s*:", line)
+                for name in fields:
+                    assert re.search(rf"\b{name}\s*:", line)
+        inspector = src[src.index("function renderRefmodInspector"):src.index("function renderRefmodPanel")]
+        assert 'numberField("Resolution (short edge)"' in inspector
+        assert 'numberField("Visual max tokens"' in inspector
 
 
 # =========================================================================
 # 4. Normalized doc contains top-level refmods library
 # =========================================================================
 
-class TestNormalizedDocRefmods:
+class TestNormalizedDocRefmods(unittest.TestCase):
     """The normalized doc (version 10) must carry a refmods array at the top level."""
 
     def test_js_normalize_doc_references_refmods(self):
@@ -198,7 +195,7 @@ class TestNormalizedDocRefmods:
 # 5. Shot schema includes refmod_id and strength
 # =========================================================================
 
-class TestShotSchemaRefmodFields:
+class TestShotSchemaRefmodFields(unittest.TestCase):
     def test_shot_has_refmod_id(self):
         src = _js_source()
         assert "refmod_id" in src, "Shot schema missing refmod_id field"
@@ -213,7 +210,7 @@ class TestShotSchemaRefmodFields:
 # 6. Backend route contract
 # =========================================================================
 
-class TestBackendRouteContract:
+class TestBackendRouteContract(unittest.TestCase):
     """Verify the JS references the expected REST endpoints for refmod CRUD."""
 
     EXPECTED_ROUTES = [
@@ -239,7 +236,7 @@ class TestBackendRouteContract:
 # 7. UI state for collapsed REFMODS panel
 # =========================================================================
 
-class TestRefmodsUIState:
+class TestRefmodsUIState(unittest.TestCase):
     def test_show_refmods_pref_key(self):
         src = _js_source()
         assert "show_refmods" in src, "UI state should persist show_refmods"
@@ -255,7 +252,7 @@ class TestRefmodsUIState:
 # 8. REFMODS panel render function exists
 # =========================================================================
 
-class TestRefmodsPanelRender:
+class TestRefmodsPanelRender(unittest.TestCase):
     def test_render_refmods_panel_exists(self):
         src = _js_source()
         assert re.search(r"function\s+renderRefmod", src), \
@@ -284,11 +281,11 @@ class TestRefmodsPanelRender:
 # 9. Form field definitions
 # =========================================================================
 
-class TestRefmodFormFields:
+class TestRefmodFormFields(unittest.TestCase):
     EXPECTED_FIELDS = [
         "Source", "Mode", "Name", "Concept Type", "Description",
-        "Spatial Grid", "Temporal Frames",
-        "Refinement Steps", "Save",
+        "Grid (long edge)", "Clip frames", "Voice seconds",
+        "Resolution (short edge)", "Visual max tokens", "Refinement Steps", "Save",
     ]
 
     def test_all_form_fields_present(self):
@@ -316,7 +313,7 @@ class TestRefmodFormFields:
 # 10. Timeline layer clips for refmod
 # =========================================================================
 
-class TestRefmodTimelineLayer:
+class TestRefmodTimelineLayer(unittest.TestCase):
     def test_refmod_extra_track_type(self):
         """The 'refmod' type must be handled in the extra-tracks timeline code."""
         src = _js_source()
@@ -335,7 +332,7 @@ class TestRefmodTimelineLayer:
 # 11. Presentation widgets must not serialize
 # =========================================================================
 
-class TestPresentationWidgetNoSerialize:
+class TestPresentationWidgetNoSerialize(unittest.TestCase):
     def test_editor_widget_serialize_false(self):
         """The DOM widget must not serialize into the graph JSON."""
         src = _js_source()
@@ -353,7 +350,7 @@ class TestPresentationWidgetNoSerialize:
 # 12. TAKE snapshot naturally preserves refmod state
 # =========================================================================
 
-class TestTakeSnapshotPreservesRefmods:
+class TestTakeSnapshotPreservesRefmods(unittest.TestCase):
     def test_take_snapshot_stores_full_doc(self):
         """TAKE restore applies the full timeline_snapshot, which includes the
         top-level refmods library. No special refmod restore logic is needed
@@ -368,7 +365,7 @@ class TestTakeSnapshotPreservesRefmods:
 # 13. Clip schema for refmod_id and strength in normalizeExtraClip
 # =========================================================================
 
-class TestExtraClipRefmodFields:
+class TestExtraClipRefmodFields(unittest.TestCase):
     def test_refmod_id_in_clip_normalization(self):
         src = _js_source()
         # normalizeExtraClip should handle refmod_id
@@ -383,7 +380,7 @@ class TestExtraClipRefmodFields:
 # 14. JSON serialization roundtrip
 # =========================================================================
 
-class TestJsonRoundtrip:
+class TestJsonRoundtrip(unittest.TestCase):
     def test_refmods_array_serializes(self):
         doc = {
             "version": 10,
@@ -433,7 +430,7 @@ class TestJsonRoundtrip:
 # 15. defaultDoc includes refmods
 # =========================================================================
 
-class TestDefaultDoc:
+class TestDefaultDoc(unittest.TestCase):
     def test_default_doc_source_has_refmods(self):
         src = _js_source()
         # defaultDoc function should initialize refmods
@@ -449,7 +446,7 @@ class TestDefaultDoc:
 # 16. director_json schema version is 10 everywhere it is produced
 # =========================================================================
 
-class TestDocVersion10:
+class TestDocVersion10(unittest.TestCase):
     def _normalize_doc_snippet(self):
         idx = _js_source().find("function normalizeDoc(d)")
         assert idx >= 0, "normalizeDoc not found"
@@ -482,7 +479,7 @@ class TestDocVersion10:
 # 17. refmods survive normalize -> snapshot -> history -> TAKE restore
 # =========================================================================
 
-class TestRefmodPersistencePipeline:
+class TestRefmodPersistencePipeline(unittest.TestCase):
     def test_snapshot_doc_normalizes(self):
         src = _js_source()
         assert re.search(r"function snapshotDoc\(doc\)\s*\{\s*return JSON\.stringify\(normalizeDoc\(doc\)\);\s*\}", src), \
@@ -517,7 +514,7 @@ class TestRefmodPersistencePipeline:
 # 18. REFMOD panel: collapsible, Library / Create / From TAKE / Inspector
 # =========================================================================
 
-class TestRefmodPanelSections:
+class TestRefmodPanelSections(unittest.TestCase):
     def test_panel_and_inspector_functions_defined(self):
         src = _js_source()
         assert re.search(r"function renderRefmodPanel\(node,doc,host\)", src)
@@ -536,16 +533,15 @@ class TestRefmodPanelSections:
     def test_inspector_section_header(self):
         assert "REFMOD · INSPECTOR" in _js_source(), "panel needs an Inspector section"
 
-    def test_panel_is_mounted_in_body_grid(self):
+    def test_panel_is_mounted_in_the_left_sidebar_tab(self):
         src = _js_source()
-        assert "renderRefmodPanel(node,doc,refmodsContent)" in src, "panel must be mounted in the layout"
-        assert re.search(r"if\(showRefmods\)\{", src), "panel must be gated by its visibility flag"
+        assert 'if(node.__lmdLeftTab==="refmods")renderRefmodPanel(node,doc,leftContent)' in src
 
-    def test_panel_is_collapsible_and_persisted(self):
+    def test_sidebar_tab_selection_persists(self):
         src = _js_source()
-        assert 'button("REFMODS"' in src, "toolbar needs the REFMODS collapse toggle"
-        assert 'saveDirectorUIPref(node,"show_refmods"' in src, "collapse state must persist"
-        assert "s.show_refmods" in src, "collapse state must be restored from the UI prefs"
+        assert 'tabButton("RefMods"' in src
+        assert 'saveDirectorUIPref(node,"left_tab","refmods")' in src
+        assert 's.left_tab' in src
 
     def test_backend_routes_for_panel_actions(self):
         src = _js_source()
@@ -560,7 +556,7 @@ class TestRefmodPanelSections:
 # 19. refmod timeline track + clips are positioned by interval
 # =========================================================================
 
-class TestRefmodTimelineInterval:
+class TestRefmodTimelineInterval(unittest.TestCase):
     def test_refmod_track_is_renderable(self):
         src = _js_source()
         types = _extract_js_array("EXTRA_TRACK_TYPES")
@@ -597,10 +593,10 @@ class TestRefmodTimelineInterval:
 # 20. ComfyUI / LiteGraph lifecycle
 # =========================================================================
 
-class TestComfyLifecycle:
+class TestComfyLifecycle(unittest.TestCase):
     def test_extension_registered(self):
         src = _js_source()
-        assert re.search(r"app\.registerExtension\(\{name:\"MiniMaxH3\.LongMediaDirector", src), \
+        assert re.search(r"app\.registerExtension\(\{\s*name:\s*\"MiniMaxH3\.LongMediaDirector", src), \
             "Director extension must register with the ComfyUI app"
 
     def test_node_lifecycle_hooks(self):
@@ -631,7 +627,7 @@ class TestComfyLifecycle:
 # 21. The decorative surface widget must never serialize
 # =========================================================================
 
-class TestNoDetachedSerializedWidgetState:
+class TestNoDetachedSerializedWidgetState(unittest.TestCase):
     def test_widget_options_serialize_false(self):
         assert re.search(r"serialize\s*:\s*false", _js_source()), \
             "DOM widget options must set serialize:false"
@@ -657,7 +653,7 @@ class TestNoDetachedSerializedWidgetState:
 # =========================================================================
 # v0.6.57. Director ENCODE is a separate VAE-only server operation
 # =========================================================================
-class TestRefmodEncodeRouteContract:
+class TestRefmodEncodeRouteContract(unittest.TestCase):
 
     @staticmethod
     def _source(name):
@@ -748,7 +744,7 @@ console.log(JSON.stringify({
 """
 
 
-class TestRefmodSyncReconcilesLibraryContract:
+class TestRefmodSyncReconcilesLibraryContract(unittest.TestCase):
 
     def test_sync_drops_records_whose_library_artifact_is_gone(self):
         import json
@@ -835,7 +831,7 @@ console.log(JSON.stringify(applyRefmodServerState(authored, returned)));
 """
 
 
-class TestRefmodSettingsSurviveServerResponses:
+class TestRefmodSettingsSurviveServerResponses(unittest.TestCase):
 
     def test_server_response_preserves_authored_settings(self):
         import json
@@ -951,7 +947,7 @@ console.log(JSON.stringify(out));
 """
 
 
-class TestRefmodPlaceOnLayerContract:
+class TestRefmodPlaceOnLayerContract(unittest.TestCase):
 
     def test_placing_a_refmod_creates_a_timeline_clip_that_conditions_the_render(self):
         import json

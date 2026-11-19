@@ -6,6 +6,7 @@ import ast
 import pathlib
 import sys
 import types
+import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 pkg = types.ModuleType("ComfyUI-MiniMax-H3-LongMedia")
@@ -94,3 +95,9 @@ def test_streamed_final_layer_keeps_current_pdd_signature():
 def test_take_snapshot_storage_remains_whole_document_based():
     assert '"director_timeline_snapshot"' in CACHE
     assert "refmods" in DIRECTOR
+
+def load_tests(loader, tests, pattern):
+    for name, test in list(globals().items()):
+        if name.startswith("test_") and callable(test):
+            tests.addTest(unittest.FunctionTestCase(test))
+    return tests

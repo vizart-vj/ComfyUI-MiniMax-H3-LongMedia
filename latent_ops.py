@@ -6,6 +6,8 @@ outside a running ComfyUI process. Node wrappers provide NestedTensor creation.
 
 from __future__ import annotations
 
+import math
+
 import torch
 
 FPS = 24
@@ -45,6 +47,478 @@ def frame_count_from_video_t(latent_t: int) -> int:
             f"MiniMax H3 video latent time must be 5*k+2, got {latent_t}."
         )
     return 5 + 17 * ((latent_t - 2) // 5)
+
+
+def h3_video_frame_spans(frame_count: int) -> tuple[tuple[int, int], ...]:
+    """Return the pixel-frame interval owned by each native H3 video token.
+
+    H3 temporal steps cover ``1, 4, 4, 4, 4`` frames repeatedly. Range edits
+    operate on those steps because a pixel-frame boundary inside a token cannot
+    be represented by ComfyUI's temporal ``noise_mask``.
+    """
+    if isinstance(frame_count, bool) or not isinstance(frame_count, int):
+        raise ValueError(f"H3 frame_count must be an integer, got {frame_count!r}.")
+    if frame_count < 5 or align_frame_count(frame_count) != frame_count:
+        raise ValueError(
+            f"H3 frame_count must be on the native 17*k+5 grid, got {frame_count}."
+        )
+
+    token_count = video_latent_t(frame_count)
+    step_sizes = (1, 4, 4, 4, 4)
+    spans: list[tuple[int, int]] = []
+    cursor = 0
+    for token_index in range(token_count):
+        next_cursor = cursor + step_sizes[token_index % len(step_sizes)]
+        spans.append((cursor, next_cursor))
+        cursor = next_cursor
+    if cursor != frame_count:
+        raise RuntimeError(
+            f"H3 temporal map covered {cursor} frames, expected {frame_count}."
+        )
+    return tuple(spans)
+
+
+def snap_h3_video_range(
+    start_frame: int,
+    end_frame: int,
+    frame_count: int,
+    *,
+    frame_offset: int = 0,
+) -> tuple[int, int]:
+    """Snap a visible clip range outward to H3 token boundaries.
+
+    ``frame_offset`` is the hidden continuation preroll before this clip's visible
+    frame zero. It must itself end on an H3 token boundary, otherwise local clip
+    coordinates cannot be mapped without changing the neighboring clip.
+    Returned bounds remain local to the visible clip and are half-open.
+    """
+    values = (start_frame, end_frame, frame_count, frame_offset)
+    if any(isinstance(value, bool) or not isinstance(value, int) for value in values):
+        raise ValueError("H3 range coordinates and frame offsets must be integers.")
+    if frame_count < 5 or align_frame_count(frame_count) != frame_count:
+        raise ValueError(f"H3 frame_count must be on the native 17*k+5 grid, got {frame_count}.")
+    if start_frame < 0 or end_frame <= start_frame:
+        raise ValueError(f"H3 range must satisfy 0 <= start < end, got {start_frame}:{end_frame}.")
+    if frame_offset < 0:
+        raise ValueError(f"H3 frame_offset must be non-negative, got {frame_offset}.")
+
+    spans = h3_video_frame_spans(frame_count)
+    boundaries = {spans[0][0], *(end for _, end in spans)}
+    if frame_offset not in boundaries:
+        raise ValueError(
+            f"Hidden H3 frame_offset {frame_offset} is not a token boundary; valid={sorted(boundaries)}."
+        )
+    absolute_start = frame_offset + start_frame
+    absolute_end = frame_offset + end_frame
+    if absolute_end > frame_count:
+        raise ValueError(
+            f"Visible H3 range {start_frame}:{end_frame} with offset {frame_offset} "
+            f"exceeds the {frame_count}-frame latent."
+        )
+
+    snapped_start = max(boundary for boundary in boundaries if boundary <= absolute_start)
+    snapped_end = min(boundary for boundary in boundaries if boundary >= absolute_end)
+    if snapped_end <= snapped_start:
+        raise ValueError("H3 range collapsed while snapping to the native temporal grid.")
+    return snapped_start - frame_offset, snapped_end - frame_offset
+
+
+def _range_token_bounds(
+    start_frame: int,
+    end_frame: int,
+    frame_count: int,
+    *,
+    frame_offset: int,
+) -> tuple[int, int, int, int]:
+    snapped_start, snapped_end = snap_h3_video_range(
+        start_frame, end_frame, frame_count, frame_offset=frame_offset,
+    )
+    spans = h3_video_frame_spans(frame_count)
+    absolute_start = frame_offset + snapped_start
+    absolute_end = frame_offset + snapped_end
+    token_start = next((i for i, span in enumerate(spans) if span[0] == absolute_start), None)
+    token_end = next((i + 1 for i, span in enumerate(spans) if span[1] == absolute_end), None)
+    if token_start is None or token_end is None or token_end <= token_start:
+        raise RuntimeError(
+            f"Snapped range {absolute_start}:{absolute_end} does not map to H3 token boundaries."
+        )
+    return token_start, token_end, snapped_start, snapped_end
+
+
+def _validate_range_mask(mask: torch.Tensor | None, expected: tuple[int, ...], *, device: torch.device, name: str) -> torch.Tensor:
+    if mask is None:
+        return torch.ones(expected, dtype=torch.float32, device=device)
+    if not torch.is_tensor(mask) or tuple(mask.shape) != expected:
+        got = tuple(mask.shape) if torch.is_tensor(mask) else type(mask).__name__
+        raise RuntimeError(f"Director range {name} mask geometry mismatch: expected {expected}, got {got}.")
+    return mask.to(device=device, dtype=torch.float32)
+
+
+def apply_h3_range_source_lock(
+    target_video: torch.Tensor,
+    target_audio: torch.Tensor,
+    source_video: torch.Tensor,
+    source_audio: torch.Tensor,
+    *,
+    start_frame: int,
+    end_frame: int,
+    frame_offset: int = 0,
+    audio_prefix_tokens: int = 0,
+    preserve_audio: bool = True,
+    existing_video_mask: torch.Tensor | None = None,
+    existing_audio_mask: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict[str, object]]:
+    """Prepare a same-geometry H3 range edit from an approved cached TAKE.
+
+    Samples outside the active range are restored from the source TAKE and receive
+    zero denoise mask. Existing zero-mask constraints inside the requested region
+    remain locked. Device transfer is explicit and dtype changes are rejected.
+    """
+    _validate_video(target_video)
+    _validate_video(source_video)
+    _validate_audio(target_audio)
+    _validate_audio(source_audio)
+    if tuple(target_video.shape) != tuple(source_video.shape) or tuple(target_audio.shape) != tuple(source_audio.shape):
+        raise RuntimeError(
+            "Director range source geometry mismatch: "
+            f"target VIDEO/AUDIO={tuple(target_video.shape)}/{tuple(target_audio.shape)}, "
+            f"source={tuple(source_video.shape)}/{tuple(source_audio.shape)}."
+        )
+    if target_video.dtype != source_video.dtype or target_audio.dtype != source_audio.dtype:
+        raise RuntimeError(
+            "Director range source dtype mismatch: "
+            f"target VIDEO/AUDIO={target_video.dtype}/{target_audio.dtype}, "
+            f"source={source_video.dtype}/{source_audio.dtype}."
+        )
+    _require_av_sync(target_video, target_audio, "Director range target")
+    _require_av_sync(source_video, source_audio, "Director range source")
+    if isinstance(audio_prefix_tokens, bool) or not isinstance(audio_prefix_tokens, int) or audio_prefix_tokens < 0:
+        raise ValueError("Director range audio_prefix_tokens must be a non-negative integer.")
+
+    frame_count = frame_count_from_video_t(int(target_video.shape[2]))
+    token_start, token_end, snapped_start, snapped_end = _range_token_bounds(
+        start_frame, end_frame, frame_count, frame_offset=frame_offset,
+    )
+    if audio_prefix_tokens > int(target_audio.shape[-1]):
+        raise ValueError(
+            f"Audio hidden prefix {audio_prefix_tokens} exceeds latent length {int(target_audio.shape[-1])}."
+        )
+    audio_start = audio_prefix_tokens + math.floor(snapped_start * AUDIO_LATENT_FPS / FPS)
+    audio_end = audio_prefix_tokens + math.ceil(snapped_end * AUDIO_LATENT_FPS / FPS)
+    audio_start = min(int(target_audio.shape[-1]), audio_start)
+    audio_end = min(int(target_audio.shape[-1]), audio_end)
+    if audio_end <= audio_start and not preserve_audio:
+        raise ValueError("Director range does not cover any synchronized audio latent tokens.")
+
+    video_mask_shape = (int(target_video.shape[0]), 1, int(target_video.shape[2]), 1, 1)
+    audio_mask_shape = (int(target_audio.shape[0]), 1, 1, int(target_audio.shape[-1]))
+    old_video_mask = _validate_range_mask(
+        existing_video_mask, video_mask_shape, device=target_video.device, name="VIDEO",
+    )
+    old_audio_mask = _validate_range_mask(
+        existing_audio_mask, audio_mask_shape, device=target_audio.device, name="AUDIO",
+    )
+    video_mask = torch.zeros(video_mask_shape, dtype=torch.float32, device=target_video.device)
+    video_mask[:, :, token_start:token_end] = old_video_mask[:, :, token_start:token_end]
+    audio_mask = torch.zeros(audio_mask_shape, dtype=torch.float32, device=target_audio.device)
+    if not preserve_audio:
+        audio_mask[..., audio_start:audio_end] = old_audio_mask[..., audio_start:audio_end]
+
+    video = target_video.clone()
+    if token_start:
+        video[:, :, :token_start] = source_video[:, :, :token_start].to(device=video.device)
+    source_video_range = source_video[:, :, token_start:token_end].to(device=video.device)
+    video[:, :, token_start:token_end] = torch.where(
+        old_video_mask[:, :, token_start:token_end] <= 0.0,
+        target_video[:, :, token_start:token_end],
+        source_video_range,
+    )
+    if token_end < int(video.shape[2]):
+        video[:, :, token_end:] = source_video[:, :, token_end:].to(device=video.device)
+
+    if preserve_audio:
+        audio = source_audio.to(device=target_audio.device)
+    else:
+        audio = target_audio.clone()
+        if audio_start:
+            audio[..., :audio_start] = source_audio[..., :audio_start].to(device=audio.device)
+        audio[..., audio_start:audio_end] = torch.where(
+            old_audio_mask[..., audio_start:audio_end] <= 0.0,
+            target_audio[..., audio_start:audio_end],
+            source_audio[..., audio_start:audio_end].to(device=audio.device),
+        )
+        if audio_end < int(audio.shape[-1]):
+            audio[..., audio_end:] = source_audio[..., audio_end:].to(device=audio.device)
+
+    video_copy_bytes = 0
+    audio_copy_bytes = 0
+    if source_video.device != target_video.device:
+        # Prefix, editable region and suffix are all copied into the target tensor.
+        video_copy_bytes = int(source_video.numel()) * int(source_video.element_size())
+    if source_audio.device != target_audio.device:
+        # The source participates in each copied audio interval; together they
+        # cover the stream whether it is preserved or edited locally.
+        audio_copy_bytes = int(source_audio.numel()) * int(source_audio.element_size())
+    report: dict[str, object] = {
+        "snapped_range": [int(snapped_start), int(snapped_end)],
+        "video_token_range": [int(token_start), int(token_end)],
+        "audio_token_range": [int(audio_start), int(audio_end)],
+        "preserve_audio": bool(preserve_audio),
+        "source_device_transfer_bytes": int(video_copy_bytes + audio_copy_bytes),
+        "source_dtype": str(source_video.dtype),
+        "target_dtype": str(target_video.dtype),
+    }
+    return video, audio, video_mask, audio_mask, report
+
+
+def _h3_overlap_token_counts(frame_count: int, overlap_frames: int) -> tuple[int, int]:
+    """Map a native overlap to synchronized VIDEO/AUDIO token counts."""
+    if isinstance(overlap_frames, bool) or not isinstance(overlap_frames, int) or overlap_frames <= 0:
+        raise ValueError("Director bridge overlap_frames must be a positive integer.")
+    if align_frame_count(overlap_frames) != overlap_frames:
+        raise ValueError(
+            f"Director bridge overlap_frames must be on the H3 17*k+5 grid, got {overlap_frames}."
+        )
+    if overlap_frames >= frame_count:
+        raise ValueError(
+            f"Director bridge overlap {overlap_frames}f must be shorter than target {frame_count}f."
+        )
+    video_tokens = video_latent_t(overlap_frames)
+    audio_tokens = round(overlap_frames * AUDIO_LATENT_FPS / FPS)
+    if video_tokens <= 0 or audio_tokens <= 0:
+        raise ValueError("Director bridge overlap maps to an empty AV token span.")
+    return video_tokens, audio_tokens
+
+
+def _validate_h3_right_take_head_lock(
+    target_video: torch.Tensor,
+    target_audio: torch.Tensor,
+    right_video: torch.Tensor,
+    right_audio: torch.Tensor,
+    overlap_frames: int,
+) -> tuple[int, int, int]:
+    for name, tensor, validator in (
+        ("target VIDEO", target_video, _validate_video),
+        ("right VIDEO", right_video, _validate_video),
+        ("target AUDIO", target_audio, _validate_audio),
+        ("right AUDIO", right_audio, _validate_audio),
+    ):
+        try:
+            validator(tensor)
+        except Exception as exc:
+            raise RuntimeError(f"Director bridge {name} violates the H3 tensor contract: {exc}") from exc
+
+    if tuple(target_video.shape[:2]) != tuple(right_video.shape[:2]) or tuple(target_video.shape[3:]) != tuple(right_video.shape[3:]):
+        raise RuntimeError(
+            "Director bridge right VIDEO geometry mismatch: "
+            f"target={tuple(target_video.shape)}, right={tuple(right_video.shape)}."
+        )
+    if tuple(target_audio.shape[:3]) != tuple(right_audio.shape[:3]):
+        raise RuntimeError(
+            "Director bridge right AUDIO geometry mismatch: "
+            f"target={tuple(target_audio.shape)}, right={tuple(right_audio.shape)}."
+        )
+    if target_video.dtype != right_video.dtype or target_audio.dtype != right_audio.dtype:
+        raise RuntimeError(
+            "Director bridge right TAKE dtype mismatch: "
+            f"target VIDEO/AUDIO={target_video.dtype}/{target_audio.dtype}, "
+            f"right={right_video.dtype}/{right_audio.dtype}."
+        )
+    _require_av_sync(target_video, target_audio, "Director bridge target")
+    _require_av_sync(right_video, right_audio, "Director bridge right TAKE")
+    frame_count = frame_count_from_video_t(int(target_video.shape[2]))
+    overlap_video_t, overlap_audio_t = _h3_overlap_token_counts(frame_count, overlap_frames)
+    if (int(target_video.shape[2]) <= 2 * overlap_video_t
+            or int(target_audio.shape[-1]) <= 2 * overlap_audio_t):
+        raise RuntimeError(
+            "Director bridge has no free middle after locking left and right AV overlaps: "
+            f"target video/audio tokens={int(target_video.shape[2])}/{int(target_audio.shape[-1])}, "
+            f"overlap={overlap_video_t}/{overlap_audio_t}. Increase the bridge duration."
+        )
+    if int(right_video.shape[2]) < overlap_video_t or int(right_audio.shape[-1]) < overlap_audio_t:
+        raise RuntimeError("Director bridge right TAKE is shorter than its incoming H3 overlap.")
+    return frame_count, overlap_video_t, overlap_audio_t
+
+
+def apply_h3_right_take_head_lock(
+    target_video: torch.Tensor,
+    target_audio: torch.Tensor,
+    right_video: torch.Tensor,
+    right_audio: torch.Tensor,
+    *,
+    overlap_frames: int,
+    existing_video_mask: torch.Tensor | None = None,
+    existing_audio_mask: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict[str, object]]:
+    """Pin a cached right TAKE's incoming AV overlap to a new bridge's tail.
+
+    The bridge's head is supplied by ordinary MultiClip continuation from its
+    left TAKE. Its final overlap is copied from the right TAKE's incoming head.
+    Both pinned edges get zero denoise mask, leaving only the middle generative.
+    """
+    _frame_count, overlap_video_t, overlap_audio_t = _validate_h3_right_take_head_lock(
+        target_video, target_audio, right_video, right_audio, overlap_frames,
+    )
+
+    video_mask_shape = (int(target_video.shape[0]), 1, int(target_video.shape[2]), 1, 1)
+    audio_mask_shape = (int(target_audio.shape[0]), 1, 1, int(target_audio.shape[-1]))
+    video_mask = _validate_range_mask(
+        existing_video_mask, video_mask_shape, device=target_video.device, name="VIDEO",
+    ).clone()
+    audio_mask = _validate_range_mask(
+        existing_audio_mask, audio_mask_shape, device=target_audio.device, name="AUDIO",
+    ).clone()
+    video = target_video.clone()
+    audio = target_audio.clone()
+    video[:, :, -overlap_video_t:] = right_video[:, :, :overlap_video_t].to(device=video.device)
+    audio[..., -overlap_audio_t:] = right_audio[..., :overlap_audio_t].to(device=audio.device)
+    video_mask[:, :, -overlap_video_t:] = 0.0
+    audio_mask[..., -overlap_audio_t:] = 0.0
+
+    transfer_bytes = 0
+    if right_video.device != target_video.device:
+        transfer_bytes += int(video[:, :, -overlap_video_t:].numel()) * int(right_video.element_size())
+    if right_audio.device != target_audio.device:
+        transfer_bytes += int(audio[..., -overlap_audio_t:].numel()) * int(right_audio.element_size())
+    return video, audio, video_mask, audio_mask, {
+        "applied": True,
+        "mode": "right_take_head_to_bridge_tail",
+        "overlap_frames": int(overlap_frames),
+        "video_token_count": int(overlap_video_t),
+        "audio_token_count": int(overlap_audio_t),
+        "free_video_tokens": int(target_video.shape[2]) - 2 * int(overlap_video_t),
+        "free_audio_tokens": int(target_audio.shape[-1]) - 2 * int(overlap_audio_t),
+        "source_device_transfer_bytes": int(transfer_bytes),
+    }
+
+
+def restore_h3_right_take_head(
+    rendered_video: torch.Tensor,
+    rendered_audio: torch.Tensor,
+    right_video: torch.Tensor,
+    right_audio: torch.Tensor,
+    *,
+    overlap_frames: int,
+) -> tuple[torch.Tensor, torch.Tensor, dict[str, object]]:
+    """Reapply a bridge's right boundary after any refine/HiRes stage."""
+    # Reuse the same shape, dtype, H3 timing and free-middle checks as sampling.
+    _frame_count, overlap_video_t, overlap_audio_t = _validate_h3_right_take_head_lock(
+        rendered_video, rendered_audio, right_video, right_audio, overlap_frames,
+    )
+    transfer_bytes = 0
+    if right_video.device != rendered_video.device:
+        transfer_bytes += (
+            int(right_video.shape[0] * right_video.shape[1] * overlap_video_t
+                * right_video.shape[3] * right_video.shape[4]) * int(right_video.element_size())
+        )
+    if right_audio.device != rendered_audio.device:
+        transfer_bytes += (
+            int(right_audio.shape[0] * right_audio.shape[1] * right_audio.shape[2]
+                * overlap_audio_t) * int(right_audio.element_size())
+        )
+    video = rendered_video.clone()
+    audio = rendered_audio.clone()
+    video[:, :, -overlap_video_t:] = right_video[:, :, :overlap_video_t].to(device=video.device)
+    audio[..., -overlap_audio_t:] = right_audio[..., :overlap_audio_t].to(device=audio.device)
+    return video, audio, {
+        "applied": True,
+        "mode": "post_refine_right_head_restore",
+        "overlap_frames": int(overlap_frames),
+        "video_token_count": int(overlap_video_t),
+        "audio_token_count": int(overlap_audio_t),
+        "source_device_transfer_bytes": int(transfer_bytes),
+    }
+
+
+def restore_h3_range_outside(
+    rendered_video: torch.Tensor,
+    rendered_audio: torch.Tensor,
+    source_video: torch.Tensor,
+    source_audio: torch.Tensor,
+    *,
+    start_frame: int,
+    end_frame: int,
+    frame_offset: int = 0,
+    audio_prefix_tokens: int = 0,
+    preserve_audio: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor, dict[str, object]]:
+    """Restore an accepted range render outside its target after refinement.
+
+    This second splice is required after temporal Hi-Res/refine stages, which may
+    denoise the complete latent even when the base sampler used a range mask.
+    """
+    _validate_video(rendered_video)
+    _validate_video(source_video)
+    _validate_audio(rendered_audio)
+    _validate_audio(source_audio)
+    if tuple(rendered_video.shape) != tuple(source_video.shape) or tuple(rendered_audio.shape) != tuple(source_audio.shape):
+        raise RuntimeError(
+            "Director range restore geometry mismatch: "
+            f"rendered VIDEO/AUDIO={tuple(rendered_video.shape)}/{tuple(rendered_audio.shape)}, "
+            f"source={tuple(source_video.shape)}/{tuple(source_audio.shape)}."
+        )
+    if rendered_video.dtype != source_video.dtype or rendered_audio.dtype != source_audio.dtype:
+        raise RuntimeError(
+            "Director range restore dtype mismatch: "
+            f"rendered VIDEO/AUDIO={rendered_video.dtype}/{rendered_audio.dtype}, "
+            f"source={source_video.dtype}/{source_audio.dtype}."
+        )
+    _require_av_sync(rendered_video, rendered_audio, "Director range rendered output")
+    _require_av_sync(source_video, source_audio, "Director range source output")
+    if isinstance(audio_prefix_tokens, bool) or not isinstance(audio_prefix_tokens, int) or audio_prefix_tokens < 0:
+        raise ValueError("Director range audio_prefix_tokens must be a non-negative integer.")
+
+    frame_count = frame_count_from_video_t(int(rendered_video.shape[2]))
+    token_start, token_end, snapped_start, snapped_end = _range_token_bounds(
+        start_frame, end_frame, frame_count, frame_offset=frame_offset,
+    )
+    audio_start = min(
+        int(rendered_audio.shape[-1]),
+        audio_prefix_tokens + math.floor(snapped_start * AUDIO_LATENT_FPS / FPS),
+    )
+    audio_end = min(
+        int(rendered_audio.shape[-1]),
+        audio_prefix_tokens + math.ceil(snapped_end * AUDIO_LATENT_FPS / FPS),
+    )
+
+    video = rendered_video.clone()
+    if token_start:
+        video[:, :, :token_start] = source_video[:, :, :token_start].to(device=video.device)
+    if token_end < int(video.shape[2]):
+        video[:, :, token_end:] = source_video[:, :, token_end:].to(device=video.device)
+
+    if preserve_audio:
+        audio = source_audio.to(device=rendered_audio.device)
+    else:
+        audio = rendered_audio.clone()
+        if audio_start:
+            audio[..., :audio_start] = source_audio[..., :audio_start].to(device=audio.device)
+        if audio_end < int(audio.shape[-1]):
+            audio[..., audio_end:] = source_audio[..., audio_end:].to(device=audio.device)
+
+    video_transfer = 0
+    if source_video.device != rendered_video.device:
+        video_transfer = (
+            int(source_video.shape[0] * source_video.shape[1] * source_video.shape[3] * source_video.shape[4])
+            * (token_start + int(source_video.shape[2]) - token_end)
+            * int(source_video.element_size())
+        )
+    audio_transfer = 0
+    if source_audio.device != rendered_audio.device:
+        audio_count = (
+            int(source_audio.numel()) if preserve_audio else
+            int(source_audio.shape[0] * source_audio.shape[1] * source_audio.shape[2])
+            * (audio_start + int(source_audio.shape[-1]) - audio_end)
+        )
+        audio_transfer = audio_count * int(source_audio.element_size())
+    report: dict[str, object] = {
+        "snapped_range": [int(snapped_start), int(snapped_end)],
+        "video_token_range": [int(token_start), int(token_end)],
+        "audio_token_range": [int(audio_start), int(audio_end)],
+        "preserve_audio": bool(preserve_audio),
+        "source_device_transfer_bytes": int(video_transfer + audio_transfer),
+    }
+    return video, audio, report
 
 
 def _validate_video(video: torch.Tensor) -> None:

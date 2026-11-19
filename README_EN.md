@@ -4,28 +4,17 @@ Production-oriented ComfyUI nodes for **MiniMax H3** long-form video/audio gener
 
 ![screenshot](ex.png)
 
-**Current release: 0.6.63.**
+**Current release: 0.6.69.**
 
-## What changed since public v0.6.50
+## What changed since public v0.6.63
 
-- **True selective regeneration:** clip-only rerenders sample only the requested GENERATED clip when cached seam contracts remain valid; From Here samples only the dependent suffix.
-- **Immutable MEDIA blocks:** imported video can sit directly on the BASE timeline and remain outside diffusion.
-- **Native continuation:** GENERATED parents reuse saved TAKE latent state; external MEDIA parents encode only the required tail and attach it as a native frame-0 H3 keyframe.
-- **O(1)-style append:** adding the next clip reuses prior TAKE/cache state instead of rebuilding the whole timeline.
-- **Quantized AUTO routing:** INT8/W4A8/NVFP4 policy uses packed physical storage and activation headroom rather than BF16-equivalent logical size.
-- **Windows/AIMDO safety:** large checkpoints remain file-backed through ComfyUI `ModelMMAP` / `TensorFileSlice`; no eager full-model RAM load.
-- **Mixed AV assembly:** original MEDIA is preserved outside VideoVAE; mono/stereo timeline audio is assembled with an explicit channel contract.
-- **RefMod extraction controls that reach the encoder:** pre-VAE resolution, visual-token cap, grid, video frame count, voice duration and Compressed refinement are applied in the encoder path.
-- **MultiClip Refine without a cold seam:** Stage 2 inherits the previous clip's refined overlap; Stage-1 audio stays unchanged.
-- **More predictable Director editing:** clip-owned cut markers, distinct trim/cut actions, real-gap controls and Fit after any timeline scroll position.
-- **Lower retained preview memory:** Director releases old video strips and TAKE thumbnails and bounds decoded previews with an LRU.
-- **Sampler presets:** create, overwrite and delete workflow-persisted profiles; the status line marks settings changed since selection. Seed stays independent.
-- **More reliable renders:** Character RefMods retain identity authority across MultiClip, and motion_repair persists in saved workflows.
-- **Per-clip RUN control:** disable individual clips and merge adjacent approved clips into a reversible timeline block while keeping their original TAKEs.
-- **Shared Camera presets:** create and edit them from any Camera clip. The library is saved in the Director workflow and is available to every Camera clip, including clips created later.
-- **Safe conditioning copies:** an absent optional branch no longer crashes clip regeneration after an AUDIO role change.
+- **Incremental MultiClip:** keep completed clips frozen and append new enabled clips without requiring old TAKEs for the new targets. Cache failures stop the run instead of triggering an implicit full render.
+- **Range and Bridge:** rerender a CUT-marked range of a generated clip, or render a bridge between compatible generated neighbors. A bridge remains pending until accepted or discarded.
+- **ComfyUI compatibility:** frames-aware H3 VAE versions retain their native tiling and frame slicing; the streamed H3 output head is restored after the LongMedia forward.
+- **Audio and cleanup:** Director lip sync retains the full Audio 1 timeline, including silent openings. Sampler cleanup handles the models acquired for the run and preserves render errors.
+- **Sampler and canvas:** View stays above the inputs, presets have separate New, Overwrite and Delete buttons, and Director canvas updates are coalesced to reduce editor work.
 
-See [0.6.63 Release Notes](docs/RELEASE_NOTES_0.6.63_EN.md).
+See the cumulative [0.6.69 Release Notes](docs/RELEASE_NOTES_0.6.69_EN.md) for details and verification limits.
 
 ## Documentation
 
@@ -112,7 +101,7 @@ longest_input
 
 See [Operating Modes](docs/MODES_GUIDE_EN.md).
 
-## LongMedia Director 0.6.63
+## LongMedia Director 0.6.69
 
 Director is the unified authoring surface for MAIN timing, prompts, WHO & WHAT media, REF/FIRST/LAST roles, cameras, temporal embeddings, audio policy, resolution policy, Program Monitor review and TAKE management.
 

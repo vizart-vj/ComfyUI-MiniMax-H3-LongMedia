@@ -26,7 +26,7 @@ vm.runInNewContext(
         watchChanges: lmInstallSamplerPresetChangeWatcher,
         installUi: lmInstallSamplerPresets,
         installPersistence: lmInstallNamedWidgetPersistence,
-        installSafeSerialize: lmInstallPresentationSafeSerialize,
+        refreshUi: lmRefreshSampler,
     };`,
     context,
     { filename: sourcePath },
@@ -58,20 +58,19 @@ assert.ok(created, "a named preset is created");
 assert.equal(node.properties.lmSamplerPresetSelectedV060, created.id);
 assert.equal(hooks.modifiedCount(node, created), 0);
 node.__lmSamplerPresetUiV060 = {
-    select: { value: "" },
-    status: { textContent: "", style: {} },
-    overwrite: { disabled: false, style: {} },
-    remove: { disabled: false, style: {} },
+    select: { value: "", options: {} },
+    overwrite: {},
+    remove: {},
 };
 hooks.watchChanges(node);
 hooks.updateStatus(node);
-assert.match(node.__lmSamplerPresetUiV060.status.textContent, /Saved/);
+assert.match(node.__lmSamplerPresetUiV060.select.label, /Saved/);
 
 node.widgets.find((widget) => widget.name === "memory_mode").value = "normal";
 node.widgets.find((widget) => widget.name === "seed").value = 18;
 assert.equal(hooks.modifiedCount(node, created), 1, "status detects setting changes but ignores seed");
 node.widgets.find((widget) => widget.name === "memory_mode").callback();
-assert.match(node.__lmSamplerPresetUiV060.status.textContent, /Modified \(1 setting\)/);
+assert.match(node.__lmSamplerPresetUiV060.select.label, /Modified \(1 setting\)/);
 
 const overwritten = hooks.overwrite(node, created.id);
 assert.equal(overwritten.name, "Low VRAM · Refine");
@@ -96,56 +95,55 @@ hooks.installPersistence(persistentNode);
 const serialized = persistentNode.serialize();
 assert.equal(serialized.properties.lmSamplerPresetsV060[0].name, "Fast", "presets travel with the saved workflow");
 
-function makeElement() {
-    return {
-        style: {}, attributes: {}, children: [], value: "", textContent: "", disabled: false,
-        append(...items) { this.children.push(...items); },
-        replaceChildren(...items) { this.children = [...items]; },
-        setAttribute(name, value) { this.attributes[name] = value; },
-    };
-}
-context.document = { createElement: () => makeElement() };
 context.prompt = () => "Portable preset";
 context.confirm = () => true;
 const uiNode = {
     widgets: Object.entries(values).map(([name, value]) => ({ name, value })),
     properties: {},
-    addDOMWidget(name, type, element, options) {
-        const widget = { name, type };
-        if (name === "__lm_sampler_presets_v060") {
-            this.presetWidgetElement = element;
-            this.presetWidgetOptions = options;
-        }
+    addWidget(type, name, value, callback, options) {
+        const widget = { type, name, value, callback, options };
         this.widgets.push(widget);
         return widget;
     },
+    addDOMWidget() {
+        assert.fail("Sampler presets must stay inside the canvas layout");
+    },
 };
 hooks.installUi(uiNode);
-assert.equal(uiNode.widgets[0].name, "__lm_sampler_presets_v060", "preset controls are first in widget order, below node inputs");
-assert.equal(uiNode.presetWidgetOptions.getMinHeight(), 58, "preset widget reserves space for its status and separator");
-assert.equal(uiNode.presetWidgetOptions.getMaxHeight(), 58);
-assert.match(uiNode.presetWidgetElement.style.cssText, /border-bottom:1px solid/, "preset panel has a visible divider below the status");
+assert.equal(uiNode.widgets[0].name, "__lm_sampler_presets_v060");
+assert.deepEqual(uiNode.widgets.slice(1, 4).map((widget) => widget.type), ["button", "button", "button"]);
+assert.deepEqual(uiNode.widgets.slice(1, 4).map((widget) => widget.label), ["New preset", "Overwrite preset", "Delete preset"]);
 const ui = uiNode.__lmSamplerPresetUiV060;
-assert.match(ui.status.textContent, /No preset selected/);
-ui.create.onclick({ stopPropagation() {} });
+assert.equal(ui.select.type, "combo");
+assert.equal(ui.overwrite.disabled, true);
+assert.equal(ui.remove.disabled, true);
+ui.overwrite.callback();
+ui.remove.callback();
+assert.equal(uiNode.properties.lmSamplerPresetsV060.length, 0);
+ui.create.callback();
 assert.equal(uiNode.properties.lmSamplerPresetsV060.length, 1, "New creates a workflow-persisted preset");
-assert.match(ui.status.textContent, /Portable preset · Saved/);
+assert.match(ui.select.label, /Saved/);
+assert.equal(ui.overwrite.disabled, false);
+assert.equal(ui.remove.disabled, false);
 uiNode.widgets.find((widget) => widget.name === "memory_mode").value = "normal";
 uiNode.widgets.find((widget) => widget.name === "memory_mode").callback();
-assert.match(ui.status.textContent, /Modified \(1 setting\)/, "widget changes update the visible status");
+assert.match(ui.select.label, /Modified/);
 const seedBeforeApply = uiNode.widgets.find((widget) => widget.name === "seed").value;
-ui.select.value = uiNode.properties.lmSamplerPresetSelectedV060;
-ui.select.onchange();
-assert.equal(uiNode.widgets.find((widget) => widget.name === "memory_mode").value, "low_vram", "selecting a preset applies its settings");
-assert.equal(uiNode.widgets.find((widget) => widget.name === "seed").value, seedBeforeApply, "applying a preset never changes seed");
-assert.match(ui.status.textContent, /Portable preset · Saved/);
+ui.select.callback("Portable preset");
+assert.equal(uiNode.widgets.find((widget) => widget.name === "memory_mode").value, "low_vram");
+assert.equal(uiNode.widgets.find((widget) => widget.name === "seed").value, seedBeforeApply);
 uiNode.widgets.find((widget) => widget.name === "memory_mode").value = "normal";
-uiNode.widgets.find((widget) => widget.name === "memory_mode").callback();
-ui.overwrite.onclick({ stopPropagation() {} });
-assert.match(ui.status.textContent, /Portable preset · Saved/, "Overwrite saves the current settings");
-ui.remove.onclick({ stopPropagation() {} });
-assert.equal(uiNode.properties.lmSamplerPresetsV060.length, 0, "Delete removes the selected preset");
-assert.match(ui.status.textContent, /No preset selected/);
+ui.overwrite.callback();
+assert.match(ui.select.label, /Saved/);
+context.confirm = () => false;
+ui.remove.callback();
+assert.equal(uiNode.properties.lmSamplerPresetsV060.length, 1, "cancelling keeps the preset");
+context.confirm = () => true;
+ui.remove.callback();
+assert.equal(uiNode.properties.lmSamplerPresetsV060.length, 0);
+assert.equal(ui.select.label, "Preset");
+assert.equal(ui.overwrite.disabled, true);
+assert.equal(ui.remove.disabled, true);
 
 uiNode.properties.lmSamplerPresetsV060 = [{ id: "persist-me", name: "Persistent", values: { memory_mode: "auto" } }];
 uiNode.widgets.push({ name: "__lm_group_test", __lmGroupHeader: true, value: undefined });
@@ -156,9 +154,67 @@ uiNode.serialize = function () {
     };
 };
 hooks.installPersistence(uiNode);
-hooks.installSafeSerialize(uiNode);
 const uiSaved = uiNode.serialize();
 assert.equal(uiSaved.widgets_values.length, Object.keys(values).length, "presentation-only preset controls do not shift positional widget values");
 assert.equal(uiSaved.properties.lmSamplerPresetsV060[0].name, "Persistent", "preset definitions are saved alongside widget values");
+
+const samplerWidgets = Object.entries(values).map(([name, value]) => ({ name, value }));
+const sampler = {
+    ...uiNode,
+    properties: { lmSamplerUiLevel: "advanced" },
+    get widgets() { return samplerWidgets; },
+    set widgets(next) {
+        // Current ComfyUI exposes one mutation view for the life of a node.
+        samplerWidgets.splice(0, samplerWidgets.length, ...next);
+    },
+    serialize() {
+        const serializable = this.widgets.filter((widget) => widget.serialize !== false);
+        return {
+            widgets_values: serializable.map((widget) => widget.value),
+            widgets_values_named: Object.fromEntries(serializable.map((widget) => [widget.name, widget.value])),
+            properties: { ...this.properties },
+        };
+    },
+};
+for (const key of Object.keys(sampler)) {
+    if (key.startsWith("__lm")) delete sampler[key];
+}
+hooks.refreshUi(sampler);
+const view = sampler.widgets[0];
+assert.equal(view.name, "__lm_sampler_ui_level", "View is the first row in Sampler");
+assert.equal(view.type, "combo", "View uses the same layout as model widgets");
+assert.equal(view.value, "Advanced", "View reflects the saved workflow property");
+const beforeSave = [...sampler.widgets];
+assert.equal(sampler.serialize().widgets_values.length, Object.keys(values).length, "UI controls are excluded even on frontends without group headers");
+assert.deepEqual(sampler.widgets, beforeSave, "saving cannot remove widgets from ComfyUI's live mutation view");
+assert.equal(sampler.properties.__lm_named_widget_state_v040, undefined, "saving leaves live node properties alone");
+view.callback("Debug");
+assert.equal(sampler.properties.lmSamplerUiLevel, "debug");
+sampler.properties = {};
+sampler.widgets.push(sampler.widgets.shift());
+hooks.refreshUi(sampler);
+assert.equal(sampler.widgets[0], view, "an existing View is re-anchored after reset");
+assert.equal(view.value, "Basic");
+sampler.widgets = Object.entries(values).map(([name, value]) => ({ name, value }));
+hooks.refreshUi(sampler);
+assert.equal(sampler.widgets[0].name, "__lm_sampler_ui_level", "replaced widgets restore View once");
+assert.equal(sampler.widgets[0].value, "Basic");
+assert.equal(sampler.widgets.filter((widget) => widget.name.startsWith("__lm_")).length, 5);
+assert.equal(sampler.serialize().widgets_values[0], values.seed, "backend input order survives rebuilding the canvas rows");
+
+const legacy = {
+    widgets: [{name: "first", value: 17}, {name: "second", value: 23}],
+    serialize() {
+        const widgets_values = [];
+        this.widgets.forEach((widget, index) => {
+            if (widget.serialize !== false) widgets_values[index] = widget.value;
+        });
+        return {widgets_values};
+    },
+};
+hooks.installPersistence(legacy);
+legacy.widgets.reverse();
+legacy.widgets.unshift({name: "__lm_header", serialize: false, __lmGroupHeader: true});
+assert.deepEqual(Array.from(legacy.serialize().widgets_values), [17, 23], "legacy sparse serialization retains backend order");
 
 console.log("Sampler preset state tests passed.");
