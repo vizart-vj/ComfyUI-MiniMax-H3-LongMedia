@@ -1,6 +1,6 @@
 # ComfyUI-MiniMax-H3-LongMedia Documentation — English
 
-This release ships only current user-facing documentation. Every topic has an English (`*_EN.md`) and Russian (`*_RU.md`) version.
+The main guides and current release notes are provided in English (`*_EN.md`) and Russian (`*_RU.md`). Versioned release notes and explicitly marked development/verification notes also preserve historical context.
 
 ## Start here
 
@@ -27,6 +27,9 @@ This release ships only current user-facing documentation. Every topic has an En
 
 ## Release
 
+- [0.6.69 Release Notes — cumulative changes since 0.6.63](RELEASE_NOTES_0.6.69_EN.md)
+- [0.6.66 verification notes](RELEASE_NOTES_0.6.66_EN.md)
+- [0.6.64 Release Notes](RELEASE_NOTES_0.6.64_EN.md)
 - [0.6.63 Release Notes](RELEASE_NOTES_0.6.63_EN.md)
 - [0.6.62 Release Notes](RELEASE_NOTES_0.6.62_EN.md)
 - [0.6.61 Release Notes](RELEASE_NOTES_0.6.61_EN.md)
@@ -34,4 +37,4 @@ This release ships only current user-facing documentation. Every topic has an En
 - [0.6.54 Release Notes](RELEASE_NOTES_0.6.54_EN.md)
 - [0.6.40 Release Notes](RELEASE_NOTES_0.6.40_EN.md)
 
-Historical development notes are consolidated in the root [CHANGELOG](../CHANGELOG.md) instead of being shipped as dozens of separate release-note files.
+The root [CHANGELOG](../CHANGELOG.md) records the intermediate version history.

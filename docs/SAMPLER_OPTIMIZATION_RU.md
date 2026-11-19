@@ -1,6 +1,6 @@
 # Sampler, VRAM и производительность
 
-Рекомендации для текущей ветки LongMedia 0.6.63.
+Рекомендации для LongMedia 0.6.69. Реальные скорость и расход памяти зависят от модели, версии ComfyUI, attention backend и оборудования.
 
 ## Production default
 

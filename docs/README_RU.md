@@ -1,6 +1,6 @@
 # Документация ComfyUI-MiniMax-H3-LongMedia — Русский
 
-В релизе оставлена только актуальная пользовательская документация. Для каждой темы есть английская (`*_EN.md`) и русская (`*_RU.md`) версия.
+Основные руководства и описание текущего релиза доступны на английском (`*_EN.md`) и русском (`*_RU.md`). Версионные release notes и специально помеченные заметки разработки/проверки сохраняют историю.
 
 ## С чего начать
 
@@ -27,6 +27,9 @@
 
 ## Релиз
 
+- [Release Notes 0.6.69 — изменения относительно 0.6.63](RELEASE_NOTES_0.6.69_RU.md)
+- [Заметки о проверке 0.6.66](RELEASE_NOTES_0.6.66_RU.md)
+- [Release Notes 0.6.64](RELEASE_NOTES_0.6.64_RU.md)
 - [Release Notes 0.6.63](RELEASE_NOTES_0.6.63_RU.md)
 - [Release Notes 0.6.62](RELEASE_NOTES_0.6.62_RU.md)
 - [Release Notes 0.6.61](RELEASE_NOTES_0.6.61_RU.md)
@@ -34,4 +37,4 @@
 - [Release Notes 0.6.54](RELEASE_NOTES_0.6.54_RU.md)
 - [Release Notes 0.6.40](RELEASE_NOTES_0.6.40_RU.md)
 
-История разработки сведена в корневой [CHANGELOG](../CHANGELOG.md), а не разложена по десяткам отдельных release-note файлов.
+Промежуточная история версий приведена в корневом [CHANGELOG](../CHANGELOG.md).

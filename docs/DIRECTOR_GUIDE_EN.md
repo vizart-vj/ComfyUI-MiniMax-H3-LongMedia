@@ -1,4 +1,4 @@
-# LongMedia Director 0.6.63 — Complete Guide
+# LongMedia Director 0.6.69 — Complete Guide
 
 LongMedia Director is the timeline-oriented authoring surface for **MiniMax H3 • LongMedia**. It combines shot timing, semantic references, FIRST/LAST frame anchors, cameras, temporal embeddings, audio policy, preview/review and TAKE management in one Director document.
 
@@ -286,14 +286,16 @@ Key actions include:
 - **Regenerate Clip** — rerender the selected clip when both seam constraints can be preserved safely;
 - **Reroll Seed** — change the selected clip seed and use the selective path;
 - **Regenerate From Here** — keep the validated prefix and regenerate the selected clip plus dependent suffix;
+- **CUT range** — rerender a selected interval of a cached GENERATED clip, with an option to keep its audio;
+- **Bridge** — generate a transition between compatible GENERATED neighbors and review the pending result before accepting it;
 - **Recast / source replacement tools** — rebuild the required native-reference branch while preserving unaffected timeline state where the dependency contract allows it.
 
-If exact seam locking is unsafe, LongMedia expands the invalidated region instead of pretending that an incompatible cached suffix is safe.
+For clip/from-here regeneration, LongMedia can expand the invalidated region when exact seam locking is unsafe. Range and Bridge instead stop if their required source or boundary contracts cannot be met.
 
 ### Choosing clips for ordinary RUN and merging
 
 - The RUN switch appears on hover and is also available in the context menu and clip settings. A disabled GENERATED clip keeps its active TAKE and stays on the timeline.
-- Partial ordinary RUN is available in MultiClip. Every GENERATED clip needs an active TAKE with matching geometry; otherwise execution stops before sampling. This protects the duration and seams of disabled clips.
+- Partial ordinary RUN is available in MultiClip. Disabled GENERATED clips need compatible active TAKEs for replay. A newly enabled suffix does not need a previous TAKE; cached boundaries needed by the requested run are validated before sampling.
 - Shift-click selects a contiguous range; Ctrl/Cmd-click toggles individual clips. Only adjacent GENERATED clips with active TAKEs can be merged. The reversible group displays as one timeline block and keeps its original TAKEs; its inspector keeps per-component RUN switches. **Restore original clip boundaries** or Undo restores the previous boundaries.
 
 See [Director Selective Regeneration](DIRECTOR_REGENERATION_GUIDE_EN.md).

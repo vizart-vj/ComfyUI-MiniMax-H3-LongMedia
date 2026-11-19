@@ -1,6 +1,6 @@
 # LongMedia Architecture
 
-This document describes the current LongMedia 0.6.63 runtime architecture. Public control names and internal identifiers are kept exactly as they appear in the UI/code.
+This document describes the LongMedia 0.6.69 runtime architecture. Public control names and internal identifiers are kept exactly as they appear in the UI/code.
 
 ## Semantic Setup Contract
 
@@ -153,6 +153,15 @@ Current mechanisms include:
 - selective conditioning scope that skips redundant TE/control encoding for cached Director clips and releases TE residency before diffusion sampling without aggressive Windows working-set trimming.
 
 On constrained native INT8 systems, speculative dynamic-VBAR prefetch is gated so the next block does not reserve a competing transfer destination while the current activation set is live.
+
+### Execution and Decode ownership
+
+- The streamed H3 final output head is installed for the owning LongMedia forward and restored afterward, including on an exception. The shared model's stock head is not left patched for subsequent workflows.
+- Sampler cleanup uses the control branches acquired during preparation and restores the guider and temporary hooks. The log separates preparation, cleanup, TAKE save and Decode stages.
+- A frames-aware ComfyUI H3 VideoVAE keeps its native frame slicing, tile batching and blending. LongMedia's batching adapter is used only with compatible older H3 VAE interfaces; see [Decode parameters](PARAMETER_REFERENCE_EN.md#decode).
+- Director TAKE filesystem work runs outside the HTTP event loop. Range and Bridge retain source-revision and boundary contracts; a bridge result remains pending until accepted. See [Selective Regeneration](DIRECTOR_REGENERATION_GUIDE_EN.md).
+
+These ownership changes do not establish a root cause or a complete fix for a Windows process that remains listed after the ComfyUI terminal closes.
 
 ## Model Compatibility Layers
 

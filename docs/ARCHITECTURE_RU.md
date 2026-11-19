@@ -1,6 +1,6 @@
 # Архитектура LongMedia
 
-Документ описывает текущую runtime-архитектуру LongMedia. Имена параметров и внутренних идентификаторов оставлены на английском, чтобы они совпадали с UI и кодом.
+Документ описывает runtime-архитектуру LongMedia 0.6.69. Имена параметров и внутренних идентификаторов оставлены на английском, чтобы они совпадали с UI и кодом.
 
 ## Семантический контракт Setup
 
@@ -153,6 +153,15 @@ LongMedia координирует lifetime activations с текущими Comf
 - selective conditioning scope, который пропускает повторный TE/control encode cached Director clips и освобождает TE residency до diffusion sampling без aggressive Windows working-set trimming.
 
 На constrained native INT8 системах speculative dynamic-VBAR prefetch ограничивается, чтобы следующий block не резервировал competing transfer destination, пока текущие activations ещё живы.
+
+### Владение состоянием выполнения и Decode
+
+- Потоковый final output head H3 устанавливается на время принадлежащего LongMedia forward и затем восстанавливается, в том числе при исключении. Штатный head общей модели не остаётся подменённым для следующих workflow.
+- Sampler очищает control branches, полученные при подготовке, и восстанавливает guider и временные hooks. В логе отдельно отмечены preparation, cleanup, сохранение TAKE и Decode.
+- Новая frames-aware H3 VideoVAE ComfyUI сохраняет собственную нарезку кадров, batching и склейку тайлов. Адаптер LongMedia применяется только к совместимому старому интерфейсу H3 VAE; см. [параметры Decode](PARAMETER_REFERENCE_RU.md#decode).
+- Операции с файлами TAKE выполняются вне HTTP event loop. Range и Bridge сохраняют контракты исходных ревизий и границ; результат Bridge остаётся ожидающим до принятия. Подробнее — в [руководстве по regeneration](DIRECTOR_REGENERATION_GUIDE_RU.md).
+
+Эти изменения не устанавливают первопричину и не подтверждают полное исправление ситуации, когда Windows продолжает показывать процесс после закрытия терминала ComfyUI.
 
 ## Совместимость моделей
 

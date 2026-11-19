@@ -1,6 +1,6 @@
 # Sampler, VRAM and Performance Guide
 
-These recommendations describe the current 0.6.63 line.
+These recommendations describe LongMedia 0.6.69. Actual speed and memory use depend on the model, ComfyUI version, attention backend, and hardware.
 
 ## Production Default
 

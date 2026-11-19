@@ -1,6 +1,6 @@
-# LongMedia 0.6.63 Parameter Reference
+# LongMedia 0.6.69 Parameter Reference
 
-This reference is checked against Python INPUT_TYPES and the frontend shipped in the 0.6.63 ZIP build. “Internal” means a serialized workflow field that users should not edit manually. Controls are conditional on mode; a hidden value may remain in an older workflow for compatibility.
+This reference describes the 0.6.69 node inputs and frontend. “Internal” means a serialized workflow field that users should not edit manually. Controls are conditional on mode; a hidden value may remain in an older workflow for compatibility.
 
 ## Setup
 
@@ -149,9 +149,9 @@ Cameras: Auto Sync Planner is enabled by default and keeps camera-card count ali
 
 ## Sampler
 
-Requires initial_av, long_media_plan, guider, sampler and sigmas. Sampler Mode=auto and Memory Mode=auto are recommended. Basic UI shows common controls; Advanced adds attention/chunk tuning; Debug reveals VRAM guards and internal knobs. Legacy refine_add_noise/refine_seed/refine_steps are serialized for old workflows but do not affect current behavior.
+Requires initial_av, long_media_plan, guider, sampler and sigmas. Sampler Mode=auto and Memory Mode=auto are recommended. The `View` selector at the top chooses Basic for common controls, Advanced for attention/chunk tuning, or Debug for VRAM guards and internal knobs. Legacy refine_add_noise/refine_seed/refine_steps are serialized for old workflows but do not affect current behavior.
 
-Sampler presets appear at the top of the node. `New` captures the current values, `Overwrite` saves the current values into the selected preset, and `Delete` removes it. The preset list and selection are stored in the workflow on that node. A preset covers 31 active widget settings; seed remains independent for each run, and input sockets and hidden legacy fields are excluded. The status line shows `Modified` and the number of changed settings when values differ from the selected preset.
+Sampler presets appear below `View`. `New preset` captures the current values; `Overwrite preset` and `Delete preset` operate on the selected preset and are unavailable until one is selected. The preset list and selection are stored in the workflow on that node. A preset covers 31 widget settings; seed remains independent for each run, and input sockets and hidden legacy fields are excluded. The status shows `Modified` and the number of changed settings when values differ from the selected preset.
 
 | Parameter | Default / range | Purpose |
 |---|---|---|
@@ -197,13 +197,13 @@ VRAM guard controls are in Debug. They do not usually need tuning for standard r
 |---|---|---|
 | final_av | LATENT, required | Final audio/video latent sequence. |
 | long_media_plan | LONG_MEDIA_PLAN, required | Decode plan from Setup. |
-| enable_tiling | true | Enables spatial VAE tile decode. |
-| tile_size | 256; 32–2048 px, step 32 | Spatial VAE tile size. |
-| width | 512; 32–8192 px, step 32 | Target decode width; normally supplied by Setup's plan. |
-| temporal_size | 32; 1–256 frames | Temporal decode window size. |
-| batch_size | 1; 1–16 | H3 VAE tile parallelism. 1 = Auto; on OOM the batch is reduced automatically. |
+| enable_tiling | true | Selects tiled versus regular decode for other VAEs. H3 VideoVAE uses its own tiled path regardless of this switch. |
+| tile_size | 256; 32–2048 px, step 32 | Spatial tile size for other VAEs. H3 VideoVAE uses its native tile geometry. |
+| width | 512; 32–8192 px, step 32 | Legacy compatibility input; the current Decode does not use it to resize the output. Video geometry comes from the incoming latent and plan. |
+| temporal_size | 32; 1–256 frames | Temporal decode window for other VAEs. H3 VideoVAE uses its native temporal chunks. |
+| batch_size | 1; 1–16 | Tile parallelism for legacy H3 VAEs: 1 selects Auto and an OOM can retry smaller batches. Frames-aware H3 VAEs manage their own batching and ignore this control; other VAEs also ignore it. |
 | color_match_strength | 0; 0–1, step 0.01 | 0 disables. Higher values pull frame color statistics toward frame 0 to reduce drift at loop/seam boundaries. |
 
 ## Source build and scope
 
-This edition describes VERSION 0.6.63 from the ZIP build, not a neighboring working copy or installed custom_nodes folder. Dynamic ranges and visibility rules were checked against INPUT_TYPES, node_facade.js and longmedia_director.js in that build.
+This edition describes LongMedia 0.6.69. Input schemas were compared with the 0.6.63 baseline; the Decode behavior and Sampler presentation above reflect the 0.6.69 implementation. Visibility also depends on the current mode and ComfyUI frontend.
